@@ -9,7 +9,7 @@ Runs entirely on a local [kind](https://kind.sigs.k8s.io/) cluster. No paid clou
 services, no required AI model. See [DEMO_SCRIPT.md](docs/DEMO_SCRIPT.md) for a
 guided walkthrough and [TODO.md](TODO.md) for exactly what is and isn't built yet.
 
-## Status: Milestones 1-11 of 11 complete
+## Status: Milestones 1-11 (troubleshooting) + 12-18 (resource optimization) complete
 
 The full **observe -> diagnose -> persist -> expose** pipeline is implemented,
 tested, and verified end-to-end against a real kind cluster for 13 of the 14
@@ -34,6 +34,24 @@ milestone plan and current limitations (nothing yet triggers remediation from
 the live diagnosis pipeline without a human or an explicit policy-engine
 decision in the loop).
 
+A second, read-only **resource optimization engine** sits alongside the
+troubleshooting pipeline above, sharing its cluster client, SQLite file, and
+`/metrics` endpoint without duplicating any of it: a workload inventory with
+correct owner-reference resolution (Pod -> ReplicaSet -> Deployment,
+StatefulSet/DaemonSet/Job, or standalone Pod), current usage from the
+Kubernetes Metrics API (with an optional Prometheus upgrade for real
+historical percentiles), and deterministic CPU/memory right-sizing --
+percentile-based for CPU, peak-based for memory, never from a single sample,
+never silently skipping an unhealthy workload (it's flagged instead). An open
+troubleshooting incident on the same workload blocks a proposed number and
+links back to it. There is deliberately no apply/execute endpoint: every
+recommendation is a reviewable record (`new -> reviewed/approved/rejected ->
+expired`), and analysis never mutates the cluster -- confirmed live with an
+HTTP-transport-level check that an entire `analyze()` pass issues nothing but
+GET requests. See [RESOURCE_OPTIMIZATION_DESIGN.md](docs/RESOURCE_OPTIMIZATION_DESIGN.md)
+for the full design and TODO.md's Milestones 12-18 for the build and
+live-verification history.
+
 Every stage above is exported as Prometheus metrics with bounded-cardinality
 labels (category/action_type/reason/component, never incident IDs or pod
 names) at `GET /metrics`. [observability/](observability/) has a scrape config
@@ -43,14 +61,16 @@ and an importable Grafana dashboard, both verified against the real server's
 was caught; see TODO.md's Known limitation #18.
 
 All 9 lab failure scenarios (every diagnostic category this project implements,
-one dedicated manifest each) are built and live-verified -- see
-[FAILURE_LAB.md](docs/FAILURE_LAB.md). The test suite now includes integration
-and e2e tests that exercise the real cluster directly (RBAC boundary
-enforcement, watch resync, UID-based dedup across a delete/recreate, restart
-recovery, concurrent remediation requests, and the full propose/approve/
-execute/verify lifecycle against a real Deployment) -- `./scripts/test.sh --all`
-runs all 257 tests (234 unit + 23 integration/e2e); see
-[TESTING.md](docs/TESTING.md).
+one dedicated manifest each) plus 2 resource-optimization scenarios
+(oversized requests, missing requests entirely) are built and live-verified
+-- see [FAILURE_LAB.md](docs/FAILURE_LAB.md). The test suite now includes
+integration and e2e tests that exercise the real cluster directly (RBAC
+boundary enforcement, watch resync, UID-based dedup across a delete/recreate,
+restart recovery, concurrent remediation requests, the full propose/approve/
+execute/verify lifecycle against a real Deployment, and the optimization
+engine's own read-only guarantee and real-usage-data right-sizing) --
+`./scripts/test.sh --all` runs all 442 tests (410 unit + 32 integration/e2e);
+see [TESTING.md](docs/TESTING.md).
 
 Optional AI summarization (`kubesentinel explain <incident-id>`, or
 `GET /incidents/{id}/ai-summary`) can turn an incident's existing diagnosis
@@ -72,6 +92,25 @@ PVCs, Nodes, EndpointSlices)                                                engi
                                                       PVC/Node/Service)                v
                                                             |                 Policy engine -> Remediation
                                                             v                 executor -> Recovery verifier
+                                            SQLite persistence  <-->  FastAPI + CLI + /metrics
+```
+
+A second, read-only pipeline runs alongside it, sharing only the SQLite file
+and (optionally) the incident manager's own repository for the `ACTIVE_INCIDENT`
+check -- never a second cluster watch loop or a parallel incident concept:
+
+```
+Workload inventory (owner-reference   -->  Metrics API / Prometheus  -->  Deterministic
+resolution: Pod -> ReplicaSet ->            usage providers                analyzer (CPU/memory
+Deployment, StatefulSet/DaemonSet/Job)                                     right-sizing, pressure,
+                                                                            data-quality)
+                                                                                 |
+                                                                                 v
+                                                      Safety checks (flags unhealthy/system/
+                                                      conservative workloads + ACTIVE_INCIDENT,
+                                                      never silently drops a row)
+                                                            |
+                                                            v
                                             SQLite persistence  <-->  FastAPI + CLI + /metrics
 ```
 
@@ -108,6 +147,20 @@ surfaces expose the same `plan -> approve -> execute -> reject` lifecycle:
 .venv/bin/kubesentinel plan <incident-id> RESTART_DEPLOYMENT --rationale "manual override"
 .venv/bin/kubesentinel approve <incident-id> <action-id> --approved-by "<your name>"
 .venv/bin/kubesentinel execute <incident-id> <action-id>
+```
+
+The resource optimization engine needs no extra setup to run -- without
+metrics-server installed, it still produces honest, non-usage-based
+recommendations (missing requests/limits, scheduling pressure). To see
+CPU/memory right-sizing with real usage data too, install metrics-server
+first (`./lab/install-metrics-server.sh`, optional, kind-specific):
+
+```bash
+.venv/bin/kubesentinel optimize --namespace kubesentinel-lab
+.venv/bin/kubesentinel recommendations
+.venv/bin/kubesentinel recommendation <recommendation-id>
+.venv/bin/kubesentinel optimization-summary
+.venv/bin/kubesentinel review-recommendation <recommendation-id> APPROVED --reviewed-by "<your name>"
 ```
 
 AI summarization is off by default (works with no AI at all). To try it:
@@ -147,28 +200,34 @@ already cached locally. This bit us directly while building the lab scenarios; s
 
 ```
 src/kubesentinel/
-  models/        Pydantic models: Evidence, Hypothesis, DiagnosisResult, Incident, Action
+  models/        Pydantic models: Evidence, Hypothesis, DiagnosisResult, Incident, Action,
+                 and the optimization engine's WorkloadSnapshot/ResourceRecommendation
   observer/      Kubernetes client setup, watch loops with reconnect/resync, evidence extraction
   diagnostics/   Deterministic rule-based diagnostic engine + individual rules
   incidents/     Incident lifecycle: dedup by resource UID, health classification, severity
-  persistence/   Repository interface + SQLite implementation
-  api/           FastAPI app (health/ready/incidents/evidence/actions/metrics)
-  cli/           Typer CLI mirroring the API for one-shot cluster inspection and remediation
+  optimization/  Read-only resource right-sizing: inventory, metrics providers, analyzer, safety
+  persistence/   Repository interfaces + SQLite implementations (incidents, optimization)
+  api/           FastAPI app (health/ready/incidents/evidence/actions/metrics/optimization)
+  cli/           Typer CLI mirroring the API for one-shot cluster inspection, remediation, and optimization
   metrics/       Prometheus metric definitions
   policy/        Policy engine: OBSERVE/APPROVAL_REQUIRED/CONTROLLED_AUTO decisions
   remediation/   Remediation executor + service (propose/approve/execute/reject/dry_run)
   verification/  Recovery verifier: polls the real cluster, never trusts an action's own success
   ai/            Optional AI summarization (local Ollama only, advisory, no path to any decision)
-lab/             kind cluster config, namespace, failure scenario manifests, scripts
+lab/             kind cluster config, namespace, failure scenario manifests, scripts,
+                 optional metrics-server installer
 rbac/            Least-privilege Role/RoleBinding/ServiceAccount for what's implemented today
+                 (observer, remediator, and optimizer Roles, each independently auditable)
 observability/   Prometheus scrape config + importable Grafana dashboard
 tests/unit/      Deterministic unit tests, no cluster required
-docs/            Architecture, diagnostic rules, RBAC/threat model, failure lab, etc.
+docs/            Architecture, diagnostic rules, RBAC/threat model, failure lab, resource
+                 optimization design, etc.
 ```
 
 ## Documentation
 
 - [ARCHITECTURE.md](docs/ARCHITECTURE.md) -- component design and data flow
+- [RESOURCE_OPTIMIZATION_DESIGN.md](docs/RESOURCE_OPTIMIZATION_DESIGN.md) -- the resource optimization engine's own design, algorithms, and milestone plan
 - [DIAGNOSTIC_RULES.md](docs/DIAGNOSTIC_RULES.md) -- every rule, its evidence, and its confidence logic
 - [FAILURE_LAB.md](docs/FAILURE_LAB.md) -- each lab scenario: how it fails, what's expected, how to clean up
 - [RBAC_AND_THREAT_MODEL.md](docs/RBAC_AND_THREAT_MODEL.md) -- least privilege, trust boundaries

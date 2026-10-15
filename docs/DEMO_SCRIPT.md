@@ -1,11 +1,12 @@
 # Demo script
 
 A guided walkthrough for showing KubeSentinel off, matching what's implemented
-as of Milestone 9 (observe/diagnose/persist/expose, policy-controlled
-remediation, recovery verification, and observability -- see README.md's
-status line for exactly what's left). Takes about 10 minutes for the full
-walkthrough including remediation; stop after step 7 for the original
-~5-minute diagnosis-only version.
+through Milestone 18 (observe/diagnose/persist/expose, policy-controlled
+remediation, recovery verification, observability, and the read-only resource
+optimization engine -- see README.md's status line for exactly what's left).
+Takes about 10 minutes for the full walkthrough including remediation; stop
+after step 7 for the original ~5-minute diagnosis-only version, or skip
+straight to step 8b for just the optimization engine.
 
 ## Setup (once)
 
@@ -156,6 +157,71 @@ diagnose on its own, so demonstrating against it needs a manually-constructed
 incident outside the normal CLI/API surface, which is why this walkthrough
 uses a real diagnosed incident instead.
 
+**8b. Show the resource optimization engine -- a second, read-only pipeline.**
+
+This step is independent of everything above; it can also be run on its own
+against a freshly created cluster. Apply the two dedicated scenarios and
+(optionally) install metrics-server for real usage data:
+
+```bash
+./lab/scripts/run-scenario.sh oversized-resources   # requests 1000m/256Mi, actually uses ~0
+./lab/scripts/run-scenario.sh missing-requests      # no resources block at all
+./lab/install-metrics-server.sh                     # optional -- without it, usage-based
+                                                      # checks stay honestly silent
+```
+
+Run the analysis and look at what it found:
+
+```bash
+.venv/bin/kubesentinel optimize --namespace kubesentinel-lab
+.venv/bin/kubesentinel recommendations
+```
+
+Point out `missing-requests-demo`'s `DATA_QUALITY` row: it appears
+immediately, with no proposed numbers, because there's no request to
+compare usage against. If metrics-server is installed, `optimize` won't yet
+show a proposed CPU/memory number for `oversized-resources-demo` either --
+that's the "no aggressive downsizing from a single sample" guarantee,
+visible live. Run `optimize` two or three more times, a couple of minutes
+apart:
+
+```bash
+.venv/bin/kubesentinel optimize --namespace kubesentinel-lab
+# wait ~2 minutes, repeat at least once more
+.venv/bin/kubesentinel recommendations
+```
+
+Once at least 3 samples spanning 5 minutes have accumulated, `oversized-resources-demo`
+gets real `CPU_OVERSIZED`/`MEMORY_OVERSIZED` recommendations proposing
+values near the configured floors (10m CPU / 16Mi memory by default), with
+`reasoning` citing the actual observed percentile against the actual
+configured request -- genuine math against genuine metrics-server samples,
+not a canned number. Show one in full, and the summary -- the table above
+only prints the ID's first 8 characters, so grab the full one from
+`recommendations --json` first:
+
+```bash
+.venv/bin/kubesentinel recommendation <full-recommendation-id>
+.venv/bin/kubesentinel optimization-summary
+```
+
+If any lab incident (e.g. `oom-demo`, `pending-resources-demo`) is still
+open, point out its recommendation carries `ACTIVE_INCIDENT` in
+`safety_flags` and `related_incident_ids` pointing back at the real
+incident, with no proposed number -- the optimization engine defers to the
+troubleshooting engine rather than recommending a resize alongside an
+unresolved failure. Then record a human decision (the CLI talks to the service directly, the
+same way `approve`/`execute` in step 8 do -- `require_api_token` only
+gates the *HTTP* route, `POST /optimization/recommendations/{id}/review`):
+
+```bash
+.venv/bin/kubesentinel review-recommendation <full-recommendation-id> APPROVED --reviewed-by "<your name>"
+```
+
+There is no apply/execute step after this -- a review is a decision record
+only; see RESOURCE_OPTIMIZATION_DESIGN.md §6 for why that's deliberate, not
+an oversight.
+
 **9. Be upfront about what this isn't, yet.**
 
 Nothing in the live diagnosis pipeline *automatically* calls `propose()` --
@@ -163,8 +229,13 @@ every remediation above was a deliberate human action (or, in
 `CONTROLLED_AUTO` mode, the policy engine's own explicit decision), never an
 unattended reaction to a diagnosis. DNS/connectivity diagnosis is deliberately
 out of scope (see DIAGNOSTIC_RULES.md), and there's no AI layer yet
-(Milestone 11, optional). `TODO.md` lists exactly what's next and what's
-known-incomplete; pull it up if asked "so what's missing."
+(Milestone 11, optional). The resource optimization engine never applies a
+recommendation itself -- every number it produces still needs a human (or a
+future, explicitly-built policy-engine path) to act on it; see
+RESOURCE_OPTIMIZATION_DESIGN.md's known limitations for what's deliberately
+not built there (cluster-level overcommitment analysis, an apply/execute
+path). `TODO.md` lists exactly what's next and what's known-incomplete; pull
+it up if asked "so what's missing."
 
 ## Cleanup
 

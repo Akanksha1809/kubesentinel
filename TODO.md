@@ -1113,6 +1113,131 @@ not a regression, and not something to chase further here; a future
 session on a quieter machine (or with the unrelated cluster stopped first)
 should get a clean single-pass `--all` run.
 
+## Milestone 19: Documentation and end-to-end demo -- DONE
+
+The resource optimization engine was, until this milestone, entirely
+undocumented outside TODO.md and its own design doc (confirmed by grepping
+every existing doc for "optimiz" before starting -- zero hits anywhere
+else). Updated the *existing* docs rather than writing new ones, per this
+project's own established rule:
+
+- **README.md** -- status line, a new paragraph describing the engine
+  (alongside the existing troubleshooting/remediation/AI paragraphs), a
+  second pipeline diagram, new Quickstart commands, `optimization/` and the
+  new RBAC/lab files added to Project layout, updated test counts (442
+  total: 410 unit + 32 integration/e2e, not the stale 257/234/23), and
+  RESOURCE_OPTIMIZATION_DESIGN.md added to the Documentation list.
+- **ARCHITECTURE.md** -- a full second "Optimization pipeline" section with
+  its own ASCII diagram (inventory -> metrics providers -> analyzer ->
+  safety -> service -> API/CLI/persistence), 3 new "Why this shape" bullets
+  (read-only by construction not convention; CPU-vs-memory statistic
+  asymmetry; reviewable records with status computed at read time), and 3
+  new "What's deliberately not built" bullets (apply/execute path, cluster
+  overcommitment analysis, a Node-metrics ClusterRole).
+- **DEMO_SCRIPT.md** -- a new step 8b walking the full optimization
+  engine demo (apply the two new scenarios, optionally install
+  metrics-server, run `optimize` across several minutes to cross the
+  `LIMITED_HISTORY` threshold, show a real `CPU_OVERSIZED`/
+  `MEMORY_OVERSIZED` recommendation, point out `ACTIVE_INCIDENT`, record a
+  review decision) -- every command in it was actually run against the real
+  cluster while writing it (the same "validate all documented commands"
+  discipline that caught a real bug in Milestone 10), which caught two real
+  doc-accuracy issues before they shipped: a misleading
+  `KUBESENTINEL_API_TOKEN=` prefix on the CLI review command (the token only
+  gates the *HTTP* route; the CLI never checks it, same as `approve`/
+  `execute` already don't), and the recommendations table showing only an
+  8-character truncated ID that `kubesentinel recommendation <id>` doesn't
+  actually accept -- fixed by pointing the doc at the full ID from
+  `--json` output instead, both caught by literally hitting "no
+  recommendation <id>" live rather than assuming the commands would work.
+- **DESIGN_DECISIONS.md** -- 6 new entries matching the existing format: no
+  apply/execute endpoint; percentile-for-CPU/peak-for-memory; the 3-sample/
+  5-minute threshold before any proposed number; supersession only ever
+  touching a still-`NEW` row; `EXPIRED` computed at read time, never by a
+  background job; and the `ACTIVE_INCIDENT` check covering both a
+  workload's own UID and every current Pod's UID.
+- **KUBERNETES_CONCEPTS.md** -- 2 new sections: owner-reference resolution
+  (the two-hop Pod -> ReplicaSet -> Deployment walk) plus the
+  `omitempty`-absence replica-count gotcha, and the Metrics API as an
+  aggregated API with its own failure mode (down independently of the
+  control plane) and its own `kubectl auth can-i` unreliability (see below).
+- **RBAC_AND_THREAT_MODEL.md** -- the full `rbac/optimization-role.yaml`
+  listing as a third, independently-auditable Role, a new Trust-boundary
+  bullet for the optimization engine's read-only-by-construction guarantee,
+  and an updated automated-check count (20, not 16) with a note on the
+  `can-i`-vs-aggregated-API finding below.
+- **FAILURE_LAB.md** -- two new scenario sections (`oversized-resources`,
+  `missing-requests`) matching the existing format, explicitly flagged as
+  not failure scenarios in the troubleshooting-engine sense (the Pods stay
+  healthy throughout).
+- **TESTING.md** -- updated top-line counts (442, not the Milestone-11-era
+  257), a full new "Resource optimization engine unit test coverage"
+  section (176 tests across 9 files, each count independently verified via
+  `pytest --collect-only` rather than counted by hand), and updated
+  Integration-tests bullets for the expanded `test_rbac_boundary.py` (20
+  tests) and the new `test_optimization_inventory_live.py`/
+  `test_optimization_live_scenarios.py` (5 tests).
+
+**A real gap found and closed while updating RBAC_AND_THREAT_MODEL.md**:
+that doc's own stated philosophy is "a one-off manual RBAC finding should
+become a repeatable automated test, not stay a one-time check" -- but
+Milestone 18's live RBAC verification of `rbac/optimization-role.yaml`
+(StatefulSets/DaemonSets/Jobs/`metrics.k8s.io`, and the `can-i`-vs-real-call
+discrepancy for the aggregated API) had only ever been done manually via
+`kubectl`, never turned into a test. Fixed by extending
+`tests/conftest.py::kubesentinel_sa_clients` to also construct
+`BatchV1Api`/`CustomObjectsApi` (a 4-tuple now, not 2 -- the 6 existing
+call sites in `test_rbac_boundary.py` were updated to match) and adding 4
+new tests: StatefulSets/DaemonSets/Jobs listable, pod-metrics reachable via
+a *real authenticated request* rather than `can-i` (treating a `503` --
+metrics-server itself down, a real state this project has hit live under
+contention -- as inconclusive, not a failure), and the expected `patch`/
+cross-namespace denials. All 4 passed live against the real cluster and
+the real `kubesentinel` ServiceAccount, not the admin kubeconfig.
+
+**Live-verified against the real cluster**: every optimization CLI command
+in the new DEMO_SCRIPT.md step (`optimize`, `recommendations`,
+`recommendation`, `optimization-summary`, `review-recommendation`) was run
+for real, catching the two doc-accuracy bugs above. The full, expanded
+`test_rbac_boundary.py` (20 tests, including the 4 new optimizer-Role
+tests) ran clean against the real cluster and the real ServiceAccount.
+
+**Tests**: 4 new integration tests (the optimizer-Role RBAC checks above).
+`./scripts/test.sh`: ruff clean, mypy clean, **410 unit tests passed**
+(unchanged from Milestone 18 -- this milestone added no new unit-level
+behavior, only docs and RBAC-boundary coverage). `./scripts/test.sh --all`:
+collected **442 tests** (410 unit + 32 integration/e2e, confirmed via
+`pytest --collect-only`, not guessed). A single uninterrupted `--all` run
+was attempted twice more this milestone and both times hit the same
+shared-VM-contention pattern documented after Milestones 11, 17, and 18 (9
+failed/2 errored the second time, all in tests that take a real HTTP round
+trip -- the run itself took 392s, long enough for a contention burst to
+land mid-run even starting from a calm 49-90% CPU reading); re-running
+every one of those exact tests together in isolation immediately
+afterward gave **27 passed, 0 failed, 0 errors** in 64s. This is the same
+environmental issue, not a regression, confirmed for a fourth time this
+session using the identical "isolate and re-run" method each time.
+
+**Known limitations** (from RESOURCE_OPTIMIZATION_DESIGN.md and this
+milestone's own doc pass, consolidated): no apply/execute path for a
+recommendation (every number requires a human, or a future, explicitly-
+built policy-engine path, to act on it); no cluster-level overcommitment
+analysis; no Node-metrics ClusterRole (nothing calls
+`get_current_node_usage()` yet); multi-namespace optimization inherits the
+troubleshooting engine's own single-namespace live-watch limitation only
+insofar as `KUBESENTINEL_WATCH_NAMESPACES` configures what `analyze()`
+defaults to scanning -- `analyze()` itself still correctly lists every
+namespace it's asked to, since it never watches at all.
+
+This closes the extension's own 8-milestone plan
+(RESOURCE_OPTIMIZATION_DESIGN.md §13): typed models and quantity handling,
+workload inventory with correct ownership resolution, deterministic
+CPU/memory analysis with safety checks, API/CLI/persistence integration,
+incident integration with new Prometheus metrics and RBAC, live kind-lab
+verification, and now documentation -- all 8 steps done, each with its own
+live-verification evidence recorded above (Milestones 12-19 in this file's
+own numbering).
+
 ## Known limitations (found during Milestone 1's own live verification, not theoretical)
 
 1. **Pod-UID dedup doesn't survive a Deployment rollout.** A Deployment template

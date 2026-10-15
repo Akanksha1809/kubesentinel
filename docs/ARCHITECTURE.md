@@ -59,6 +59,60 @@ an incident ID or resource name. Exposed at GET /metrics; see observability/
 for a scrape config and dashboard.
 ```
 
+## Optimization pipeline (Milestones 12-18)
+
+A second, read-only pipeline, built as its own module tree
+(`optimization/`) rather than extended into the pipeline above -- it shares
+only the SQLite file and, optionally, `IncidentRepository` (for the
+`ACTIVE_INCIDENT` safety flag), never a cluster watch loop or a parallel
+incident concept:
+
+```
+                 +-------------------+
+ kube-apiserver  |  inventory.py     |  one-shot LIST per resource type
+  (list only,    |  (optimization/)  |  (Pods/ReplicaSets/Deployments/
+  never watch)   |                   |  StatefulSets/DaemonSets/Jobs) --
+                 +---------+---------+  no watch loop, no resync timer
+                           |
+                           v  list[WorkloadSnapshot] (owner chain resolved:
+                           |   Pod -> ReplicaSet -> Deployment, or direct
+                           |   for StatefulSet/DaemonSet/Job, or standalone)
+                 +-------------------+
+                 | metrics_providers |  MetricsApiProvider (metrics-server,
+                 | .py               |  via CustomObjectsApi) + optional
+                 +---------+---------+  PrometheusProvider; InMemorySampleStore
+                           |              pools usage across a workload's replicas
+                           v  list[RawUsageSample] (honest-absence on failure,
+                           |   never a fabricated zero)
+                 +-------------------+
+                 |  analyzer.py      |  deterministic: percentile+margin for CPU,
+                 |  (optimization/)  |  peak+margin for memory, never from <3
+                 +---------+---------+  samples/<5min -- plus data-quality/
+                           |              scheduling-pressure checks needing no
+                           v  list[ResourceRecommendation]  usage data at all
+                 +-------------------+
+                 |  safety.py        |  flags (never silently drops): unhealthy/
+                 |  (optimization/)  |  system-namespace/Job/DaemonSet workloads,
+                 +---------+---------+  and an ACTIVE_INCIDENT on the same UID
+                           |
+                           v
+                 +-------------------+
+                 | OptimizationService| the only module here with side effects:
+                 | (optimization/)    | persists, supersedes prior undecided
+                 +---------+----------+ rows, computes effective (incl. EXPIRED)
+                           |              status at read time
+              +------------+------------+
+              v                         v
+   +-------------------+     +-------------------+
+   |  FastAPI + CLI    |     | SQLiteOptimization|
+   |  (api/, cli/)     |     | Repo (persistence/)|
+   |  /optimization/*  |     | 3 tables, same db  |
+   +-------------------+     +-------------------+
+```
+
+No apply/execute endpoint exists anywhere in this pipeline -- see "What's
+deliberately not built" below.
+
 ## Why this shape
 
 **Evidence is a first-class type, not a side effect of diagnosis.** Every fact a
@@ -148,6 +202,42 @@ is in `observer/watchers.py`: `OllamaClient` (the only implementation) talks
 to a local server over plain HTTP, no API key, no outbound network call, no
 cost. Disabled by default; every other layer above works fully without it.
 
+**The optimization engine is read-only by construction, not by convention.**
+`inventory.py`/`analyzer.py`/`safety.py` never import a Kubernetes client
+method that isn't `list_*`/`get_*` -- checked, not just asserted: a live
+integration test patches the HTTP transport itself and asserts only `GET`
+methods were ever issued during a full `analyze()` pass (inventory +
+metrics-server call + persistence). `safety.py` additionally never touches
+a repository or the clock on its own -- every fact it flags on (incident
+IDs, health, namespace, kind) is already on the `WorkloadSnapshot`/
+`Settings` it's handed, the same "pure function over already-fetched
+facts" shape as `policy/engine.py::PolicyEngine`. There is no
+`ActionType`/executor for resources at all yet: a future "apply" path
+would reuse the *existing* `PolicyEngine`/`RemediationExecutor` lifecycle,
+not a parallel approval system -- deliberately not built, see
+RESOURCE_OPTIMIZATION_DESIGN.md §6.
+
+**CPU and memory right-sizing use different statistics on purpose.** CPU
+proposals come from a percentile of *typical* demand (default p95) plus a
+safety margin; memory proposals come from observed *peak* (default p99),
+never the average -- a transient average is dangerous for a memory limit
+in a way it isn't for a CPU request. Both are withheld entirely (the row
+still appears, with `reasoning` explaining why) below `LIMITED_HISTORY`
+evidence quality -- a configurable minimum sample count and time window,
+never a number proposed from a single sample.
+
+**Analysis results are reviewable records with their own lifecycle, not
+live cluster state re-read on every request.** `GET` endpoints serve
+already-persisted data from the last `analyze()` call; only `POST
+/optimization/analyze` itself touches the cluster. A recommendation's
+*effective* status (e.g. `EXPIRED` once past `expires_at`) is computed at
+read time via `_with_effective_status()`, never by a background job
+mutating stored rows on a timer. A later `analyze()` run supersedes a
+still-`NEW` prior recommendation for the same workload/container/category,
+but never touches one a human has already `REVIEWED`/`APPROVED`/
+`REJECTED` -- that decision is a historical record, not something a later
+pass gets to silently overwrite.
+
 ## What's deliberately not built
 
 - **Multi-namespace watch correctness beyond resync cadence** -- see
@@ -167,3 +257,18 @@ cost. Disabled by default; every other layer above works fully without it.
   remediation. A cloud backend (behind the same `AiClient` Protocol) was
   deliberately not added -- the local Ollama backend is genuinely free, which
   a cloud API, even with a free tier, is not.
+- **An apply/execute path for resource recommendations** -- see
+  RESOURCE_OPTIMIZATION_DESIGN.md §6; every recommendation today is a
+  reviewable record only.
+- **Cluster-level overcommitment analysis** (total requested vs. total
+  Node-allocatable capacity across every workload) -- considered during
+  Milestone 17, but the design doc's own milestone plan never actually
+  committed to it; a per-container `ResourceRecommendation` also isn't the
+  right shape for a cluster-wide number, so this would need a new field on
+  the `/optimization/summary` response, not something bolted onto the
+  existing model.
+- **A Node-metrics ClusterRole** -- `MetricsApiProvider.get_current_node_usage()`
+  has existed since Milestone 13 but has no caller anywhere in this
+  codebase; granting RBAC for a capability nothing uses yet would be ahead
+  of the code that uses it (see `rbac/optimization-role.yaml`'s own
+  docstring).

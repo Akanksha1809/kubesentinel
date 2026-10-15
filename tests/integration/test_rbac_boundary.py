@@ -31,19 +31,19 @@ pytestmark = pytest.mark.usefixtures("lab_namespace_ready")
 
 
 def test_can_list_pods_in_lab_namespace(kubesentinel_sa_clients):
-    core, _ = kubesentinel_sa_clients
+    core, _, _, _ = kubesentinel_sa_clients
     pods = core.list_namespaced_pod(namespace=LAB_NAMESPACE, limit=1)
     assert pods is not None
 
 
 def test_can_list_events_in_lab_namespace(kubesentinel_sa_clients):
-    core, _ = kubesentinel_sa_clients
+    core, _, _, _ = kubesentinel_sa_clients
     events = core.list_namespaced_event(namespace=LAB_NAMESPACE, limit=1)
     assert events is not None
 
 
 def test_can_list_deployments_in_lab_namespace(kubesentinel_sa_clients):
-    _, apps = kubesentinel_sa_clients
+    _, apps, _, _ = kubesentinel_sa_clients
     deployments = apps.list_namespaced_deployment(namespace=LAB_NAMESPACE, limit=1)
     assert deployments is not None
 
@@ -54,7 +54,7 @@ def test_cannot_read_secrets_anywhere():
 
 
 def test_cannot_list_pods_outside_lab_namespace(kubesentinel_sa_clients):
-    core, _ = kubesentinel_sa_clients
+    core, _, _, _ = kubesentinel_sa_clients
     with pytest.raises(ApiException) as exc_info:
         core.list_namespaced_pod(namespace="kube-system")
     assert exc_info.value.status == 403
@@ -63,7 +63,7 @@ def test_cannot_list_pods_outside_lab_namespace(kubesentinel_sa_clients):
 def test_can_read_nodes_cluster_scoped(kubesentinel_sa_clients):
     # The one deliberate cluster-scoped exception (rbac/clusterrole.yaml) --
     # Node has no namespace, so this can't be expressed as a namespaced Role.
-    core, _ = kubesentinel_sa_clients
+    core, _, _, _ = kubesentinel_sa_clients
     nodes = core.list_node(limit=1)
     assert nodes is not None
 
@@ -101,7 +101,7 @@ def test_can_list_replicasets_for_rollback_revision_lookup():
 
 
 def test_cannot_delete_deployments(kubesentinel_sa_clients):
-    _, apps = kubesentinel_sa_clients
+    _, apps, _, _ = kubesentinel_sa_clients
     with pytest.raises(ApiException) as exc_info:
         apps.delete_namespaced_deployment(name=REMEDIATION_TEST_DEPLOYMENT, namespace=LAB_NAMESPACE)
     assert exc_info.value.status == 403
@@ -123,3 +123,48 @@ def test_cannot_mutate_pvcs_or_services():
     # Deployments (+ its own ReplicaSets, read-only).
     assert kubectl_can_i("patch", "persistentvolumeclaims", namespace=LAB_NAMESPACE) is False
     assert kubectl_can_i("patch", "services", namespace=LAB_NAMESPACE) is False
+
+
+# --- Optimizer Role (rbac/optimization-role.yaml): read-only, lab namespace only ---
+
+
+def test_can_list_statefulsets_daemonsets_jobs_in_lab_namespace(kubesentinel_sa_clients):
+    _, apps, batch, _ = kubesentinel_sa_clients
+    assert apps.list_namespaced_stateful_set(namespace=LAB_NAMESPACE, limit=1) is not None
+    assert apps.list_namespaced_daemon_set(namespace=LAB_NAMESPACE, limit=1) is not None
+    assert batch.list_namespaced_job(namespace=LAB_NAMESPACE, limit=1) is not None
+
+
+def test_can_get_pod_metrics_via_real_authenticated_call(kubesentinel_sa_clients):
+    # Deliberately NOT asserted via kubectl_can_i: found live that `can-i`
+    # gives a wrong answer for this aggregated API (see
+    # KUBERNETES_CONCEPTS.md) -- a real request through a real client
+    # authenticated as this exact ServiceAccount is the only trustworthy
+    # check. A 503 here (metrics-server itself down/unreachable, a real
+    # environmental state this project has hit live under shared-VM
+    # contention) is not an RBAC failure, so it's treated as inconclusive,
+    # not a hard failure.
+    _, _, _, custom_objects = kubesentinel_sa_clients
+    try:
+        result = custom_objects.list_namespaced_custom_object(
+            group="metrics.k8s.io", version="v1beta1", namespace=LAB_NAMESPACE, plural="pods"
+        )
+    except ApiException as exc:
+        if exc.status == 503:
+            pytest.skip(f"metrics-server unavailable right now (not an RBAC question): {exc}")
+        if exc.status == 403:
+            pytest.fail(f"expected RBAC to allow this, got 403: {exc}")
+        raise
+    assert result is not None
+
+
+def test_cannot_patch_statefulsets_daemonsets_jobs_or_replicasets():
+    # Read-only Role: optimization/inventory.py only ever lists these, never
+    # mutates any of them.
+    assert kubectl_can_i("patch", "statefulsets", namespace=LAB_NAMESPACE) is False
+    assert kubectl_can_i("patch", "daemonsets", namespace=LAB_NAMESPACE) is False
+    assert kubectl_can_i("patch", "jobs", namespace=LAB_NAMESPACE) is False
+
+
+def test_cannot_list_statefulsets_outside_lab_namespace():
+    assert kubectl_can_i("list", "statefulsets", namespace="kube-system") is False

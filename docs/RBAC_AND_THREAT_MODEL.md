@@ -64,13 +64,49 @@ never patched or deleted. No `delete` verb anywhere in this Role. Never on
 Nodes/RBAC/CRDs/admission resources, matching the spec's explicit prohibition on
 KubeSentinel modifying cluster-wide resources automatically.
 
-This entire boundary -- both Roles, both directions (what's granted and what
-isn't) -- is now covered by `tests/integration/test_rbac_boundary.py`
-(Milestone 9): 16 automated checks, authenticated as the real `kubesentinel`
+```yaml
+# rbac/optimization-role.yaml (current, in full) -- a third, separate Role,
+# for the resource optimization engine (Milestone 17)
+rules:
+  - apiGroups: ["apps"]
+    resources: ["statefulsets", "daemonsets", "replicasets"]
+    verbs: ["get", "list"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list"]
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+```
+
+Same independent-auditability rationale as splitting observer from
+remediator: this Role covers exactly what `optimization/inventory.py` and
+`metrics_providers.py` actually call. Verbs are `get`/`list` only, never
+`watch` -- the optimization engine takes a one-shot inventory snapshot per
+`analyze()` call, unlike the troubleshooting engine's continuous Pod watch,
+so there is no watch call anywhere in this module to grant for.
+`replicasets` is declared here too even though `remediation-role.yaml`
+already grants the same ServiceAccount read access to it, so this Role
+alone stays sufficient if remediation were ever removed. Deliberately no
+`metrics.k8s.io` **Nodes** ClusterRole: `MetricsApiProvider.get_current_node_usage()`
+has existed since Milestone 13 but has no caller anywhere in this codebase
+yet -- granting RBAC ahead of the code that uses it is exactly what this
+project's RBAC principle (above) exists to avoid.
+
+This entire boundary -- all three Roles, both directions (what's granted and
+what isn't) -- is now covered by `tests/integration/test_rbac_boundary.py`:
+20 automated checks, authenticated as the real `kubesentinel`
 ServiceAccount's own minted token plus `kubectl auth can-i --as=...`, run
 against the live cluster every time `./scripts/test.sh --all` does. This is
 the repeatable version of what Milestone 4's one-off manual verification
-caught; it isn't a one-time check anymore.
+caught; it isn't a one-time check anymore. One exception, found live while
+verifying the optimizer Role (Milestone 18): `kubectl auth can-i` itself
+gave a *wrong* answer (`no`) for `metrics.k8s.io` pods even after the Role
+genuinely granted it -- `can-i`'s client-side API discovery doesn't always
+know about aggregated APIs. `test_can_get_pod_metrics_via_real_authenticated_call`
+checks this one via a real authenticated request instead of `can-i`,
+specifically because the convenience tool was confirmed unreliable for it;
+see KUBERNETES_CONCEPTS.md.
 
 ## What will be added, and when
 
@@ -111,6 +147,17 @@ explicit justification in this document, not a silent addition to an existing Ro
   verification evidence (including the Milestone 4 RBAC gap this policy
   separation would not by itself have caught -- the executor's own narrow Role
   is what did).
+- **The resource optimization engine (`optimization/`) is read-only by
+  construction, not by convention.** `inventory.py`/`analyzer.py`/`safety.py`
+  never call a Kubernetes client method other than `list_*`/`get_*` -- a
+  live integration test patches the HTTP transport itself and asserts only
+  `GET` methods were ever issued during a full `analyze()` pass (inventory,
+  metrics-server call, and persistence together, not just inventory
+  collection). There is no `ActionType`, executor method, or write RBAC verb
+  anywhere in this engine's own Role that could patch a workload's
+  resources -- a future apply path (not built) would need to be added
+  explicitly, through the *existing* `PolicyEngine`/`RemediationExecutor`
+  lifecycle, not a parallel one.
 - **AI (`ai/summarizer.py`) has no Kubernetes credentials, no database access, and
   no path to the policy/remediation engines at all.** `summarize_incident()` takes
   an already-built `Incident` object and an `AiClient`; it never touches

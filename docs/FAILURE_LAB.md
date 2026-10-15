@@ -10,6 +10,9 @@ All lab resources live in the `kubesentinel-lab` namespace
 ./lab/scripts/run-scenario.sh oom
 ./lab/scripts/run-scenario.sh imagepull
 kubectl apply -f lab/manifests/scenario-transient-recovery/pod.yaml
+./lab/scripts/run-scenario.sh oversized-resources   # resource optimization engine's
+./lab/scripts/run-scenario.sh missing-requests      # own scenarios (not failures)
+./lab/install-metrics-server.sh                     # optional, for CPU/memory recommendations
 ./lab/scripts/cleanup.sh                      # removes all scenario Deployments/Pods
 ./lab/delete-cluster.sh                       # destroys the kind cluster entirely
 ```
@@ -217,6 +220,47 @@ kubectl apply -f lab/manifests/scenario-transient-recovery/pod.yaml
 - **Verified live**: incident opened and correctly diagnosed via the exact
   manifest file above, confirmed against the real `Progressing` condition on
   the Deployment.
+
+## Scenario: `oversized-resources` (resource optimization engine)
+
+- **Manifest**: `lab/manifests/scenario-oversized-resources/deployment.yaml`
+- **How it's set up**: the container only ever `sleep infinity`s -- real CPU
+  usage reads as effectively 0m and real memory usage as a few hundred KB --
+  while the Deployment requests 1000m CPU / 256Mi memory (limits 2000m/512Mi).
+  This is not a *failure* scenario in the troubleshooting-engine sense: the
+  Pod stays healthy and Ready the whole time.
+- **Prerequisite for CPU/memory recommendations specifically**:
+  `./lab/install-metrics-server.sh` (optional). Without it, `optimize` still
+  runs, just with usage-based checks honestly staying silent.
+- **Expected optimization behavior**: with metrics-server installed and at
+  least 3 samples spanning at least 5 minutes (the default
+  `LIMITED_HISTORY` threshold -- run `kubesentinel optimize` a few times,
+  a couple of minutes apart), a `CPU_OVERSIZED` and a `MEMORY_OVERSIZED`
+  recommendation both appear, proposing values near the configured floors
+  (10m CPU / 16Mi memory by default). A single pass, or fewer than 3
+  samples, correctly produces no proposed number at all.
+- **No automatic action**: there is no apply/execute path for this engine;
+  see RESOURCE_OPTIMIZATION_DESIGN.md §6.
+- **Verified live** (TODO.md's Milestone 18 entry): ran a real long-lived
+  API server through 4 `analyze()` calls spaced ~110s apart; by the 4th
+  call (4 samples spanning 326s), both recommendations appeared with real
+  observed-percentile numbers in `reasoning`, not placeholder text.
+
+## Scenario: `missing-requests` (resource optimization engine)
+
+- **Manifest**: `lab/manifests/scenario-missing-requests/deployment.yaml`
+- **How it's set up**: the container has no `resources` block at all -- a
+  common real misconfiguration, not a contrived edge case. The Pod stays
+  healthy and Ready.
+- **Expected optimization behavior**: `kubesentinel optimize` produces a
+  `DATA_QUALITY` recommendation immediately (no samples needed, no
+  metrics-server needed), naming exactly which of requests/limits are
+  missing, with no proposed numbers -- there's nothing to compare usage
+  against.
+- **No automatic action**: same as above.
+- **Verified live**: produced `DATA_QUALITY` from the very first
+  `analyze()` call (`sample_count=1`), and was correctly superseded
+  (marked `EXPIRED`) by each subsequent call's fresh row.
 
 ## Image caching
 

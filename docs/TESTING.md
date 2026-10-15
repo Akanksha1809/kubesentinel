@@ -7,16 +7,19 @@
 ./scripts/test.sh --all    # same, plus integration/e2e against a live kind cluster
 ```
 
-As of Milestone 11: **234 unit tests** (no cluster, no Ollama needed) plus **23
+As of Milestone 18: **410 unit tests** (no cluster, no Ollama needed) plus **32
 integration/e2e tests** (`--all`, against the real `kind-kubesentinel` cluster, one
-of them additionally gated on a local Ollama server) -- 257 total, all passing,
-`ruff check` clean, `mypy src/kubesentinel` clean (54 source files). Every
+of them additionally gated on a local Ollama server) -- 442 total, all passing,
+`ruff check` clean, `mypy src/kubesentinel` clean. Every
 integration/e2e test skips (not fails) if its precondition (the cluster, the lab
 namespace, a specific scenario/fixture, Ollama) isn't present -- confirmed by
 running `--all` against a deliberately broken `KUBECONFIG`: all skipped cleanly,
 zero errors. The combined suite was re-run four consecutive times with no failures
 after fixing a flaky test found along the way (TODO.md's Milestone 9 entry has the
-root cause -- a race in the test itself, not the product).
+root cause -- a race in the test itself, not the product). The resource
+optimization engine's own tests (Milestones 13-18) added 176 of the 410 unit
+tests and 5 of the 32 integration/e2e tests (plus 4 of the existing RBAC
+boundary suite's tests, specific to its own Role); see below.
 
 This was verified in-session, not assumed -- see the commands actually run, below.
 
@@ -43,6 +46,55 @@ This was verified in-session, not assumed -- see the commands actually run, belo
 - **`test_observer_service.py`** -- DELETED events are ignored; a terminating Pod
   (`deletionTimestamp` set) is never fed into the incident manager even if its
   container statuses look transiently healthy; a normal healthy Pod *is* observed.
+
+## Resource optimization engine unit test coverage (Milestones 13-18)
+
+- **`test_quantities.py`** (44 tests) -- CPU/memory quantity parse/format
+  round-trips: bare integers, the `m` millicore suffix, decimal (`k`/`M`/`G`)
+  vs. binary (`Ki`/`Mi`/`Gi`) memory suffixes, scientific notation, and
+  malformed input raising `QuantityParseError` rather than silently
+  defaulting to zero.
+- **`test_ownership.py`** (10 tests) -- owner-reference chain resolution:
+  Pod -> ReplicaSet -> Deployment (two hops), direct Pod -> StatefulSet/
+  DaemonSet/Job, a standalone Pod (no owner), preferring the
+  `controller: true` reference when more than one exists, and returning
+  `None` (never guessing) for an unresolvable or unrecognized owner kind.
+- **`test_inventory.py`** (16 tests) -- workload grouping across multiple
+  replicas, the `status.readyReplicas`/`numberReady` `omitempty`-absence
+  normalization (confirmed live against the real API, not assumed),
+  recent-OOM detection, and unschedulable-reason extraction.
+- **`test_metrics_providers.py`** (16 tests) -- `MetricsApiProvider`/
+  `PrometheusProvider` against mocked HTTP responses (success, 404/missing,
+  malformed data), and `InMemorySampleStore`'s bounded ring-buffer eviction.
+- **`test_analyzer.py`** (23 tests) -- determinism (same input -> identical
+  output), each safety-margin/percentile/floor parameter, the
+  `EvidenceQuality` threshold gating any proposed number, CPU-vs-memory
+  statistic asymmetry (percentile-of-typical vs. peak), OOM-history
+  increasing scrutiny without auto-adjusting a limit, multi-replica usage
+  pooling, the Prometheus upgrade path and its failure fallback, and
+  `related_incident_ids` threading through to `ACTIVE_INCIDENT`.
+- **`test_safety.py`** (11 tests) -- every flag
+  (`UNHEALTHY_WORKLOAD`/`SYSTEM_NAMESPACE`/`JOB_CONSERVATIVE`/
+  `DAEMONSET_CONSERVATIVE`/`ACTIVE_INCIDENT`) suppresses only the proposed
+  number, never the row itself or its other flags; multiple flags stacking;
+  pre-existing flags preserved, not overwritten.
+- **`test_optimization_repo.py`** (13 tests) -- SQLite persistence
+  round-trips for recommendations/workload snapshots/analysis runs, the
+  single-row "latest analysis run" upsert pattern, and filtering.
+- **`test_optimization_service.py`** (27 tests) -- supersession (a
+  still-`NEW` prior recommendation expires, a reviewed one never does),
+  effective-status computation (`EXPIRED` at read time, never stored),
+  review state transitions and their error cases, incident-UID lookup
+  (deduped, no-repo-wired-up is a safe no-op), and all 4 Prometheus metrics
+  (`analysis_total`'s success/partial/failed labels, `recommendations_total`
+  by category, `last_success_timestamp`, `metrics_data_available` by
+  provider) using the same reset-then-assert `._value.get()` pattern as
+  `test_incident_manager.py`'s `incidents_active` checks.
+- **`test_optimization_api.py`** (16 tests) -- every route's happy path,
+  404/409/422/503 error-code coverage (the 422/503 cases were added after
+  finding both were missing against RESOURCE_OPTIMIZATION_DESIGN.md's own
+  error-mapping table -- see TODO.md's Milestone 18 entry), and the
+  token-gated review endpoint's 401 boundary.
 
 ## Why `kubernetes.client` model objects, not hand-rolled dicts, in tests
 
@@ -93,15 +145,32 @@ shared live-cluster fixtures, every one of which skips (never fails) if its
 precondition (a reachable cluster, the lab namespace, a specific scenario) isn't
 met.
 
-- **`test_rbac_boundary.py`** (16 tests) -- authenticates as the real
+- **`test_rbac_boundary.py`** (20 tests) -- authenticates as the real
   `kubesentinel` ServiceAccount (a token minted live with `kubectl create
   token`, not fabricated) and confirms both what it can do (read Pods/Events/
-  Deployments/Nodes in the lab namespace, update/patch Deployments, patch the
-  scale subresource) and what it cannot (read Secrets anywhere, read Pods
-  outside the lab namespace, delete Deployments/Pods/Nodes, mutate PVCs/
-  Services) -- using both a real authenticated API call and `kubectl auth
-  can-i --as=...` (the same technique used to manually confirm this boundary
-  in Milestone 4).
+  Deployments/Nodes/StatefulSets/DaemonSets/Jobs/pod-metrics in the lab
+  namespace, update/patch Deployments, patch the scale subresource) and what
+  it cannot (read Secrets anywhere, read Pods outside the lab namespace,
+  delete Deployments/Pods/Nodes, mutate PVCs/Services, patch StatefulSets/
+  DaemonSets/Jobs/ReplicaSets) -- using both a real authenticated API call
+  and `kubectl auth can-i --as=...` (the same technique used to manually
+  confirm this boundary in Milestone 4). The `metrics.k8s.io` pods check is
+  deliberately *not* asserted via `can-i` -- found live (Milestone 18) that
+  `can-i` answers `no` for this aggregated API even when the Role genuinely
+  grants it, so that one check goes through a real authenticated request
+  instead (treating a `503` -- metrics-server itself down -- as
+  inconclusive, not a failure, since that's an availability question, not
+  an RBAC one).
+- **`test_optimization_inventory_live.py`** / **`test_optimization_live_scenarios.py`**
+  (5 tests, Milestones 14/18) -- `build_workload_inventory()` against the
+  real lab namespace matches known healthy/unhealthy workloads; the
+  `missing-requests`/`oversized-resources` scenarios produce the expected
+  `DATA_QUALITY`/no-proposed-number results against real cluster state, the
+  latter additionally checked against a real (not mocked) near-zero
+  metrics-server sample; and the read-only guarantee, extended from
+  inventory-only to the *entire* `OptimizationService.analyze()` call
+  (inventory + metrics-server query + persistence), by patching the HTTP
+  transport itself and asserting only `GET` was ever issued.
 - **`test_watch_resync.py`** -- runs a real `PodWatcher` against the live
   cluster with a 2s `resync_interval_seconds` and confirms, from real ADDED
   event timestamps, that the bounded relist safety net actually fires against

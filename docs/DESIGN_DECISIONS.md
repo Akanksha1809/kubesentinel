@@ -218,3 +218,95 @@ today, and already never executed or templated anywhere), that text has no
 path into an AI prompt, because the prompt is built from the diagnostic
 engine's own structured conclusions, not from the raw fields those
 conclusions were derived from.
+
+## Why the resource optimization engine has no apply/execute endpoint
+
+Unlike `RECOMMEND_*` action types (above), which exist within an already-built
+execution lifecycle and simply opt out of it, the optimization engine has no
+execution lifecycle to opt out of at all -- there is no `ActionType`, no
+executor method, and no RBAC write verb anywhere in `optimization/` that
+could patch a workload's resources. The spec's own instruction is to keep
+analysis and execution clearly separated and to require explicit approval
+before any future apply path; exposing an endpoint that implied one already
+existed would be the "misleadingly-named endpoint for unimplemented
+behavior" the spec explicitly warns against, which is a stronger reason to
+leave it out than merely "we haven't gotten to it yet." A future apply path
+is specified (RESOURCE_OPTIMIZATION_DESIGN.md §6) to reuse the *existing*
+`PolicyEngine`/`RemediationExecutor` lifecycle, not a second approval system
+built from scratch for this engine alone.
+
+## Why CPU uses a percentile of typical demand and memory uses the peak,
+never the average for either
+
+A proposed *request* exists to answer "how much does this container
+typically need," which a percentile of demand (default p95) answers
+directly; the bare average is pulled down by idle periods a real workload
+still needs headroom for; the bare max is pulled up by one-off spikes that
+would make every proposal too conservative to be useful. Memory gets a
+stricter rule than CPU for a reason specific to what each resource actually
+does when exceeded: CPU usage above a limit is throttled (survivable,
+recoverable); memory usage above a limit gets the container OOM-killed
+(not recoverable). Proposing a memory number from anything less than the
+observed *peak* risks proposing a limit the workload has already, in the
+observed window, exceeded -- which is why memory uses p99-of-peak and CPU
+uses p95-of-typical, a structural difference enforced by reading different
+fields off `UsageSummary` (`cpu_typical_millicores` vs. `memory_peak_bytes`),
+not just differently-worded reasoning text that could silently drift from
+the underlying math.
+
+## Why a recommendation needs at least 3 samples spanning 5 minutes before
+proposing any number at all
+
+Found worth enforcing in code, not just policy, after the spec's own
+instruction not to recommend aggressive downsizing from a single
+observation: a single metrics-server snapshot is one instant, not a
+pattern, and proposing a number from it would be indistinguishable from
+guessing. `EvidenceQuality` has two tiers below the resize-eligible
+threshold (`INSUFFICIENT`, `SNAPSHOT_ONLY`) specifically so a workload with
+too little history still gets a row (visibly "considered"), just with
+`proposed_requests=None` and a `reasoning` string saying why -- the same
+"flag, never silently drop" principle `safety.py` uses for unhealthy
+workloads, applied to insufficient evidence instead of to workload health.
+
+## Why recommendation supersession only ever touches a still-`NEW` prior row
+
+Each `analyze()` run persists a fresh recommendation for every workload it
+looked at; without any rule for what happens to the *previous* run's row for
+the same workload/container/category, recommendations would accumulate
+forever with no way to tell which one is current. The rule is deliberately
+narrow: a prior row still in `NEW` status is marked `EXPIRED` (superseded by
+a fresher analysis), but a prior row already `REVIEWED`/`APPROVED`/
+`REJECTED` is left completely untouched. A human's decision is a historical
+record of what was decided and why at the time -- a later, unrelated
+`analyze()` pass re-running the same math does not get to silently overwrite
+that record just because it happened to look at the same workload again.
+
+## Why a recommendation's `EXPIRED` status is computed at read time, not
+flipped by a background job
+
+`expires_at` exists so a recommendation is never acted on once stale (the
+spec's "never apply a stale recommendation," read broadly as "never even
+display one as if it were current"). The straightforward implementation --
+a periodic job scanning for expired rows and updating them -- would be an
+unbounded background task this project's own persistence design
+(TODO.md/RESOURCE_OPTIMIZATION_DESIGN.md §11) explicitly avoids, and it adds
+a window where a row reads as `NEW` after it's actually expired, just because
+the job hasn't run yet. Computing the effective status in
+`_with_effective_status()` on every `GET`/review check instead means there
+is no such window, and no scheduled task to keep correctly running --
+reading a stale recommendation can never itself mutate storage, and nothing
+needs to "catch up" on startup.
+
+## Why the `ACTIVE_INCIDENT` check looks at a workload's own UID *and* every
+current Pod's UID, not just one
+
+An incident in this project can be opened against either kind of resource,
+depending on which diagnostic rule found it first: a Pod-level
+`CrashLoopBackOff` opens against the Pod's own UID; a Deployment-level
+`UNSATISFIED_REPLICAS`/`ROLLOUT_FAILED` opens against the Deployment's UID.
+Checking only the workload's own UID would miss a live, real incident on one
+of its Pods; checking only Pod UIDs would miss one opened directly against
+the controller. `OptimizationService._open_incident_ids_for()` checks both
+sets (deduped before querying, since a standalone Pod's `workload_uid` is
+the same value as its own entry in `pod_uids`) rather than guessing which
+kind a given incident is more likely to be opened against.

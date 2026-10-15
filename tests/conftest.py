@@ -80,10 +80,15 @@ def kubesentinel_sa_token(live_cluster_clients: ClusterClients) -> str:
 @pytest.fixture(scope="session")
 def kubesentinel_sa_clients(
     live_cluster_clients: ClusterClients, kubesentinel_sa_token: str
-) -> tuple[k8s_client.CoreV1Api, k8s_client.AppsV1Api]:
+) -> tuple[k8s_client.CoreV1Api, k8s_client.AppsV1Api, k8s_client.BatchV1Api, k8s_client.CustomObjectsApi]:
     """API clients authenticated as the real `kubesentinel` ServiceAccount --
     not the admin kubeconfig every other fixture here uses -- so RBAC tests
     exercise the actual boundary a real in-cluster deployment would be bound by.
+    `BatchV1Api`/`CustomObjectsApi` added alongside `rbac/optimization-role.yaml`
+    (Jobs, `metrics.k8s.io`) -- the latter specifically because `kubectl auth
+    can-i` was found live to give a wrong answer for this aggregated API, so a
+    real authenticated call through this exact client is the only trustworthy
+    check for it (see KUBERNETES_CONCEPTS.md).
 
     `verify_ssl=False` is specific to this local, throwaway kind cluster used
     only to test authorization (not transport security); never appropriate
@@ -96,7 +101,12 @@ def kubesentinel_sa_clients(
     sa_config.api_key["authorization"] = kubesentinel_sa_token
     sa_config.api_key_prefix["authorization"] = "Bearer"
     api_client = k8s_client.ApiClient(sa_config)
-    return k8s_client.CoreV1Api(api_client), k8s_client.AppsV1Api(api_client)
+    return (
+        k8s_client.CoreV1Api(api_client),
+        k8s_client.AppsV1Api(api_client),
+        k8s_client.BatchV1Api(api_client),
+        k8s_client.CustomObjectsApi(api_client),
+    )
 
 
 def kubectl_can_i(verb: str, resource: str, *, namespace: str | None = None, subresource: str = "") -> bool:

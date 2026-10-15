@@ -210,6 +210,62 @@ the target revision's template doesn't -- a merge PATCH cannot express that
 removal, only a full `replace` (PUT) can. `RemediationExecutor._rollback()`
 uses `replace_namespaced_deployment` for exactly this reason (TODO.md #12).
 
+## Owner-reference resolution, and a real `omitempty` surprise in replica counts
+
+Resolving "which controller owns this Pod" means walking
+`metadata.ownerReferences`, preferring the entry with `controller: true`
+(a Pod can, in principle, carry more than one owner reference) --
+`optimization/ownership.py::resolve_pod_owner()` does this explicitly
+rather than assuming the first entry is authoritative. For a Deployment
+specifically, the chain is two hops, not one: a Pod's owner is its
+ReplicaSet, and the ReplicaSet's own owner (looked up separately) is the
+Deployment -- `optimization/inventory.py` builds a `{uid: ReplicaSet}` map
+once per inventory pass specifically to walk this chain without an extra
+API call per Pod.
+
+Found live, confirmed against the raw API response rather than assumed: a
+Deployment/ReplicaSet's `status.readyReplicas`/`status.numberReady` field
+is entirely *absent* from the JSON the API server sends when its value is
+`0`, not present with a value of `0` -- Go's `omitempty` tag on an `int`
+field serializes the zero value as "field not there at all," and the
+generated Python client deserializes that absence as `None`. Code that
+naively checks `status.ready_replicas or 0` gets this right by accident;
+code that treats `None` as "unknown" rather than normalizing it to `0`
+would misreport a genuinely-broken Deployment (0 ready) as "ready count
+unknown." `inventory.py::_replica_counts()` normalizes explicitly, with a
+comment citing exactly this. `spec.replicas` has no such behavior (Go
+`omitempty` only applies to the zero value of the field's type, and a
+pointer/explicit-default field like `spec.replicas` is set by an admission
+default, not left absent) -- the fix is deliberately scoped to the two
+status fields that actually exhibit it, not applied defensively everywhere.
+
+## The Metrics API is an aggregated API, and `kubectl auth can-i` doesn't
+always know that
+
+`metrics.k8s.io` isn't served by `kube-apiserver` itself -- it's a
+separate `APIService` that aggregates requests out to the metrics-server
+Deployment running as a regular Pod in the cluster. Two consequences
+confirmed live while verifying `rbac/optimization-role.yaml`:
+
+1. **It can be down independently of the control plane.** A `503
+   Service Unavailable` from `/apis/metrics.k8s.io/v1beta1/...` can mean
+   metrics-server itself is unreachable or crash-looping (confirmed via
+   `kubectl describe pod -n kube-system -l k8s-app=metrics-server` showing
+   probe timeouts under this project's own documented shared-VM
+   contention) -- a real cluster-admin kubeconfig gets the exact same
+   `503` in that state, which is how this was confirmed as "metrics-server
+   is down," not "the kubesentinel ServiceAccount lacks permission."
+2. **`kubectl auth can-i` can give a wrong answer for it.** Checking
+   `kubectl auth can-i list pods.metrics.k8s.io --as=<SA>` answered `no`
+   (with a warning that the resource type wasn't found in client-side API
+   discovery) even *after* `rbac/optimization-role.yaml` was applied and
+   genuinely granted it -- confirmed by minting a real token for that exact
+   ServiceAccount and making a direct authenticated HTTP request, which
+   returned a real `200` with real pod metrics. `can-i`'s own client-side
+   discovery cache is the unreliable part here, not RBAC itself; the
+   authoritative check for an aggregated API is a real request as the real
+   identity, not the `can-i` convenience tool.
+
 ## Idempotency and concurrency: what this project actually guarantees
 
 `RemediationExecutor` re-reads the live resource and verifies its UID still
