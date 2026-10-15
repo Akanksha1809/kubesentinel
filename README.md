@@ -179,3 +179,7 @@ docs/            Architecture, diagnostic rules, RBAC/threat model, failure lab,
 - [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) -- environment issues hit while building this, and fixes
 - [DEMO_SCRIPT.md](docs/DEMO_SCRIPT.md) -- a guided walkthrough for showing this off
 - [TODO.md](TODO.md) -- milestone plan, verified completion status, known limitations
+
+## License
+
+[MIT](LICENSE)
