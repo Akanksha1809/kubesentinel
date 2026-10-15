@@ -86,6 +86,26 @@ def test_optimization_service_unavailable_is_503():
     assert resp.status_code == 503
 
 
+def test_analyze_cluster_unreachable_mid_call_is_503():
+    """Distinct from `test_optimization_service_unavailable_is_503`: here the
+    service exists (the cluster was reachable at startup), but a specific
+    call into it fails -- matches a real failure caught live during this
+    milestone's own kind-cluster verification (a transient connectivity
+    blip during `/analyze`), where this used to surface as a bare 500."""
+    with tempfile.TemporaryDirectory() as d:
+        settings = Settings(db_path=str(Path(d) / "test.db"))
+        repo = SQLiteOptimizationRepository(str(Path(d) / "opt.db"))
+        clients = MagicMock()
+        clients.core.list_namespaced_pod.side_effect = ApiException(status=500, reason="cluster unreachable")
+        clients.core.list_pod_for_all_namespaces.side_effect = ApiException(status=500, reason="cluster unreachable")
+        app_module.state.optimization = OptimizationService(clients, repo, settings)
+
+        resp = client.post("/optimization/analyze")
+
+        assert resp.status_code == 503
+        repo.close()
+
+
 def test_list_workloads_after_analyze(api_state):
     client.post("/optimization/analyze", json={"namespaces": [NAMESPACE]})
     resp = client.get("/optimization/workloads")
@@ -106,6 +126,16 @@ def test_list_recommendations_filters_by_category(api_state):
     resp = client.get("/optimization/recommendations", params={"category": "CPU"})
     assert resp.status_code == 200
     assert resp.json() == []
+
+
+def test_list_recommendations_invalid_category_is_422(api_state):
+    resp = client.get("/optimization/recommendations", params={"category": "NOT_A_REAL_CATEGORY"})
+    assert resp.status_code == 422
+
+
+def test_list_recommendations_invalid_status_is_422(api_state):
+    resp = client.get("/optimization/recommendations", params={"status": "NOT_A_REAL_STATUS"})
+    assert resp.status_code == 422
 
 
 def test_get_recommendation_not_found_is_404(api_state):

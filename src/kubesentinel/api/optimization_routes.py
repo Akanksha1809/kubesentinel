@@ -19,7 +19,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from kubesentinel.api.state import require_api_token, state
-from kubesentinel.models.optimization import RecommendationStatus
+from kubesentinel.models.optimization import RecommendationCategory, RecommendationStatus
 from kubesentinel.optimization.service import (
     InvalidRecommendationStateError,
     OptimizationService,
@@ -46,9 +46,24 @@ def analyze(body: AnalyzeRequest | None = None) -> dict:
     """The only endpoint that ever touches the cluster for optimization
     purposes -- every other route below serves already-persisted data from
     the last `analyze()` call, never a fresh scan. See
-    RESOURCE_OPTIMIZATION_DESIGN.md §4 for why that split is deliberate."""
+    RESOURCE_OPTIMIZATION_DESIGN.md §4 for why that split is deliberate.
+
+    A merely-missing/unreachable *metrics* provider is not an error here --
+    `service.analyze()` already reports that honestly via
+    `metrics_available=False` + `warning` in a normal 200 response (see
+    `OptimizationService._collect_raw_samples`). This `except` is for the
+    cluster itself being unreachable mid-call (confirmed live during this
+    milestone's own verification: a transient connectivity failure surfaced
+    as a bare, uncaught exception propagating out of `build_workload_inventory`
+    and becoming a generic 500) -- RESOURCE_OPTIMIZATION_DESIGN.md §8's own
+    error-mapping table promises 503 for exactly this, matching
+    `_require_remediation_service()`'s existing "no cluster connection"
+    convention."""
     service = _require_optimization_service()
-    summary = service.analyze(namespaces=(body.namespaces if body else []))
+    try:
+        summary = service.analyze(namespaces=(body.namespaces if body else []))
+    except Exception as exc:  # noqa: BLE001 - any failure here means the cluster itself is unreachable
+        raise HTTPException(status_code=503, detail=f"analyze() failed: {exc}") from exc
     return summary.model_dump(mode="json")
 
 
@@ -66,11 +81,20 @@ def list_workloads(namespace: str | None = None) -> list[dict]:
 def list_recommendations(
     namespace: str | None = None,
     workload: str | None = None,
-    category: str | None = None,
-    status: str | None = None,
+    category: RecommendationCategory | None = None,
+    status: RecommendationStatus | None = None,
 ) -> list[dict]:
+    """`category`/`status` are typed Enum query params specifically so an
+    invalid value (e.g. `?category=NOT_REAL`) gets FastAPI/Pydantic's own
+    422 rather than silently matching nothing and returning `200 []` --
+    the design doc's own error-mapping table promises 422 for this, and a
+    bad filter value is a client mistake worth surfacing, not a "no results"
+    answer indistinguishable from a correct, merely-empty filter."""
     recommendations = _require_optimization_service().list_recommendations(
-        namespace=namespace, workload_name=workload, category=category, status=status
+        namespace=namespace,
+        workload_name=workload,
+        category=category.value if category else None,
+        status=status.value if status else None,
     )
     return [r.model_dump(mode="json") for r in recommendations]
 

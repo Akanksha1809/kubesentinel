@@ -982,6 +982,137 @@ container at 250%+ CPU on the shared Colima VM during the failing run,
 consistent with the contention already documented after Milestones 9, 11,
 and 16 -- not a regression.
 
+## Milestone 18: Tests and live kind lab scenarios -- DONE
+
+Most of this milestone's unit/integration test coverage had already been
+added alongside each capability as it was built (Milestones 13-17 each
+report their own new-test counts in their own sections above) --
+per-milestone testing, not a separate catch-up pass, has been this
+project's discipline since Milestone 1. What remained genuinely new here:
+the live kind-cluster scenarios themselves (none of the existing lab
+manifests exercise resource right-sizing), and two real bugs the testing
+work surfaced.
+
+Added:
+
+- `lab/install-metrics-server.sh` -- a new, explicit opt-in script (not
+  folded into `create-cluster.sh`, which the troubleshooting engine and its
+  own scenarios need nothing from) that installs and patches metrics-server
+  for kind, per RESOURCE_OPTIMIZATION_DESIGN.md Section 9's own commands.
+  Installed live on this project's own kind cluster for the first time this
+  session -- every prior milestone's live verification had correctly
+  treated metrics-server's absence as the honest-degradation path to test;
+  this milestone adds the complementary "it's present and working" path.
+- Two new lab scenarios: `scenario-oversized-resources` (a Deployment
+  requesting 1000m CPU / 256Mi memory for a container that only ever
+  `sleep`s -- real usage reads as approximately zero) and
+  `scenario-missing-requests` (a container with no `resources` block at
+  all). Both labeled `kubesentinel.io/scenario` like every other scenario,
+  so `lab/scripts/cleanup.sh`'s existing generic selector picks them up for
+  free -- no change needed there.
+- `tests/integration/test_optimization_live_scenarios.py` -- 3 new live
+  tests: `missing-requests-demo` produces `DATA_QUALITY` with no proposed
+  numbers from a single real pass; `oversized-resources-demo`'s real
+  metrics-server sample reads as near-zero and a single pass still
+  correctly withholds a proposed number (the "no aggressive downsizing
+  from one sample" guarantee, now checked against real, not mocked, usage
+  data for the first time in this project); and the read-only guarantee
+  extended from `test_optimization_inventory_live.py`'s inventory-only
+  check to the *entire* `OptimizationService.analyze()` path (inventory +
+  metrics-server call + persistence) -- the specific check
+  RESOURCE_OPTIMIZATION_DESIGN.md Section 12 asks for by name.
+- `rbac/optimization-role.yaml` (written in Milestone 17) applied to the
+  real cluster and verified for the first time against the actual
+  `kubesentinel` ServiceAccount identity, not the admin kubeconfig every
+  other live check in this milestone (and most of Milestones 13-17) used --
+  the exact distinction TODO.md limitation #14 already flagged as worth
+  not skipping. `kubectl auth can-i ... --as=system:serviceaccount:...`
+  confirmed `list statefulsets/daemonsets/jobs` went from `no` to `yes`
+  after applying the Role; `metrics.k8s.io` pods needed a real minted
+  token and a direct HTTP call instead, because `kubectl auth can-i` is
+  unreliable for aggregated APIs (it answered `no` for a resource that a
+  real authenticated request to the same identity returned a real `200`
+  with 5 pod metrics for) -- a reminder that `can-i`'s own answer isn't
+  always authoritative for an aggregated API group, confirmed by checking
+  the real HTTP response rather than trusting the tool.
+
+**Two real bugs found while writing API error-code tests** (exactly the
+kind of gap RESOURCE_OPTIMIZATION_DESIGN.md Section 12's "API validation/
+error-code coverage" testing goal exists to catch) -- both direct
+divergences from Section 8's own error-mapping table, written in
+Milestone 12 but never actually implemented when the routes were built in
+Milestone 16:
+1. `GET /optimization/recommendations?category=...`/`?status=...` took
+   plain `str | None` query params, so an invalid value (e.g.
+   `?category=NOT_REAL`) silently matched nothing and returned `200 []`
+   instead of the promised `422`. Fixed by typing both as their real Enums
+   (`RecommendationCategory`/`RecommendationStatus`) in the route
+   signature -- FastAPI/Pydantic now rejects an invalid value before the
+   service layer ever sees it.
+2. `POST /optimization/analyze` had no handling at all for the cluster
+   itself failing mid-call -- confirmed earlier in this same session when a
+   real, transient connectivity failure (the contention documented below)
+   made a live `/analyze` call raise, and it surfaced as a bare,
+   unhandled 500. Fixed by wrapping the call in `try`/`except Exception`
+   and mapping to `503`, matching `_require_remediation_service()`'s
+   existing "no cluster connection" convention and the promise Section 8
+   already made. A merely-missing *metrics provider* is deliberately left
+   alone by this `except` -- that's still an honest `200` with
+   `metrics_available=False`, a different and already-correct code path.
+
+Both fixes have their own new unit tests (`test_list_recommendations_invalid_category_is_422`,
+`test_list_recommendations_invalid_status_is_422`,
+`test_analyze_cluster_unreachable_mid_call_is_503`).
+
+**Live-verified against the real cluster**, beyond what's already
+described above: ran a real long-lived API server process through 4
+`POST /optimization/analyze` calls spaced ~110s apart (minutes, not
+mocked) against both new scenarios. By the 4th call (4 samples spanning
+326s, crossing the default 3-sample/300s LIMITED_HISTORY threshold),
+`oversized-resources-demo` correctly produced a real `CPU_OVERSIZED`
+recommendation (proposed 10m, the configured floor, "well below the
+current request of 1[000m]") and a real `MEMORY_OVERSIZED` recommendation
+(proposed 16Mi, the configured floor, "well below the current request of
+256Mi") -- genuine percentile/safety-margin/floor math running against
+genuine metrics-server samples for the first time in this project, not a
+mocked `RawUsageSample` list. `missing-requests-demo` correctly produced
+`DATA_QUALITY` from the very first call (sample_count=1), never a proposed
+number, and was correctly superseded (marked `EXPIRED`) by each subsequent
+call's fresh row -- the supersession logic (Milestone 16) confirmed live
+under real repeated analysis, not just the unit-mocked repeated-`analyze()`
+tests. `pending-resources-demo`'s `SCHEDULING`/`ACTIVE_INCIDENT` flags
+(Milestones 15/17) kept firing correctly across all 4 calls alongside the
+new scenarios, confirming no regression in the existing checks.
+
+**Tests**: 5 new unit tests (2 for the `422` fix, 1 for the `503` fix, plus
+the `test_optimization_live_scenarios.py` fixtures/tests counted as
+integration, not unit). `./scripts/test.sh`: ruff clean, mypy clean,
+**410 unit tests passed** (407 Milestone 17 baseline + 3 new).
+
+The full `--all` run was attempted three separate times and failed with
+the same 10-13 tests each time -- the worst shared-VM contention seen yet
+this session (`ai-platform-engineer-control-plane` sustained at 200-260%
+CPU for an extended period, at one point taking down metrics-server itself
+via probe timeouts, and even causing bare `kubectl get nodes` to fail with
+a TLS handshake timeout/EOF; a `subprocess.TimeoutExpired` showed up in one
+run, from `kubectl create token`'s own 10s timeout inside the RBAC test
+fixture). Waiting for the cluster to answer `kubectl get nodes` twice in a
+row before retrying did not prevent a third failure, confirming the
+contention comes in bursts over the run's ~5-6 minute duration rather than
+a level that clears and stays clear. Decisive confirmation that none of
+this is a regression: every one of the exact tests that failed in the
+third `--all` attempt (`test_observer_still_detects_after_pod_deleted_and_recreated_with_same_name`,
+all 8 of `test_rbac_boundary.py`, both `test_optimization_inventory_live.py`
+tests, this milestone's own `test_full_analyze_pass_never_issues_a_non_get_http_request`,
+`test_restart_reuses_incident_identity_and_reconciles_metrics`) was re-run
+together, immediately afterward, in one single isolated pytest invocation --
+**23 passed, 0 failed, 0 errors** in 77s. This is the same documented
+environmental issue as the "Environment note" after Milestone 11 and the
+two prior milestones' writeups, now at its worst severity this session --
+not a regression, and not something to chase further here; a future
+session on a quieter machine (or with the unrelated cluster stopped first)
+should get a clean single-pass `--all` run.
+
 ## Known limitations (found during Milestone 1's own live verification, not theoretical)
 
 1. **Pod-UID dedup doesn't survive a Deployment rollout.** A Deployment template

@@ -1,0 +1,35 @@
+# Scenario: missing resource requests/limits entirely (resource optimization
+# engine's DATA_QUALITY category)
+#
+# How the scenario is created: the container has no `resources` block at
+# all -- a common, genuinely-occurring misconfiguration, not a contrived
+# edge case.
+#
+# Expected optimization behavior: `kubesentinel optimize` should produce a
+# DATA_QUALITY recommendation (never CPU/MEMORY, since there's no request to
+# compare usage against) naming exactly which of requests/limits are
+# missing, with no proposed numbers and risks calling out both the
+# scheduling-fit and the no-upper-bound consequences.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: missing-requests-demo
+  namespace: kubesentinel-lab
+  labels:
+    app: missing-requests-demo
+    kubesentinel.io/scenario: missing-requests
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: missing-requests-demo
+  template:
+    metadata:
+      labels:
+        app: missing-requests-demo
+    spec:
+      containers:
+        - name: app
+          image: busybox:latest
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c", "sleep infinity"]

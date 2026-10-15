@@ -1,0 +1,46 @@
+# Scenario: oversized CPU and memory requests (resource optimization engine)
+#
+# How the scenario is created: the container does nothing but sleep -- its
+# real CPU usage sits at effectively 0m and its real memory footprint is a
+# few hundred KB (plain busybox `sleep`), while the Deployment requests far
+# more than that for both: 1000m CPU / 256Mi memory, limits 2000m / 512Mi.
+#
+# Expected optimization behavior: once metrics-server has reported a few
+# samples spanning the configured history window (default: at least 3
+# samples over at least 5 minutes -- see
+# optimization_min_samples_for_history/optimization_min_window_seconds_for_history),
+# `kubesentinel optimize` should propose a CPU request near the 10m floor
+# and a memory request near the 16Mi floor, both flagged CPU_OVERSIZED/
+# category MEMORY with the underlying finding visible in `reasoning` -- the
+# proposed number only appears once EvidenceQuality reaches LIMITED_HISTORY,
+# never from a single sample.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: oversized-resources-demo
+  namespace: kubesentinel-lab
+  labels:
+    app: oversized-resources-demo
+    kubesentinel.io/scenario: oversized-resources
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: oversized-resources-demo
+  template:
+    metadata:
+      labels:
+        app: oversized-resources-demo
+    spec:
+      containers:
+        - name: app
+          image: busybox:latest
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c", "sleep infinity"]
+          resources:
+            requests:
+              cpu: 1000m
+              memory: 256Mi
+            limits:
+              cpu: 2000m
+              memory: 512Mi
