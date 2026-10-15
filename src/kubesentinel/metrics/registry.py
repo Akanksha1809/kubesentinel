@@ -77,3 +77,35 @@ ai_errors_total = Counter(
     "kubesentinel_ai_errors_total",
     "AI summary requests that failed (backend unreachable, timed out, or malformed response).",
 )
+
+optimization_analysis_total = Counter(
+    "kubesentinel_optimization_analysis_total",
+    "Optimization analyze() runs, by outcome: success (metrics data was available), "
+    "partial (completed but usage metrics were missing/unreachable), or failed "
+    "(the run itself raised, e.g. the cluster was unreachable).",
+    ["status"],
+)
+
+optimization_recommendations_total = Counter(
+    "kubesentinel_optimization_recommendations_total",
+    "Recommendations produced by analyze() runs, by category.",
+    ["category"],
+)
+
+optimization_last_success_timestamp = Gauge(
+    "kubesentinel_optimization_last_success_timestamp",
+    "Unix timestamp of the last analyze() run that completed without raising "
+    "(success or partial -- never set on a failed run, so a stale value here "
+    "is an honest freshness signal even when metrics data itself is missing).",
+)
+
+optimization_metrics_data_available = Gauge(
+    "kubesentinel_optimization_metrics_data_available",
+    "Whether a usage data provider was available on the last analyze() run (1) or "
+    "not (0), by provider. 'metrics_api' reflects this run's actual outcome; "
+    "'prometheus' reflects only whether a Prometheus URL is configured "
+    "(KUBESENTINEL_OPTIMIZATION_PROMETHEUS_URL) -- analyze_workload() queries it "
+    "per-container, not once per run, so this is a configuration signal, not a "
+    "last-query-succeeded signal.",
+    ["provider"],
+)

@@ -16,6 +16,18 @@ from kubesentinel.models.incident import (
     IncidentStatus,
     ResourceRef,
 )
+from kubesentinel.models.optimization import (
+    AnalysisRunSummary,
+    ContainerResourceSnapshot,
+    EvidenceQuality,
+    RecommendationCategory,
+    RecommendationStatus,
+    ResourceQuantity,
+    ResourceRecommendation,
+    UsageSummary,
+    WorkloadKind,
+    WorkloadSnapshot,
+)
 
 __all__ = [
     "ActionStatus",
@@ -36,4 +48,14 @@ __all__ = [
     "IncidentSeverity",
     "IncidentStatus",
     "ResourceRef",
+    "AnalysisRunSummary",
+    "ContainerResourceSnapshot",
+    "EvidenceQuality",
+    "RecommendationCategory",
+    "RecommendationStatus",
+    "ResourceQuantity",
+    "ResourceRecommendation",
+    "UsageSummary",
+    "WorkloadKind",
+    "WorkloadSnapshot",
 ]

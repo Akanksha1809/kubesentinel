@@ -445,6 +445,543 @@ cluster, no Ollama) stays fast and fully offline -- 234 unit tests total.
 
 ---
 
+# Resource Optimization Engine (extension)
+
+A second, read-only engine: analyzes actual workload CPU/memory consumption
+and produces evidence-based right-sizing recommendations, sharing
+infrastructure with (but never tightly coupled to) the troubleshooting/
+self-healing engine above. See
+[docs/RESOURCE_OPTIMIZATION_DESIGN.md](docs/RESOURCE_OPTIMIZATION_DESIGN.md)
+for the full design. Numbering continues from Milestone 11 above rather than
+restarting, to keep one flat timeline.
+
+## Milestone 12: Repository audit, design doc, baseline -- DONE
+
+Audited the existing codebase against the extension spec (see the design
+doc's §1 for the full table of what's reused vs. new). Key findings:
+
+- No resource-optimization code exists anywhere yet.
+- No Kubernetes quantity-string parser exists anywhere (confirmed via
+  `grep`) -- net-new foundational work for Milestone 13.
+- `kubernetes==30.1.0` has no typed Metrics API client; it must be queried
+  via `CustomObjectsApi` against `metrics.k8s.io/v1beta1`, returning plain
+  dicts -- `ClusterClients` needs a `custom_objects` field added (additive).
+- `AppsV1Api` (already a dependency) covers Deployments/ReplicaSets/
+  StatefulSets/DaemonSets; Jobs need `BatchV1Api`, not currently constructed
+  anywhere.
+- `inspector.py::resource_ref_from_pod` resolves only **one** level of
+  ownership (Pod -> immediate owner) -- correct for incident identity, not
+  sufficient for optimization's workload-level view. A new, separate
+  `optimization/ownership.py` walks the full chain; `inspector.py` is left
+  unmodified since its current behavior is still correct for what uses it.
+- Live-confirmed on the lab kind cluster: `metrics-server` is **not
+  installed** (`NotFound`), and no Prometheus is running. The engine must
+  treat "no metrics" as a normal, honest first-class state from day one, not
+  an edge case to patch in later -- this shaped the `EvidenceQuality` design
+  in the doc's §5.
+- Baseline test run before any optimization code: `./scripts/test.sh` --
+  ruff clean, mypy clean, **234 unit tests passed**. (`--all` against the
+  live cluster was not re-run for this baseline specifically because the
+  dev kind cluster is currently sharing its host VM with an unrelated
+  project and showing real resource contention -- see the existing
+  "Environment note" below; this is noted so a slow live check during this
+  extension isn't mistaken for a regression this extension introduced.)
+
+No code was written this milestone, per the spec's own explicit instruction
+not to attempt a rewrite before the design is reviewed.
+
+## Milestone 13: Typed models, quantity utilities, metrics-provider interface -- DONE
+
+Added, touching no existing troubleshooting code's behavior:
+
+- `optimization/quantities.py` -- `parse_cpu_to_millicores()`/
+  `parse_memory_to_bytes()`/`format_cpu_millicores()`/`format_memory_bytes()`.
+  Uses `decimal.Decimal` throughout, never `float` -- Kubernetes' own
+  quantity type is exact decimal arithmetic, and converting through a binary
+  float anywhere in this pipeline would be a silent precision bug. Supports
+  the full real-world suffix set, including the nano/micro-core forms
+  metrics-server actually returns (e.g. `"132n"`), not just the request/
+  limit forms (`"100m"`, `"0.5"`) a manifest typically uses.
+- `models/optimization.py` -- `ResourceRecommendation`, `WorkloadSnapshot`,
+  `ContainerResourceSnapshot`, `UsageSummary`, `ResourceQuantity`, and the
+  `RecommendationCategory`/`EvidenceQuality`/`RecommendationStatus`/
+  `WorkloadKind` enums. `RecommendationStatus` deliberately has no
+  `APPLIED`/`FAILED` member yet -- there is no apply path in this phase (see
+  RESOURCE_OPTIMIZATION_DESIGN.md §6); adding those statuses ahead of the
+  code that would set them would be exactly the kind of premature
+  scaffolding this project avoids elsewhere (see the RBAC principle in
+  RBAC_AND_THREAT_MODEL.md: "grants grow alongside implemented capability,
+  not ahead of it" -- the same philosophy applied to a model's own enum).
+- `optimization/metrics_providers.py` -- the `MetricsProvider` Protocol
+  (same shape as `ai/client.py::AiClient`), `MetricsApiProvider` (queries
+  `metrics.k8s.io/v1beta1` via `CustomObjectsApi`, since the pinned
+  `kubernetes==30.1.0` client has no typed client for this aggregated API --
+  confirmed by reading the installed package), `PrometheusProvider`
+  (optional, stdlib `urllib` only, same approach as `OllamaClient`), and
+  `InMemorySampleStore` (a bounded per-container ring buffer -- this
+  project's "poor man's history" when only the snapshot-only Metrics API is
+  available).
+- `observer/client.py::ClusterClients` extended with `custom_objects`
+  (`CustomObjectsApi`) and `batch` (`BatchV1Api`) fields, both now
+  constructed unconditionally in `build_clients()` -- purely additive;
+  confirmed no existing caller of `.core`/`.apps`/`.discovery` needed to
+  change (`grep`-confirmed `ClusterClients(...)` is only ever constructed in
+  one place, so making the two new fields required rather than `Optional`
+  was safe and simpler than threading `None`-checks through every future
+  caller).
+- `config.py` -- `optimization_metrics_timeout_seconds`,
+  `optimization_prometheus_url` (empty = disabled, mirroring `ai_enabled`'s
+  pattern), `optimization_prometheus_timeout_seconds`,
+  `optimization_sample_store_max_samples`, `optimization_excluded_namespaces`
+  (+ its `_list` property, matching every other comma-separated setting's
+  convention).
+
+**Live-verified**, not just unit-tested: ran `MetricsApiProvider` against
+the real lab kind cluster (which, per Milestone 12's audit, genuinely has no
+metrics-server installed) and confirmed it raises `MetricsProviderError`
+with the real `404` from the API server -- the exact honest-failure
+behavior the spec requires, not a mock standing in for it. Also confirmed
+`build_clients()` still constructs all five clients correctly against the
+live cluster after the `ClusterClients` change.
+
+**Tests**: 60 new unit tests (`test_quantities.py`: 44, covering CPU/memory
+parse+format+round-trip+rejection of malformed input;
+`test_metrics_providers.py`: 16, covering both providers against mocked
+HTTP/API responses plus the sample store's bounding behavior) -- all
+offline, no cluster or Ollama needed. `./scripts/test.sh`: ruff clean, mypy
+clean (58 source files), **294 unit tests passed** (234 baseline + 60 new).
+
+## Milestone 14: Workload inventory and ownership resolution -- DONE
+
+Added:
+
+- `optimization/ownership.py::resolve_pod_owner()` -- resolves a Pod's full
+  owner chain (Pod -> ReplicaSet -> Deployment, or Pod -> StatefulSet/
+  DaemonSet/Job directly, or standalone). Prefers the `ownerReferences` entry
+  marked `controller=True`; a ReplicaSet whose own owner isn't in the
+  caller-supplied map, or a Pod owned by an unrecognized controller kind
+  (a CRD-based operator, Argo Rollout, etc.), resolves to `None` rather than
+  guessing -- the caller decides what to do with an unresolved Pod, never a
+  silent "treat it as standalone" fallback that would misrepresent a
+  perfectly well-managed workload as an orphan.
+- `optimization/inventory.py::build_workload_inventory()` -- groups Pods by
+  resolved owner into `WorkloadSnapshot`s, reading requests/limits from the
+  **owning workload's own pod template**, never a live Pod's spec (the
+  spec's "never edit an individual Pod when its resource configuration
+  belongs to a controller template" principle applied to *reading*, not just
+  writing: if the owning object itself wasn't found in this inventory pass,
+  the workload is skipped with a warning rather than substituting a live
+  Pod's spec as a stand-in for the template). Terminating Pods
+  (`deletionTimestamp` set) are excluded, mirroring
+  `observer/service.py::ObserverService`'s existing principle. Health is
+  computed from Pod readiness, restart count, and OOMKilled history --
+  deliberately independent of the troubleshooting engine's own incident
+  thresholds (see RESOURCE_OPTIMIZATION_DESIGN.md §2 on the one-way
+  dependency between the two engines).
+
+**A real bug found and fixed via live verification against the actual kind
+cluster** (not theoretical -- confirmed wrong before the fix, re-confirmed
+correct after it), plus the read-only guarantee confirmed at the strongest
+level this project has checked it yet:
+
+- **`status.readyReplicas`/`status.numberReady` are `omitempty` in the
+  Kubernetes API.** Running the real inventory builder against the lab's own
+  genuinely-broken Deployments (`crashloop-demo`, `oom-demo`, etc.) showed
+  `ready_replicas=None` for every one of them -- confirmed via `kubectl get
+  deployment ... -o jsonpath='{.status}'` that the field is entirely
+  *absent* from the real API response when its value is 0 (Go's `omitempty`
+  on a zero-valued int), not present-and-zero. The generated client
+  deserializes that absence as `None`, which this project's own
+  `WorkloadSnapshot.ready_replicas` uses to mean "unknown" (correctly, for a
+  Job, where the field doesn't apply at all) -- left uncorrected, every
+  genuinely-zero-ready workload would have misreported as "ready replicas
+  unknown" instead of the true, far more actionable "0 of N ready," right
+  when an operator would most want to know that number. Fixed by
+  normalizing `None -> 0` specifically for `ready_replicas`/`number_ready`
+  in `_replica_counts()` (not for `desired_replicas`, which has no such
+  `omitempty` behavior -- Kubernetes defaults `spec.replicas` to 1 and
+  always includes it). Re-verified live: every broken Deployment in the lab
+  now correctly reports `ready=0`, not `ready=None`.
+- Live-verified the read-only guarantee at the actual HTTP transport layer,
+  not just by code inspection: patched the real `urllib3` pool manager
+  underneath the live cluster's own `CoreV1Api` client and ran a full
+  inventory build against it, confirming only `GET` requests were ever
+  issued. This is now a permanent, repeatable check
+  (`tests/integration/test_optimization_inventory_live.py::
+  test_inventory_never_issues_a_non_get_http_request`), not a one-off.
+
+Also confirmed live: ran the real inventory builder against the full
+`kubesentinel-lab` namespace and spot-checked results against
+`kubectl` -- `pending-resources-demo`'s absurd 100-core/1000Gi request
+parsed correctly (`cpu_millicores=100000`, `memory_bytes=1073741824000`),
+`remediation-test` correctly resolved as `healthy=True, desired=2, ready=2`,
+and `failed-rollout-demo`/`imagepull-demo` each correctly collapsed two
+ReplicaSet generations' Pods into one Deployment-level workload (not two)
+-- exactly the "several replicas belong to one workload" requirement, shown
+working across a real rollout, not just in a unit test.
+
+`./scripts/test.sh --all`'s combined run showed 6 unrelated failures
+(RBAC-boundary/observer-detection/restart-recovery tests, none of which this
+milestone touched) while the shared Colima VM was again under the same
+resource contention from an unrelated project documented in this file's
+"Environment note" (below) -- re-ran all 6 in isolation immediately
+afterward and every one passed, confirming environment noise, not a
+regression.
+
+**Tests**: 21 new unit tests (`test_ownership.py`: 10, `test_inventory.py`:
+11) plus 2 new live integration tests (`test_optimization_inventory_live.py`,
+gated on cluster reachability like every other test in that directory).
+`./scripts/test.sh`: ruff clean, mypy clean, **315 unit tests passed** (294
+baseline + 21 new).
+
+## Milestone 15: Deterministic CPU/memory analysis and safety checks -- DONE
+
+Added:
+
+- `optimization/analyzer.py` -- the one public entry point,
+  `analyze_workload()`. Pools raw usage samples across every Pod currently
+  backing a workload (never per-replica -- a recommendation targets the
+  shared container template, so "typical/peak demand" must mean demand
+  across the whole workload), records them into `InMemorySampleStore` for
+  next time, and optionally upgrades to a real Prometheus range query
+  (`container_cpu_usage_seconds_total`/`container_memory_working_set_bytes`,
+  the cAdvisor-standard metric names) when `KUBESENTINEL_OPTIMIZATION_PROMETHEUS_URL`
+  is set -- any Prometheus failure (unreachable, no data, ambiguous query)
+  is caught and falls back to the snapshot/in-memory evidence, never raises.
+  CPU proposals are based on a configurable *percentile* of observed demand
+  (default p95, not the bare average); memory proposals are based on
+  observed *peak* (default p99), never the average -- the spec's explicit
+  CPU-vs-memory distinction, enforced structurally by using different
+  source statistics, not just differently-worded reasoning text. Nothing
+  below `LIMITED_HISTORY` evidence quality (at least 3 pooled samples
+  spanning at least 5 minutes, both configurable) is ever allowed to
+  produce a `proposed_requests` number -- "do not recommend aggressive
+  downsizing from a single sample," enforced in code, not just as a
+  principle in this document.
+- `optimization/safety.py::apply_safety_checks()` -- flags (never silently
+  drops) unhealthy workloads, system namespaces, and Jobs/DaemonSets
+  (`UNHEALTHY_WORKLOAD`/`SYSTEM_NAMESPACE`/`JOB_CONSERVATIVE`/
+  `DAEMONSET_CONSERVATIVE`), suppressing only `proposed_requests`/
+  `proposed_limits` on a flagged row -- the row itself, its `reasoning`, and
+  every other safety flag survive, so "KubeSentinel looked at this and chose
+  not to propose a number" stays visibly different from "KubeSentinel never
+  looked at this at all."
+- A historical OOM kill (`ContainerResourceSnapshot.recent_oom_detected`,
+  set by `inventory.py`) is surfaced as its own `OOM_HISTORY`-flagged
+  `MEMORY` recommendation *even with zero usage evidence* -- the OOM event
+  itself is the evidence -- and specifically vetoes any proposed *decrease*
+  to that container's memory request regardless of how quiet a recent
+  window looks, per the spec's "a historical OOM kill should increase
+  scrutiny rather than automatically trigger a larger limit" (this project
+  reads that as cutting both ways: never silently waved away either).
+- `WorkloadSnapshot.unschedulable_reason` (set by `inventory.py` from a real
+  `PodScheduled=False/Unschedulable` condition) feeds a `SCHEDULING`
+  category recommendation -- but only when the scheduler's own message
+  classifies as `PENDING_INSUFFICIENT_RESOURCES`; a taint/affinity-caused
+  Pending is correctly left alone as not a resource-sizing concern. This
+  reuses `diagnostics/rules/scheduling.py`'s existing message
+  classification *by import*, now exposed as the public
+  `classify_unschedulable_message()` (renamed from the module-private
+  `_classify`, its one other call site updated) -- exactly the "reusing
+  existing collection infrastructure, not a copy" the design doc committed
+  to, not a second, possibly-diverging copy of the same pattern-matching
+  logic.
+- `config.py` -- the analysis thresholds this milestone's logic actually
+  reads (`optimization_min_samples_for_history`,
+  `optimization_min_window_seconds_for_history`,
+  `optimization_cpu_typical_percentile`, `optimization_cpu_safety_margin`,
+  `optimization_cpu_floor_millicores`, `optimization_memory_peak_percentile`,
+  `optimization_memory_safety_margin`, `optimization_memory_floor_bytes`,
+  `optimization_underutilization_ratio`, `optimization_near_limit_ratio`,
+  `optimization_recommendation_ttl_seconds`) -- added alongside the code
+  that uses each one, not ahead of it.
+
+Deliberately deferred to Milestone 16 (per RESOURCE_OPTIMIZATION_DESIGN.md's
+own split): cluster-level overcommitment analysis (needs Node capacity
+aggregated across every workload, which doesn't fit the per-container
+`ResourceRecommendation` shape -- it belongs in the `/optimization/summary`
+endpoint this milestone doesn't build yet) and the `ACTIVE_INCIDENT` safety
+flag (needs `IncidentRepository`, which `safety.py` deliberately doesn't
+depend on yet -- added ahead of the integration work that would set it would
+be exactly the premature-scaffolding this project avoids elsewhere).
+
+**Live-verified against the real cluster**, not just unit-tested: ran
+`analyze_workload()` against the real inventory of the actual
+`kubesentinel-lab` namespace (no metrics-server installed, so every
+usage-based CPU/memory check correctly stayed silent) and confirmed it still
+surfaced exactly the two workloads that should be flagged from
+non-usage evidence alone:
+- `oom-demo`: a real recorded `OOMKilled` termination -> `MEMORY` category,
+  `OOM_HISTORY` + `UNHEALTHY_WORKLOAD` flags, no proposed number.
+- `pending-resources-demo`: the real scheduler message ("0/1 nodes are
+  available: 1 Insufficient cpu, 1 Insufficient memory.") -> `SCHEDULING`
+  category, `UNSCHEDULABLE` + `UNHEALTHY_WORKLOAD` flags.
+
+Every other real workload in the namespace (fully-specified resources,
+healthy, schedulable, just genuinely lacking usage evidence without
+metrics-server) correctly produced **zero** recommendations -- confirming
+the "quiet when there's nothing actionable to say" behavior works against
+real data, not only in a unit test's hand-built fixture.
+
+**Tests**: 35 new unit tests (`test_analyzer.py`: 22, including a real
+mocked-HTTP Prometheus upgrade path and its failure-fallback;
+`test_safety.py`: 8; 5 more added to `test_inventory.py` for the new
+`recent_oom_detected`/`unschedulable_reason` extraction, 16 total there
+now). `./scripts/test.sh`: ruff clean, mypy clean, **350 unit tests
+passed** (315 Milestone 14 baseline + 35 new).
+
+---
+
+## Milestone 16: API and persistence integration -- DONE
+
+Added:
+
+- `persistence/optimization_repo.py::SQLiteOptimizationRepository` -- a new
+  `OptimizationRepository` ABC (`persistence/interface.py`) implemented
+  against the *same* `db_path` the troubleshooting engine already uses, in
+  3 new tables (`optimization_recommendations`,
+  `optimization_workload_snapshots`, `optimization_analysis_runs`) -- reusing
+  the existing SQLite file and connection-per-call/lock pattern from
+  `SQLiteIncidentRepository`, not a second database. The analysis-run summary
+  uses a fixed `_LATEST_ANALYSIS_RUN_ID = "latest"` single-row
+  upsert -- `GET /optimization/summary` never needs to scan the cluster or
+  recompute anything to answer "when did analysis last run and what did it
+  see," it just reads one row.
+- `api/optimization_routes.py` -- a new `APIRouter` (`/optimization/...`)
+  with `POST /analyze` (the *only* route that touches the cluster -- every
+  other route below serves already-persisted data from the last `analyze()`
+  call), `GET /summary`, `GET /workloads`, `GET /recommendations` (with
+  `namespace`/`workload`/`category`/`status` filters), `GET
+  /recommendations/{id}` (404 via `RecommendationNotFoundError`), and `POST
+  /recommendations/{id}/review` (token-gated via the *existing*
+  `require_api_token` dependency -- the same gate the troubleshooting
+  engine's plan/approve/execute/reject already use -- 404/409 via
+  `RecommendationNotFoundError`/`InvalidRecommendationStateError`).
+  Deliberately **no apply/execute endpoint**: there is no code anywhere in
+  this project that patches a workload's resources, so exposing a route that
+  implied otherwise would be exactly the misleading-endpoint-for-
+  unimplemented-behavior the spec warns against (see
+  RESOURCE_OPTIMIZATION_DESIGN.md §6).
+- `api/state.py` (new) -- `AppState`, the module-level `state`, and
+  `require_api_token` moved out of `app.py` into their own module so both
+  `app.py` and `optimization_routes.py` can depend on the same state/auth
+  dependency without a circular import (`app.py` is what imports
+  `optimization_routes`, so `optimization_routes` can't import from
+  `app.py`). No behavior change to either -- a pure extraction.
+- `optimization/service.py::OptimizationService` -- the layer the routes and
+  CLI both call through: `analyze()` (collects inventory + raw samples,
+  runs `analyze_workload()` per workload, persists the run and its
+  recommendations), `get_recommendation()`/`list_recommendations()`/
+  `list_workloads()`/`summary()`, and `review()`. Two correctness properties
+  enforced here, not in the storage layer: **effective status is computed
+  at read time, never stored** -- `_with_effective_status()` returns a
+  `model_copy()` with `status=EXPIRED` once `expires_at` has passed, so
+  reading a stale recommendation never itself mutates the row (no background
+  expiry job exists, by design); and **supersession never clobbers a human
+  decision** -- each `analyze()` run expires any *prior* same-
+  (namespace, workload, container, category) recommendation still sitting in
+  `NEW`, but anything already `REVIEWED`/`APPROVED`/`REJECTED` is left
+  completely untouched by later runs.
+- CLI (`cli/main.py`): `optimize`, `recommendations`, `recommendation`,
+  `optimization-summary`, `review-recommendation` -- same
+  `_build_optimization_service()` construction pattern as the existing
+  commands, table output via Rich / `--json` via plain `print()`.
+
+**Bug found and fixed this milestone**: every one of the 15 pre-existing
+`console.print(json_module.dumps(...))` call sites across the *entire* CLI
+(every `--json` flag, old and new commands alike, dating back to Milestone 6)
+was silently corrupting its own JSON output. Found live running
+`kubesentinel recommendation <id> --json`: a long `reasoning` string got a
+literal newline inserted mid-string by Rich's terminal-width word-wrapping,
+and the output failed to parse (`json.decoder.JSONDecodeError: Invalid
+control character`). Root cause: Rich's `console.print()` always word-wraps
+at terminal width regardless of content type, and no prior JSON field in this
+project had ever been long enough to visibly wrap -- so the bug existed,
+undetected, since the very first `--json` flag was added. Fixed by replacing
+every `console.print(json_module.dumps(...))` with the builtin
+`print(json_module.dumps(...))` (`console.print()` is still used for every
+human-facing table/text output -- only the JSON paths changed). Re-verified
+live: the same command's `--json` output now parses correctly.
+
+**Live-verified against the real cluster and a running API server**, not
+just unit-tested:
+- CLI: `optimize --namespace kubesentinel-lab`, `recommendations`,
+  `recommendation <id>` (both table and `--json`), `optimization-summary`,
+  and `review-recommendation <id> APPROVED --reviewed-by ... --notes ...`
+  all run against the real lab, producing the same `oom-demo`/
+  `pending-resources-demo` recommendations Milestone 15 found, now
+  persisted and reviewable.
+- HTTP API: started the real FastAPI app (`uvicorn ... --app-dir src`)
+  against a real kubeconfig pointed at `kind-kubesentinel`, with
+  `KUBESENTINEL_API_TOKEN` set. Confirmed live:
+  - `POST /optimization/analyze` (both with and without a namespace filter)
+    returns an honest `metrics_available: false` with the real
+    `metrics.k8s.io pods query failed (status=404): Not Found` warning (no
+    metrics-server installed on this lab cluster -- the "honest absence"
+    path, not a crash).
+  - `GET /optimization/summary` correctly aggregates by category/status
+    across recommendations created by both the CLI session and the HTTP
+    session against the same persisted data.
+  - `GET /optimization/recommendations` and `GET /optimization/workloads`
+    return the expected rows with correct filters.
+  - `GET /optimization/recommendations/{id}` returns the full typed
+    recommendation body for a real ID.
+  - `POST /optimization/recommendations/{id}/review`: confirmed `401`
+    with no `Authorization` header and a real `200` with
+    `Authorization: Bearer <token>`, the response showing the persisted
+    `status`/`reviewed_by`/`reviewed_at`/`review_notes` -- the same
+    token-gating behavior the troubleshooting engine's mutating endpoints
+    already have, now proven for this engine's own write path too.
+
+**Tests**: 42 new unit tests (`test_optimization_repo.py`: 13;
+`test_optimization_service.py`: 16; `test_optimization_api.py`: 13, after
+fixing two initial failures -- a missing `_for_all_namespaces` mock set in
+the shared fixture, and a mis-asserted 503-vs-401 case on the review
+endpoint, corrected and renamed to `test_review_without_authorization_header_is_401`
+once it was clear the fixture's own `api_token="test-token"` makes a missing
+header a 401 case, not the "disabled entirely" 503 case already covered by
+`test_api.py`). `./scripts/test.sh`: ruff clean, mypy clean, **392 unit
+tests passed** (350 Milestone 15 baseline + 42 new). `./scripts/test.sh
+--all` (full suite against the live cluster): **415 passed, 2 failed** --
+both failures (`test_observer_still_detects_after_pod_deleted_and_recreated_with_same_name`,
+`test_pod_watcher_relists_on_resync_boundary`) are pre-existing watch-stream
+timing tests in the *troubleshooting* engine, untouched by this milestone's
+changes. Confirmed as the same shared-VM contention already documented
+below (not a regression): `docker stats` showed the unrelated
+`ai-platform-engineer-control-plane` container at 263% CPU / 46% memory on
+the same Colima VM at the time of the failure, and re-running both tests in
+isolation immediately afterward passed cleanly.
+
+## Milestone 17: Incident integration, Prometheus metrics, RBAC -- DONE
+
+Added:
+
+- `OptimizationService.__init__` takes an optional `incident_repo:
+  IncidentRepository | None`. `analyze()` now computes, per workload, the
+  currently-open (non-resolved) incident IDs via the *existing*
+  `IncidentRepository.find_open_by_resource_uid` -- checked against the
+  workload's own UID and every one of its current Pods' UIDs (deduped
+  before querying, since a standalone Pod's `workload_uid` is the same
+  value as its one entry in `pod_uids`), because an incident in this
+  project can be opened against either, depending on which diagnostic rule
+  found it (a Pod-level CrashLoopBackOff vs. a Deployment-level
+  UNSATISFIED_REPLICAS). The result threads through
+  `analyzer.py::analyze_workload`'s new `related_incident_ids` parameter
+  into `safety.py::apply_safety_checks`, which now adds an `ACTIVE_INCIDENT`
+  flag, suppresses the proposed number, and sets
+  `ResourceRecommendation.related_incident_ids` -- `safety.py` itself still
+  never touches a repository or the Kubernetes API directly, staying a pure
+  function over already-fetched facts; the repository read happens once, in
+  `service.py`, the one place in this engine that's allowed to have side
+  effects. `app.py` wires `state.repo` (the troubleshooting engine's own
+  `IncidentRepository` instance) straight into `OptimizationService`'s
+  construction -- no second incident store, no duplicated incident concept.
+  The parameter is optional and defaults to `None` (-> `[]`, never a crash
+  or a false negative) specifically so every pre-existing test and CLI call
+  site that doesn't pass one keeps working unchanged.
+- `metrics/registry.py`: 4 new bounded-cardinality Prometheus metrics --
+  `kubesentinel_optimization_analysis_total{status}` (success/partial/
+  failed), `kubesentinel_optimization_recommendations_total{category}`,
+  `kubesentinel_optimization_last_success_timestamp` (no labels),
+  `kubesentinel_optimization_metrics_data_available{provider}`
+  (metrics_api/prometheus). `OptimizationService.analyze()` now wraps its
+  body in a `try`/`except Exception` that records `status="failed"` and
+  re-raises unchanged (no new error-handling behavior, just honest
+  observability of the existing one) on any unexpected failure (e.g. the
+  cluster being unreachable); on a completed run it records
+  `success`/`partial` based on `metrics_available`, increments
+  `recommendations_total` by category, and sets
+  `last_success_timestamp` -- deliberately on *both* `success` and
+  `partial` outcomes, never on `failed`, since "did analyze() complete
+  honestly" and "was usage data available" are different questions (the
+  metric's own HELP text says so explicitly, to avoid a future reader
+  assuming "last success" means "metrics worked"). The `prometheus`
+  provider gauge reflects whether `KUBESENTINEL_OPTIMIZATION_PROMETHEUS_URL`
+  is *configured*, not whether a query actually succeeded this run (the
+  Prometheus upgrade happens per-container inside `analyzer.py`, not once
+  per `analyze()` call, so there's no single run-level success/failure
+  signal to report honestly without a larger refactor this milestone
+  doesn't need) -- documented as exactly that in the metric's HELP string
+  rather than overclaiming.
+- `rbac/optimization-role.yaml` + `rbac/optimization-rolebinding.yaml`: a
+  new, separate, read-only Role (`kubesentinel-optimizer`) for
+  StatefulSets/DaemonSets/Jobs/ReplicaSets (`apps`/`batch`, `get`/`list`)
+  and `metrics.k8s.io` Pods -- kept separate from `kubesentinel-observer`
+  and `kubesentinel-remediator` for the same independent-auditability reason
+  those two already are. Verbs are exactly `get`/`list`, never `watch`:
+  confirmed by reading `inventory.py`, which takes a one-shot inventory
+  snapshot per `analyze()` call and has no watch loop, unlike the
+  troubleshooting engine's continuous Pod watch. No ClusterRole added for
+  `metrics.k8s.io` Nodes: `MetricsApiProvider.get_current_node_usage()` has
+  existed since Milestone 13 but has no caller anywhere in this codebase
+  yet -- granting RBAC for a capability nothing uses yet would be exactly
+  the "ahead of the code that uses it" the project's own RBAC convention
+  (see `role.yaml`'s docstring) warns against.
+- 15 new unit tests: 3 in `test_safety.py` (`ACTIVE_INCIDENT` flagging,
+  multiple incident IDs recorded, no flag when the list is empty), 1 in
+  `test_analyzer.py` (the parameter threads end-to-end through
+  `analyze_workload`), 11 in `test_optimization_service.py`
+  (`TestIncidentIntegration`: no-repo-wired-up is a no-op, a real match on a
+  Pod UID flags and links correctly, a resolved incident never counts as
+  active, each UID is checked exactly once; `TestOptimizationMetrics`: all
+  4 metrics, using the same reset-then-assert `._value.get()` pattern
+  already established for `incidents_active` in `test_incident_manager.py`).
+
+**Deliberately not built this milestone**: cluster-level overcommitment
+analysis (summing Node allocatable capacity against total requested across
+every workload). This was floated as a "deferred to later" idea in
+Milestone 15's own writeup, but re-reading RESOURCE_OPTIMIZATION_DESIGN.md
+§13's actual Milestone 6 scope before starting this milestone's work showed
+it was never actually committed to there -- only incident integration,
+metrics, and RBAC were. Building it anyway would have been scope creep
+beyond what the design doc's own plan promises; left as a possible future
+addition, not a known gap in what this milestone claims to do.
+
+**Live-verified against the real cluster and a running API server**, not
+just unit-tested:
+- `kubesentinel optimize --namespace kubesentinel-lab` against the real
+  `kubesentinel.db` (which already has real, non-resolved incidents from
+  the troubleshooting engine's own ongoing detection) correctly produced
+  `ACTIVE_INCIDENT` on both expected recommendations: `oom-demo`'s `MEMORY`
+  recommendation linked to *two* real incident IDs (one opened on the
+  Deployment's own UID, one on a specific Pod's UID -- confirmed by reading
+  both incidents directly out of the SQLite file), and
+  `pending-resources-demo`'s `SCHEDULING` recommendation linked to the real
+  incident opened on that Deployment's UID. Both had their proposed values
+  correctly suppressed.
+- Started the real FastAPI app against a throwaway db, `POST
+  /optimization/analyze`, then scraped the real `/metrics` endpoint:
+  confirmed `kubesentinel_optimization_analysis_total{status="partial"}`
+  incremented on the clean run (no metrics-server on this lab cluster),
+  `recommendations_total{category="MEMORY"}`/`{category="SCHEDULING"}` each
+  at 1 (matching the 2 real recommendations), `last_success_timestamp` set
+  to the partial run's own timestamp, and both
+  `metrics_data_available{provider=...}` gauges correctly at 0 (no
+  metrics-server, no Prometheus URL configured).
+- An incidental but genuine confirmation of the `status="failed"` path: a
+  transient cluster connectivity failure (the documented shared-VM
+  contention -- see below) made one `/optimization/analyze` call raise for
+  real; `/metrics` immediately afterward showed
+  `kubesentinel_optimization_analysis_total{status="failed"}=1`, and a
+  clean retry correctly left that counter alone while incrementing
+  `{status="partial"}` instead -- exactly the distinct-and-correctly-
+  separate behavior this metric was built to have, confirmed under a real
+  failure rather than only a mocked one.
+
+**Tests**: `./scripts/test.sh`: ruff clean, mypy clean, **407 unit tests
+passed** (392 Milestone 16 baseline + 15 new). `./scripts/test.sh --all`:
+**429 passed, 3 failed** -- all 3 failures
+(`test_observer_opens_real_incident_for_live_probe_failure_pod`,
+`test_observer_still_detects_after_pod_deleted_and_recreated_with_same_name`,
+`test_pod_watcher_relists_on_resync_boundary`) are pre-existing
+troubleshooting-engine tests that don't import or touch anything this
+milestone changed (confirmed by reading their imports directly), and all 3
+passed cleanly when re-run in isolation immediately afterward. `docker
+stats` showed the same unrelated `ai-platform-engineer-control-plane`
+container at 250%+ CPU on the shared Colima VM during the failing run,
+consistent with the contention already documented after Milestones 9, 11,
+and 16 -- not a regression.
+
 ## Known limitations (found during Milestone 1's own live verification, not theoretical)
 
 1. **Pod-UID dedup doesn't survive a Deployment rollout.** A Deployment template

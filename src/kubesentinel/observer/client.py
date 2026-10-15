@@ -18,12 +18,30 @@ logger = logging.getLogger(__name__)
 
 
 class ClusterClients:
-    """Bundle of the typed API clients the observer and remediation layers need."""
+    """Bundle of the typed API clients the observer, remediation, and
+    optimization layers need.
 
-    def __init__(self, core: client.CoreV1Api, apps: client.AppsV1Api, discovery: client.DiscoveryV1Api):
+    `custom_objects` and `batch` were added for the optimization engine
+    (`metrics.k8s.io` has no typed client in this project's pinned
+    `kubernetes` version and must be queried via `CustomObjectsApi`; Jobs
+    need `BatchV1Api`, not previously constructed anywhere) -- purely
+    additive, every existing caller of `core`/`apps`/`discovery` is
+    unaffected.
+    """
+
+    def __init__(
+        self,
+        core: client.CoreV1Api,
+        apps: client.AppsV1Api,
+        discovery: client.DiscoveryV1Api,
+        custom_objects: client.CustomObjectsApi,
+        batch: client.BatchV1Api,
+    ):
         self.core = core
         self.apps = apps
         self.discovery = discovery
+        self.custom_objects = custom_objects
+        self.batch = batch
 
 
 def load_kube_config(settings: Settings) -> None:
@@ -52,4 +70,6 @@ def build_clients(settings: Settings) -> ClusterClients:
         core=client.CoreV1Api(api_client),
         apps=client.AppsV1Api(api_client),
         discovery=client.DiscoveryV1Api(api_client),
+        custom_objects=client.CustomObjectsApi(api_client),
+        batch=client.BatchV1Api(api_client),
     )

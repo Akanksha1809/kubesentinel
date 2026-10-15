@@ -14,20 +14,24 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.responses import Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from pydantic import BaseModel, Field
 
 from kubesentinel.ai.client import AiClientError, OllamaClient
 from kubesentinel.ai.summarizer import summarize_incident
-from kubesentinel.config import Settings, get_settings
+from kubesentinel.api import optimization_routes
+from kubesentinel.api.state import require_api_token, state
+from kubesentinel.config import get_settings
 from kubesentinel.incidents.manager import IncidentManager
 from kubesentinel.metrics.registry import ai_errors_total, ai_summaries_total
 from kubesentinel.logging_config import configure_logging
 from kubesentinel.models.action import ActionType
 from kubesentinel.observer.client import build_clients
 from kubesentinel.observer.service import ObserverService
+from kubesentinel.optimization.service import OptimizationService
+from kubesentinel.persistence.optimization_repo import SQLiteOptimizationRepository
 from kubesentinel.persistence.sqlite_repo import SQLiteIncidentRepository
 from kubesentinel.policy.engine import PolicyEngine
 from kubesentinel.remediation.executor import RemediationExecutor
@@ -39,18 +43,6 @@ from kubesentinel.remediation.service import (
 from kubesentinel.verification.verifier import RecoveryVerifier
 
 logger = logging.getLogger(__name__)
-
-
-class AppState:
-    settings: Settings
-    repo: SQLiteIncidentRepository
-    manager: IncidentManager
-    observer: ObserverService | None = None
-    remediation: RemediationService | None = None
-    ai_client: OllamaClient | None = None
-
-
-state = AppState()
 
 
 @asynccontextmanager
@@ -66,6 +58,7 @@ async def lifespan(app: FastAPI):
         if settings.ai_enabled
         else None
     )
+    state.optimization_repo = SQLiteOptimizationRepository(settings.db_path)
 
     try:
         clients = build_clients(settings)
@@ -78,34 +71,23 @@ async def lifespan(app: FastAPI):
             poll_interval_seconds=settings.verification_poll_interval_seconds,
         )
         state.remediation = RemediationService(PolicyEngine(settings), executor, verifier, state.repo, settings)
+        state.optimization = OptimizationService(clients, state.optimization_repo, settings, incident_repo=state.repo)
     except Exception:  # noqa: BLE001 - API must still serve read endpoints without a cluster
         logger.exception("could not start observer; no kubeconfig/in-cluster config available")
         state.observer = None
         state.remediation = None
+        state.optimization = None
 
     yield
 
     if state.observer:
         state.observer.stop()
     state.repo.close()
+    state.optimization_repo.close()
 
 
 app = FastAPI(title="KubeSentinel", version="0.1.0", lifespan=lifespan)
-
-
-def require_api_token(authorization: str | None = Header(default=None)) -> None:
-    """Every mutating endpoint depends on this. An unset KUBESENTINEL_API_TOKEN
-    means mutation is disabled entirely (503), not left open (never 200) --
-    there is no code path here that treats "no token configured" as "no auth
-    needed." A configured token that doesn't match the request is 401."""
-    if not state.settings.api_token:
-        raise HTTPException(
-            status_code=503,
-            detail="remediation endpoints are disabled: KUBESENTINEL_API_TOKEN is not configured",
-        )
-    expected = f"Bearer {state.settings.api_token}"
-    if authorization != expected:
-        raise HTTPException(status_code=401, detail="missing or invalid bearer token")
+app.include_router(optimization_routes.router)
 
 
 def _require_remediation_service() -> RemediationService:

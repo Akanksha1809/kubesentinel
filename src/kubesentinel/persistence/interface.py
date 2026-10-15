@@ -12,6 +12,7 @@ from datetime import datetime
 
 from kubesentinel.models.action import RemediationAction
 from kubesentinel.models.incident import Incident
+from kubesentinel.models.optimization import AnalysisRunSummary, ResourceRecommendation, WorkloadSnapshot
 
 
 class IncidentRepository(ABC):
@@ -45,3 +46,55 @@ class IncidentRepository(ABC):
         builtin name within this class body's annotation scope.
         """
         ...
+
+
+class OptimizationRepository(ABC):
+    """Persistence for the resource optimization engine -- a separate
+    interface from `IncidentRepository`, not merged into it: a
+    `ResourceRecommendation` is a different aggregate with a different
+    lifecycle, and a `WorkloadSnapshot` has no equivalent in the
+    troubleshooting engine at all. Implementations may share the same
+    underlying SQLite file as `IncidentRepository` (see
+    `persistence/optimization_repo.py`); this interface makes no assumption
+    either way.
+    """
+
+    @abstractmethod
+    def get_recommendation(self, recommendation_id: str) -> ResourceRecommendation | None: ...
+
+    @abstractmethod
+    def save_recommendation(self, recommendation: ResourceRecommendation) -> None:
+        """Upsert by `recommendation_id`."""
+        ...
+
+    @abstractmethod
+    def list_recommendations(
+        self,
+        *,
+        namespace: str | None = None,
+        workload_name: str | None = None,
+        category: str | None = None,
+        status: str | None = None,
+    ) -> builtins.list[ResourceRecommendation]: ...
+
+    @abstractmethod
+    def save_workload_snapshots(self, snapshots: builtins.list[WorkloadSnapshot]) -> None:
+        """Replaces the *entire* stored set with `snapshots` -- always the
+        full current inventory from one `analyze()` pass, never a partial
+        merge, so a workload that disappeared (deleted, or its last Pod
+        gone) is never left behind as a stale `GET /optimization/workloads`
+        result."""
+        ...
+
+    @abstractmethod
+    def list_workload_snapshots(self, *, namespace: str | None = None) -> builtins.list[WorkloadSnapshot]: ...
+
+    @abstractmethod
+    def save_analysis_run(self, summary: AnalysisRunSummary) -> None:
+        """Replaces the previously-saved run -- only the latest is kept,
+        this is a freshness marker, not a history log (see
+        `models.optimization.AnalysisRunSummary`)."""
+        ...
+
+    @abstractmethod
+    def get_latest_analysis_run(self) -> AnalysisRunSummary | None: ...

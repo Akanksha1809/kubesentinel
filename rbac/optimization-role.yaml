@@ -1,0 +1,40 @@
+# Read-only Role for the resource optimization engine's workload inventory
+# and metrics collection (RESOURCE_OPTIMIZATION_DESIGN.md Milestone 6). Kept
+# SEPARATE from kubesentinel-observer (role.yaml) and kubesentinel-remediator
+# (remediation-role.yaml) for the same reason those two are already split:
+# a reviewer checking what this engine can do should be able to read exactly
+# this one file, without cross-referencing what another capability happens
+# to have granted the same ServiceAccount.
+#
+# StatefulSets/DaemonSets/Jobs: the workload kinds optimization/ownership.py
+# resolves beyond the Deployments role.yaml already grants. ReplicaSets:
+# needed read-only to walk Pod -> ReplicaSet -> Deployment (ownership.py),
+# declared here too even though remediation-role.yaml already grants it to
+# the same ServiceAccount, so this Role alone is still sufficient if
+# remediation were ever removed. metrics.k8s.io/pods: current usage via
+# metrics-server (optimization/metrics_providers.py::MetricsApiProvider).
+#
+# "get"/"list" only, never "watch" -- confirmed by reading inventory.py: the
+# optimization engine takes a one-shot inventory snapshot per `analyze()`
+# call, unlike the troubleshooting engine's continuous Pod watch loop, so
+# there is no watch call anywhere in this module to grant for (and the
+# Metrics API doesn't support "watch" at all).
+#
+# Deliberately excludes: any write verb (this engine never patches a
+# workload -- see RESOURCE_OPTIMIZATION_DESIGN.md Section 6), Secrets, and
+# ConfigMaps (not read by this engine).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kubesentinel-optimizer
+  namespace: kubesentinel-lab
+rules:
+  - apiGroups: ["apps"]
+    resources: ["statefulsets", "daemonsets", "replicasets"]
+    verbs: ["get", "list"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list"]
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods"]
+    verbs: ["get", "list"]

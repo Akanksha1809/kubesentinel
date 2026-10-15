@@ -95,6 +95,63 @@ class Settings(BaseSettings):
     ai_model: str = "qwen2.5-coder:3b"
     ai_timeout_seconds: float = 30.0
 
+    # Resource optimization engine (read-only; see
+    # docs/RESOURCE_OPTIMIZATION_DESIGN.md). Metrics-server access is always
+    # attempted (no "enabled" flag -- a missing/unreachable metrics-server is
+    # a normal, honestly-reported state, not a feature to toggle); Prometheus
+    # is opt-in by setting its URL, mirroring `ai_enabled`'s "empty/unset
+    # means off" pattern.
+    optimization_metrics_timeout_seconds: float = 10.0
+    optimization_prometheus_url: str = ""
+    optimization_prometheus_timeout_seconds: float = 10.0
+    # Bound on InMemorySampleStore's per-container ring buffer -- this is
+    # process-memory, not disk, so it must stay small regardless of cluster
+    # size. 60 samples at this project's typical resync-like cadence is a
+    # deliberately modest "a little better than one snapshot," not an
+    # attempt to replace real retained history (that's what Prometheus is for).
+    optimization_sample_store_max_samples: int = 60
+    # Namespaces excluded from optimization by default -- system namespaces
+    # KubeSentinel has no business recommending changes for, regardless of
+    # what their usage looks like. Still watched/inventoried (so a GET can
+    # say "excluded: system namespace," not silence); never auto-flagged for
+    # a resize.
+    optimization_excluded_namespaces: str = "kube-system,kube-public,kube-node-lease,local-path-storage"
+
+    # Analysis thresholds (optimization/analyzer.py, Milestone 4). Deliberately
+    # conservative defaults -- the spec is explicit that this engine must not
+    # recommend aggressive downsizing from thin evidence.
+    #
+    # A pooled sample count/window below these means EvidenceQuality can never
+    # rise above SNAPSHOT_ONLY, and `proposed_*` stays None.
+    optimization_min_samples_for_history: int = 3
+    optimization_min_window_seconds_for_history: float = 300.0
+    # CPU: proposed request = (a percentile of observed demand) * (1 + margin),
+    # never below the floor. The percentile is deliberately *not* the bare
+    # average -- see RESOURCE_OPTIMIZATION_DESIGN.md §7.
+    optimization_cpu_typical_percentile: float = 0.95
+    optimization_cpu_safety_margin: float = 0.2
+    optimization_cpu_floor_millicores: int = 10
+    # Memory: proposed request/limit is based on observed *peak* (or this high
+    # percentile), never the average -- memory is not CPU; a transient average
+    # is actively dangerous as the basis for a limit.
+    optimization_memory_peak_percentile: float = 0.99
+    optimization_memory_safety_margin: float = 0.15
+    optimization_memory_floor_bytes: int = 16 * 1024 * 1024
+    # A container is flagged "oversized" when its proposed request would be
+    # below this fraction of its *current* request -- deliberately requires a
+    # large, unambiguous gap, not "slightly less than requested."
+    optimization_underutilization_ratio: float = 0.5
+    # A container is flagged "near its limit" (pressure, not waste) once
+    # observed usage reaches this fraction of the configured limit.
+    optimization_near_limit_ratio: float = 0.85
+    # How long a recommendation is considered fresh before a GET must say so
+    # is EXPIRED rather than silently serving a stale number.
+    optimization_recommendation_ttl_seconds: float = 86400.0
+
+    @property
+    def optimization_excluded_namespace_list(self) -> list[str]:
+        return [n.strip() for n in self.optimization_excluded_namespaces.split(",") if n.strip()]
+
     @property
     def watch_namespace_list(self) -> list[str]:
         return [n.strip() for n in self.watch_namespaces.split(",") if n.strip()]

@@ -3,6 +3,15 @@
 A thin client over the same observer/diagnostic/persistence code the API uses --
 every command here does one-shot work against the live cluster and/or the local
 SQLite store, with no long-running watch loop (that's the API server's job).
+
+Every `--json` output path uses the builtin `print()`, never `console.print()`
+(Rich) -- found live, the hard way: Rich word-wraps any long line to the
+terminal's width by default, including a plain string handed to it, which
+inserts real newline characters *inside* a JSON string value (e.g. a long
+`reasoning` field) and silently produces invalid JSON for anything piped or
+captured rather than viewed directly in a wide terminal. `console.print()`
+stays correct (and desirable) for the human-facing table/text output every
+command also has; only the machine-readable path needed to change.
 """
 
 from __future__ import annotations
@@ -21,6 +30,13 @@ from kubesentinel.logging_config import configure_logging
 from kubesentinel.models.action import ActionType
 from kubesentinel.observer.client import build_clients
 from kubesentinel.observer.inspector import pod_evidence
+from kubesentinel.optimization.service import (
+    InvalidRecommendationStateError,
+    OptimizationService,
+    RecommendationNotFoundError,
+)
+from kubesentinel.models.optimization import RecommendationStatus
+from kubesentinel.persistence.optimization_repo import SQLiteOptimizationRepository
 from kubesentinel.persistence.sqlite_repo import SQLiteIncidentRepository
 from kubesentinel.policy.engine import PolicyEngine
 from kubesentinel.remediation.executor import RemediationExecutor
@@ -73,7 +89,7 @@ def diagnose(
     result = DiagnosticEngine().diagnose(evidence)
 
     if json_output:
-        console.print(json_module.dumps(result.model_dump(mode="json"), indent=2))
+        print(json_module.dumps(result.model_dump(mode="json"), indent=2))
         return
 
     if not result.hypotheses:
@@ -102,7 +118,7 @@ def list_incidents(
     incidents = repo.list(status=status, namespace=namespace)
 
     if json_output:
-        console.print(json_module.dumps([i.model_dump(mode="json") for i in incidents], indent=2))
+        print(json_module.dumps([i.model_dump(mode="json") for i in incidents], indent=2))
         return
 
     table = Table(title="Incidents")
@@ -132,7 +148,7 @@ def show_evidence(incident_id: str, json_output: bool = typer.Option(False, "--j
         raise typer.Exit(code=1)
 
     if json_output:
-        console.print(json_module.dumps([e.model_dump(mode="json") for e in incident.evidence], indent=2))
+        print(json_module.dumps([e.model_dump(mode="json") for e in incident.evidence], indent=2))
         return
 
     for e in incident.evidence:
@@ -150,7 +166,7 @@ def show_audit(incident_id: str, json_output: bool = typer.Option(False, "--json
         raise typer.Exit(code=1)
 
     if json_output:
-        console.print(json_module.dumps([a.model_dump(mode="json") for a in incident.audit_log], indent=2))
+        print(json_module.dumps([a.model_dump(mode="json") for a in incident.audit_log], indent=2))
         return
 
     for a in incident.audit_log:
@@ -186,7 +202,7 @@ def explain_incident(
         raise typer.Exit(code=1) from exc
 
     if json_output:
-        console.print(json_module.dumps(summary.model_dump(mode="json"), indent=2))
+        print(json_module.dumps(summary.model_dump(mode="json"), indent=2))
         return
     console.print(summary.text)
     console.print(f"\n[dim]{summary.disclaimer}[/dim]")
@@ -240,7 +256,7 @@ def dry_run_action(
     decision = service.dry_run(incident, action_type, target_desired_replicas=target_replicas)
 
     if json_output:
-        console.print(json_module.dumps({"outcome": decision.outcome.value, "reason": decision.reason}, indent=2))
+        print(json_module.dumps({"outcome": decision.outcome.value, "reason": decision.reason}, indent=2))
         return
     console.print(f"[bold]{decision.outcome.value}[/bold]: {decision.reason}")
 
@@ -268,7 +284,7 @@ def plan_action(
     action = service.propose(incident, action_type, rationale, parameters, target_replicas)
 
     if json_output:
-        console.print(json_module.dumps(action.model_dump(mode="json"), indent=2))
+        print(json_module.dumps(action.model_dump(mode="json"), indent=2))
         return
     console.print(f"action_id: {action.action_id}")
     console.print(f"status: [bold]{action.status.value}[/bold]")
@@ -298,7 +314,7 @@ def approve_action(
         raise typer.Exit(code=1) from exc
 
     if json_output:
-        console.print(json_module.dumps(action.model_dump(mode="json"), indent=2))
+        print(json_module.dumps(action.model_dump(mode="json"), indent=2))
         return
     console.print(f"status: [bold]{action.status.value}[/bold]")
 
@@ -323,7 +339,7 @@ def execute_action(
         raise typer.Exit(code=1) from exc
 
     if json_output:
-        console.print(json_module.dumps(action.model_dump(mode="json"), indent=2))
+        print(json_module.dumps(action.model_dump(mode="json"), indent=2))
         return
     console.print(f"status: [bold]{action.status.value}[/bold]")
     if action.execution_error:
@@ -353,9 +369,153 @@ def reject_action(
         raise typer.Exit(code=1) from exc
 
     if json_output:
-        console.print(json_module.dumps(action.model_dump(mode="json"), indent=2))
+        print(json_module.dumps(action.model_dump(mode="json"), indent=2))
         return
     console.print(f"status: [bold]{action.status.value}[/bold]")
+
+
+def _build_optimization_service(settings: Settings) -> tuple[OptimizationService, SQLiteOptimizationRepository]:
+    clients = build_clients(settings)
+    repo = SQLiteOptimizationRepository(settings.db_path)
+    incident_repo = SQLiteIncidentRepository(settings.db_path)
+    return OptimizationService(clients, repo, settings, incident_repo=incident_repo), repo
+
+
+@app.command("optimize")
+def optimize(
+    namespace: list[str] = typer.Option([], "--namespace", help="Namespace to analyze (repeatable; default: all)"),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """Run a resource optimization analysis pass against the live cluster.
+    Read-only: inspects Pods/workloads/metrics and persists recommendations
+    locally -- never modifies anything in the cluster."""
+    settings = get_settings()
+    configure_logging(settings.log_level)
+    service, _repo = _build_optimization_service(settings)
+
+    summary = service.analyze(namespaces=namespace)
+
+    if json_output:
+        print(json_module.dumps(summary.model_dump(mode="json"), indent=2))
+        return
+    console.print(
+        f"Analyzed {summary.workload_count} workload(s), "
+        f"{summary.recommendation_count} recommendation(s) generated."
+    )
+    if not summary.metrics_available:
+        console.print(f"[yellow]Metrics provider unavailable: {summary.warning}[/yellow]")
+        console.print("[yellow]Recommendations based on non-usage evidence only (scheduling, missing config, OOM history).[/yellow]")
+
+
+@app.command("recommendations")
+def list_recommendations(
+    namespace: str = typer.Option(None, help="Filter by namespace"),
+    workload: str = typer.Option(None, help="Filter by workload name"),
+    category: str = typer.Option(None, help="Filter by category: CPU, MEMORY, SCHEDULING, DATA_QUALITY"),
+    status: str = typer.Option(None, help="Filter by status: NEW, REVIEWED, APPROVED, REJECTED, EXPIRED"),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """List resource optimization recommendations from the last analysis."""
+    settings = get_settings()
+    service, _repo = _build_optimization_service(settings)
+    recommendations = service.list_recommendations(
+        namespace=namespace, workload_name=workload, category=category, status=status
+    )
+
+    if json_output:
+        print(json_module.dumps([r.model_dump(mode="json") for r in recommendations], indent=2))
+        return
+
+    table = Table(title="Resource Optimization Recommendations")
+    for col in ("ID", "Namespace", "Workload", "Container", "Category", "Status", "Flags"):
+        table.add_column(col)
+    for r in recommendations:
+        table.add_row(
+            r.recommendation_id[:8],
+            r.namespace,
+            r.workload_name,
+            r.container_name,
+            r.category.value,
+            r.status.value,
+            ", ".join(r.safety_flags),
+        )
+    console.print(table)
+
+
+@app.command("recommendation")
+def show_recommendation(
+    recommendation_id: str = typer.Argument(..., help="Recommendation to show"),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """Show one resource optimization recommendation in full, including its
+    reasoning, evidence, and safety flags."""
+    settings = get_settings()
+    service, _repo = _build_optimization_service(settings)
+    try:
+        recommendation = service.get_recommendation(recommendation_id)
+    except RecommendationNotFoundError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from exc
+
+    if json_output:
+        print(json_module.dumps(recommendation.model_dump(mode="json"), indent=2))
+        return
+
+    console.print(f"[bold]{recommendation.category.value}[/bold] ({recommendation.status.value}) -- {recommendation.namespace}/{recommendation.workload_name}/{recommendation.container_name}")
+    console.print(f"  {recommendation.reasoning}")
+    if recommendation.proposed_requests:
+        console.print(f"  Proposed requests: {recommendation.proposed_requests.model_dump()}")
+    if recommendation.safety_flags:
+        console.print(f"  Safety flags: {', '.join(recommendation.safety_flags)}")
+    if recommendation.risks:
+        console.print("  Risks:")
+        for risk in recommendation.risks:
+            console.print(f"    - {risk}")
+
+
+@app.command("optimization-summary")
+def optimization_summary(json_output: bool = typer.Option(False, "--json")) -> None:
+    """Show aggregate counts and the freshness of the last analysis pass."""
+    settings = get_settings()
+    service, _repo = _build_optimization_service(settings)
+    summary = service.summary()
+
+    if json_output:
+        print(json_module.dumps(summary, indent=2, default=str))
+        return
+    console.print(f"Total recommendations: {summary['total_recommendations']}")
+    console.print(f"By category: {summary['by_category']}")
+    console.print(f"By status: {summary['by_status']}")
+    if summary["latest_analysis"]:
+        console.print(f"Last analyzed: {summary['latest_analysis']['analyzed_at']}")
+        console.print(f"Metrics available: {summary['latest_analysis']['metrics_available']}")
+    else:
+        console.print("[yellow]No analysis has been run yet -- run `kubesentinel optimize` first.[/yellow]")
+
+
+@app.command("review-recommendation")
+def review_recommendation(
+    recommendation_id: str = typer.Argument(..., help="Recommendation to review"),
+    decision: RecommendationStatus = typer.Argument(..., help="REVIEWED, APPROVED, or REJECTED"),
+    reviewed_by: str = typer.Option(..., "--reviewed-by"),
+    notes: str = typer.Option(None, "--notes"),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """Record a human review decision on a recommendation. Never applies
+    anything to the cluster -- there is no apply path in this project yet;
+    see docs/RESOURCE_OPTIMIZATION_DESIGN.md."""
+    settings = get_settings()
+    service, _repo = _build_optimization_service(settings)
+    try:
+        recommendation = service.review(recommendation_id, decision, reviewed_by, notes)
+    except (RecommendationNotFoundError, InvalidRecommendationStateError) as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from exc
+
+    if json_output:
+        print(json_module.dumps(recommendation.model_dump(mode="json"), indent=2))
+        return
+    console.print(f"status: [bold]{recommendation.status.value}[/bold]")
 
 
 def _state_label(cs) -> str:

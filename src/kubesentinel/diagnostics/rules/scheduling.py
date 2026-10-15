@@ -35,7 +35,7 @@ class PendingSchedulingRule(DiagnosticRule):
 
         for ev in unschedulable:
             message = ev.data.get("message") or ""
-            reason_code, confidence, cause = _classify(message)
+            reason_code, confidence, cause = classify_unschedulable_message(message)
 
             hypotheses.append(
                 Hypothesis(
@@ -58,7 +58,15 @@ class PendingSchedulingRule(DiagnosticRule):
         return hypotheses
 
 
-def _classify(message: str) -> tuple[ReasonCode, Confidence, str]:
+def classify_unschedulable_message(message: str) -> tuple[ReasonCode, Confidence, str]:
+    """Classifies a scheduler's `PodScheduled=False/Unschedulable` message.
+
+    Public specifically so `optimization/analyzer.py` can reuse this exact
+    classification (by import) for its own SCHEDULING-category
+    recommendations, rather than maintaining a second, possibly-diverging
+    copy of the same message-pattern logic -- see
+    RESOURCE_OPTIMIZATION_DESIGN.md §7.
+    """
     lowered = message.lower()
     if "insufficient" in lowered:
         return (
