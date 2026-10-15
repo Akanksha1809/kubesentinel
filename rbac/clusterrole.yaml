@@ -1,0 +1,13 @@
+# The one necessary cluster-scoped exception: Node is not a namespaced resource, so
+# watching it cannot be expressed in a namespaced Role no matter how narrow. Grants
+# read-only access to Nodes only -- nothing else is cluster-scoped in this project.
+# See RBAC_AND_THREAT_MODEL.md. If KUBESENTINEL_WATCH_NODES=false, this ClusterRole
+# and its binding are not needed at all.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kubesentinel-node-observer
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]

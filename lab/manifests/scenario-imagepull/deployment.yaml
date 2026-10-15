@@ -1,0 +1,44 @@
+# Scenario: ImagePullBackOff / ErrImagePull
+#
+# How the failure is created: the Deployment references an image repository that does
+# not exist on Docker Hub. The kubelet's first attempt fails fast with ErrImagePull;
+# repeated failures then move it into ImagePullBackOff with growing retry delays.
+#
+# Expected Kubernetes behavior: containerStatuses[].state.waiting.reason cycles through
+# ErrImagePull then ImagePullBackOff, with a message containing "not found" / "manifest
+# unknown" style text from the registry.
+#
+# Expected KubeSentinel diagnosis: IMAGE_PULL_BACKOFF or ERR_IMAGE_PULL (confidence HIGH),
+# explanation classifies the message as a likely nonexistent-image-reference case.
+#
+# Automatic remediation: NOT safe by default -- only a human can supply the correct
+# image reference. KubeSentinel recommends checking the image reference and any
+# imagePullSecrets.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: imagepull-demo
+  namespace: kubesentinel-lab
+  labels:
+    app: imagepull-demo
+    kubesentinel.io/scenario: imagepull
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: imagepull-demo
+  template:
+    metadata:
+      labels:
+        app: imagepull-demo
+    spec:
+      containers:
+        - name: app
+          image: kubesentinel-lab-nonexistent/does-not-exist:v1
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 50m
+              memory: 32Mi

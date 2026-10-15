@@ -1,0 +1,28 @@
+# Minimal Prometheus scrape config for KubeSentinel.
+#
+# KubeSentinel itself runs as a local process (CLI or `uvicorn` via
+# ./scripts/demo.sh), talking to the kind cluster through a kubeconfig --
+# it is not deployed as an in-cluster workload, so there is no Kubernetes
+# service/pod to discover via *_sd_configs. The one real scrape target is
+# the FastAPI process's own /metrics endpoint.
+#
+# Usage:
+#   docker run --rm -p 9090:9090 \
+#     -v "$(pwd)/observability/prometheus.yml:/etc/prometheus/prometheus.yml" \
+#     prom/prometheus
+#
+# Then, with ./scripts/demo.sh running in another terminal (serving on
+# 127.0.0.1:8000), open http://localhost:9090 and query e.g.
+# `kubesentinel_incidents_active`.
+#
+# host.docker.internal resolves to the host from inside the Prometheus
+# container on Docker Desktop/Colima; swap in the host's actual LAN IP if
+# that name doesn't resolve in your environment.
+
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: kubesentinel
+    static_configs:
+      - targets: ["host.docker.internal:8000"]

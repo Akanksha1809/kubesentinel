@@ -1,0 +1,141 @@
+{
+  "title": "KubeSentinel",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "timezone": "browser",
+  "time": { "from": "now-1h", "to": "now" },
+  "refresh": "10s",
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {}
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Active incidents by category",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "kubesentinel_incidents_active",
+          "legendFormat": "{{category}}"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Incident detection rate (5m)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rate(kubesentinel_incidents_detected_total[5m])",
+          "legendFormat": "{{category}}"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Diagnostic engine duration (p50/p95)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.50, rate(kubesentinel_diagnostic_duration_seconds_bucket[5m]))",
+          "legendFormat": "p50"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.95, rate(kubesentinel_diagnostic_duration_seconds_bucket[5m]))",
+          "legendFormat": "p95"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Recovery duration by category (p50/p95)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.50, sum(rate(kubesentinel_recovery_duration_seconds_bucket[15m])) by (le, category))",
+          "legendFormat": "{{category}} p50"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.95, sum(rate(kubesentinel_recovery_duration_seconds_bucket[15m])) by (le, category))",
+          "legendFormat": "{{category}} p95"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "title": "Remediation attempts / successes / failures (rate, 15m)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rate(kubesentinel_remediation_attempts_total[15m])",
+          "legendFormat": "attempted: {{action_type}}"
+        },
+        {
+          "refId": "B",
+          "expr": "rate(kubesentinel_remediation_success_total[15m])",
+          "legendFormat": "succeeded: {{action_type}}"
+        },
+        {
+          "refId": "C",
+          "expr": "rate(kubesentinel_remediation_failures_total[15m])",
+          "legendFormat": "failed: {{action_type}}/{{reason}}"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "title": "Actions requiring approval (rate, 15m)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rate(kubesentinel_actions_requiring_approval[15m])",
+          "legendFormat": "{{action_type}}"
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "title": "Observer watch-loop errors by component (rate, 15m)",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 24 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rate(kubesentinel_observer_errors_total[15m])",
+          "legendFormat": "{{component}}"
+        }
+      ]
+    }
+  ]
+}

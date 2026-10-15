@@ -1,0 +1,51 @@
+# Scenario: Pending due to insufficient node resources
+#
+# How the failure is created: the Pod requests far more CPU and memory (100 cores,
+# 1000Gi) than any single node in this (or almost any) cluster has allocatable --
+# deliberately absurd rather than "slightly too much," so this stays reliably
+# unschedulable regardless of the host machine's own specs.
+#
+# Expected Kubernetes behavior: the scheduler can never place the Pod.
+# status.conditions[PodScheduled] stays status=False, reason=Unschedulable, with a
+# message like "0/1 nodes are available: 1 Insufficient cpu, 1 Insufficient memory."
+# -- no Pending-then-eventually-placed transient window, because the request can
+# never be satisfied by adding time, only by lowering it or adding real capacity.
+#
+# Expected KubeSentinel diagnosis: PENDING_INSUFFICIENT_RESOURCES, confidence HIGH,
+# classified directly from the scheduler's own message text (see
+# diagnostics/rules/scheduling.py::_classify) -- not inferred from the Pending phase
+# alone, which by itself is also the normal resting state of a Pod that simply
+# hasn't been scheduled yet.
+#
+# Automatic remediation: NOT safe by default -- only a human can decide whether to
+# lower the request or add node capacity; KubeSentinel only recommends the choice.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pending-resources-demo
+  namespace: kubesentinel-lab
+  labels:
+    app: pending-resources-demo
+    kubesentinel.io/scenario: pending-resources
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pending-resources-demo
+  template:
+    metadata:
+      labels:
+        app: pending-resources-demo
+    spec:
+      containers:
+        - name: app
+          image: busybox:latest
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c", "sleep infinity"]
+          resources:
+            requests:
+              cpu: "100"
+              memory: "1000Gi"
+            limits:
+              cpu: "100"
+              memory: "1000Gi"

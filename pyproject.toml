@@ -1,0 +1,62 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kubesentinel"
+version = "0.1.0"
+description = "Kubernetes intelligent troubleshooting and controlled self-healing platform"
+requires-python = ">=3.11"
+readme = "README.md"
+dependencies = [
+    "kubernetes==30.1.0",
+    "fastapi==0.115.0",
+    "uvicorn[standard]==0.32.0",
+    "pydantic==2.9.2",
+    "pydantic-settings==2.5.2",
+    "prometheus-client==0.21.0",
+    "typer==0.12.5",
+    # typer==0.12.5 subclasses click.Argument and overrides make_metavar() with
+    # the click<8.2 signature. click 8.2+ added a required `ctx` parameter to
+    # that method, which typer 0.12.5 doesn't override to match -- found live,
+    # confirmed by reading both packages' installed versions, not guessed: pip
+    # had resolved click to 8.5.0 (typer only declares "click>=8.0.0", no upper
+    # bound) and every CLI command crashed with
+    # "TyperArgument.make_metavar() takes 1 positional argument but 2 were given"
+    # as soon as Click needed to render any usage/error text. Pinned explicitly
+    # rather than left to float.
+    "click==8.1.8",
+    "rich==13.9.2",
+    "python-json-logger==3.2.1",
+    "PyYAML==6.0.2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==8.3.3",
+    "pytest-asyncio==0.24.0",
+    "pytest-cov==5.0.0",
+    "httpx==0.27.2",
+    "mypy==1.11.2",
+    "ruff==0.6.9",
+]
+
+[project.scripts]
+kubesentinel = "kubesentinel.cli.main:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = [".", "src"]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

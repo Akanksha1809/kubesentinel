@@ -1,0 +1,55 @@
+"""Kubernetes API client construction.
+
+Supports in-cluster config (when running as a Pod, using the mounted service account)
+and local kubeconfig (for development). Which one is used is never guessed from
+environment heuristics beyond the standard "are we in a Pod" check that the official
+client itself performs.
+"""
+
+from __future__ import annotations
+
+import logging
+
+from kubernetes import client, config
+
+from kubesentinel.config import Settings
+
+logger = logging.getLogger(__name__)
+
+
+class ClusterClients:
+    """Bundle of the typed API clients the observer and remediation layers need."""
+
+    def __init__(self, core: client.CoreV1Api, apps: client.AppsV1Api, discovery: client.DiscoveryV1Api):
+        self.core = core
+        self.apps = apps
+        self.discovery = discovery
+
+
+def load_kube_config(settings: Settings) -> None:
+    """Load kube config, preferring in-cluster when available."""
+    try:
+        config.load_incluster_config()
+        logger.info("loaded in-cluster kubeconfig")
+        return
+    except config.ConfigException:
+        pass
+
+    config.load_kube_config(
+        config_file=settings.kubeconfig or None,
+        context=settings.kube_context or None,
+    )
+    logger.info(
+        "loaded local kubeconfig",
+        extra={"context": settings.kube_context or "<current-context>"},
+    )
+
+
+def build_clients(settings: Settings) -> ClusterClients:
+    load_kube_config(settings)
+    api_client = client.ApiClient()
+    return ClusterClients(
+        core=client.CoreV1Api(api_client),
+        apps=client.AppsV1Api(api_client),
+        discovery=client.DiscoveryV1Api(api_client),
+    )

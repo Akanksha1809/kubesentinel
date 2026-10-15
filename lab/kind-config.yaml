@@ -1,0 +1,8 @@
+# Single-node kind cluster. Kept minimal: this project does not need multi-node
+# scheduling behavior for its current diagnostic rules, and a second node would just
+# cost more memory on a laptop.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: kubesentinel
+nodes:
+  - role: control-plane

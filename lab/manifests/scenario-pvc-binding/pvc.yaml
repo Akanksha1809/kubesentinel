@@ -1,0 +1,30 @@
+# Scenario: PVC binding failure
+#
+# How the failure is created: references a StorageClass that does not exist.
+#
+# Expected Kubernetes behavior: status.phase stays Pending, and the
+# persistentvolume-controller emits a Warning Event with reason=ProvisioningFailed
+# naming the missing StorageClass.
+#
+# Expected KubeSentinel diagnosis: PVC_BINDING_FAILURE, HIGH confidence, from the
+# ProvisioningFailed Event -- NOT from the Pending phase alone. This project's
+# kind cluster's default StorageClass (local-path) uses
+# volumeBindingMode: WaitForFirstConsumer, under which Pending is the Pod-less
+# PVC's *normal* resting state -- treating bare Pending as a failure would
+# fabricate a diagnosis the evidence doesn't support. See DIAGNOSTIC_RULES.md.
+#
+# Automatic remediation: not applicable -- only a human can supply a valid
+# StorageClass name.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: pvc-binding-demo
+  namespace: kubesentinel-lab
+  labels:
+    kubesentinel.io/scenario: pvc-binding
+spec:
+  storageClassName: kubesentinel-lab-nonexistent-storage-class
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi

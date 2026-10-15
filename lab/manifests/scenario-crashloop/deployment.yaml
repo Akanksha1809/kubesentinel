@@ -1,0 +1,47 @@
+# Scenario: CrashLoopBackOff
+#
+# How the failure is created: the container's entrypoint sleeps briefly, then exits 1.
+# Kubernetes restarts it under the Pod's restartPolicy (Always, the Deployment default);
+# after enough rapid restarts the kubelet enters CrashLoopBackOff and increases the
+# delay between restarts exponentially (capped at 5 minutes).
+#
+# Expected Kubernetes behavior: restart_count climbs, containerStatuses[].state.waiting
+# shows reason=CrashLoopBackOff, lastState.terminated shows reason=Error exit_code=1.
+#
+# Expected KubeSentinel diagnosis: CRASH_LOOP_BACKOFF (confidence HIGH once restarts >= 3),
+# explanation references the last Error/exit_code=1 termination and notes logs are needed
+# to confirm the application-level cause -- KubeSentinel does not claim more than the
+# evidence supports.
+#
+# Automatic remediation: NOT safe by default. A restart cannot fix a deterministic exit;
+# this is intentionally left as a policy-gated "recommend investigation" case.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: crashloop-demo
+  namespace: kubesentinel-lab
+  labels:
+    app: crashloop-demo
+    kubesentinel.io/scenario: crashloop
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: crashloop-demo
+  template:
+    metadata:
+      labels:
+        app: crashloop-demo
+    spec:
+      containers:
+        - name: app
+          image: busybox:latest
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c", "echo starting; sleep 2; echo crashing now; exit 1"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 50m
+              memory: 32Mi

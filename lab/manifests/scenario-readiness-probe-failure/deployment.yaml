@@ -1,0 +1,58 @@
+# Scenario: Readiness probe failing
+#
+# How the failure is created: the container itself starts fine and keeps running
+# (`sleep infinity`) -- it never crashes, so containerStatuses never shows a bad
+# waiting/termination reason. The readinessProbe is an `exec` command that always
+# fails (`/bin/false`), with a short period/threshold so it fails fast and
+# repeatedly for the demo.
+#
+# Expected Kubernetes behavior: the Pod stays Running, restart_count stays 0, but
+# containerStatuses[].ready is false and the Pod is never added to any Service's
+# Endpoints/EndpointSlice. The kubelet emits a Warning Event
+# (reason=Unhealthy, message="Readiness probe failed: ...") on every failed check.
+#
+# Expected KubeSentinel diagnosis: READINESS_PROBE_FAILING, confidence HIGH, from
+# that Unhealthy Event specifically -- not from containerStatuses, which (unlike a
+# crash) carries none of this signal. See diagnostics/rules/probes.py's module
+# docstring for why this evidence source is genuinely different from every other
+# Pod-level rule in this project.
+#
+# Automatic remediation: NOT safe by default -- a restart does not fix a probe that
+# is deterministically going to keep failing; KubeSentinel only recommends checking
+# the probe configuration and the application's real readiness.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: readiness-probe-failure-demo
+  namespace: kubesentinel-lab
+  labels:
+    app: readiness-probe-failure-demo
+    kubesentinel.io/scenario: readiness-probe-failure
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: readiness-probe-failure-demo
+  template:
+    metadata:
+      labels:
+        app: readiness-probe-failure-demo
+    spec:
+      containers:
+        - name: app
+          image: busybox:latest
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c", "sleep infinity"]
+          readinessProbe:
+            exec:
+              command: ["/bin/false"]
+            initialDelaySeconds: 2
+            periodSeconds: 3
+            failureThreshold: 1
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 50m
+              memory: 32Mi

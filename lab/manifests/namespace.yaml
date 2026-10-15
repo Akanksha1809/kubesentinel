@@ -1,0 +1,8 @@
+# All deliberately broken lab resources live here, never in a system namespace.
+# KubeSentinel's RBAC and remediation allowlist are both scoped to this namespace only.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kubesentinel-lab
+  labels:
+    kubesentinel.io/lab: "true"

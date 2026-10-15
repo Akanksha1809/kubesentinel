@@ -1,0 +1,35 @@
+# A healthy, stable Deployment used ONLY to exercise remediation actions
+# (restart/rollback/scale) safely -- deliberately NOT one of the broken failure
+# scenarios in ../scenario-*, so a remediation demo is never confused with a
+# diagnosis demo. 2 replicas (not 1) so restarting it never trips the policy
+# engine's single-replica availability guard -- see docs/REMEDIATION_SAFETY.md.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: remediation-test
+  namespace: kubesentinel-lab
+  labels:
+    app: remediation-test
+    kubesentinel.io/scenario: remediation-test
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: remediation-test
+  template:
+    metadata:
+      labels:
+        app: remediation-test
+    spec:
+      containers:
+        - name: app
+          image: busybox:latest
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c", "sleep infinity"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 50m
+              memory: 32Mi

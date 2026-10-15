@@ -1,0 +1,22 @@
+# Least-privilege Role for what KubeSentinel's observer actually does today: watch
+# Pods, Events, Deployments, PersistentVolumeClaims, Services, and EndpointSlices in
+# the lab namespace. Deliberately does NOT include permissions for capability that
+# isn't implemented yet (write verbs for remediation) -- this file is expected to
+# grow namespace-scoped verbs/resources alongside the code that uses them, not ahead
+# of it. See RBAC_AND_THREAT_MODEL.md. Nodes are the one cluster-scoped exception --
+# see clusterrole.yaml.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kubesentinel-observer
+  namespace: kubesentinel-lab
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "events", "persistentvolumeclaims", "services"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["get", "list", "watch"]

@@ -1,0 +1,73 @@
+# Scenario: Deployment rollout failure (ProgressDeadlineExceeded)
+#
+# How the failure is created: every Pod the rollout creates crashes after 2s
+# (same substrate as scenario-crashloop) *and* carries an always-failing
+# readinessProbe. The probe is the important part, found necessary live: without
+# one, a container with no readinessProbe at all is considered Ready the instant
+# it enters Running -- so a crash-only Pod (no probe) actually satisfies the
+# Deployment's "new ReplicaSet is available" check in that brief window *before*
+# it crashes, and the rollout gets marked Progressing=True/NewReplicaSetAvailable
+# instead of ever failing. The always-failing probe guarantees the Pod is never
+# considered Ready even for that brief window, so the rollout genuinely cannot
+# progress. `progressDeadlineSeconds` is set to 15s (default is 600s) purely so
+# this fails fast enough for a live demo; the mechanism it exercises -- the
+# Deployment controller giving up after its own deadline -- is identical to a
+# production failure, just on a shorter clock.
+#
+# Expected Kubernetes behavior: the new ReplicaSet's Pod(s) never reach Ready.
+# After 15s with no progress, the Deployment controller sets
+# status.conditions[Progressing] to status=False, reason=ProgressDeadlineExceeded.
+# This is a Deployment-level, controller-authored signal -- not a guess derived
+# from replica counts.
+#
+# Expected KubeSentinel diagnosis: ROLLOUT_FAILED, confidence HIGH, on the
+# Deployment resource specifically (a separate incident from any Pod-level
+# CRASH_LOOP_BACKOFF incident the same underlying Pods also produce -- the
+# incident manager dedups by resource UID, and a Pod and its owning Deployment
+# are different resources with different UIDs; see ARCHITECTURE.md). Only
+# `ProgressDeadlineExceeded` triggers this -- a transient `Available=False` during
+# a normal rollout does not (see REMEDIATION_SAFETY.md's "Why RESTART/ROLLBACK
+# need a stricter check" for the related verifier-side fix this distinction
+# protects).
+#
+# Automatic remediation: NOT safe by default -- a restart will not fix a
+# deterministically crashing container; KubeSentinel recommends checking the new
+# ReplicaSet's Pods directly, or rolling back if the previous revision is known
+# good.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: failed-rollout-demo
+  namespace: kubesentinel-lab
+  labels:
+    app: failed-rollout-demo
+    kubesentinel.io/scenario: failed-rollout
+spec:
+  replicas: 1
+  progressDeadlineSeconds: 15
+  selector:
+    matchLabels:
+      app: failed-rollout-demo
+  template:
+    metadata:
+      labels:
+        app: failed-rollout-demo
+    spec:
+      containers:
+        - name: app
+          image: busybox:latest
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c", "echo starting; sleep 2; echo crashing now; exit 1"]
+          readinessProbe:
+            exec:
+              command: ["/bin/false"]
+            initialDelaySeconds: 0
+            periodSeconds: 1
+            failureThreshold: 1
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 50m
+              memory: 32Mi

@@ -1,0 +1,764 @@
+# TODO / Milestone tracker
+
+Status is updated only after the described work is actually implemented and verified
+(tests executed, or a live kind cluster check run) in this session -- not on intent.
+
+## Milestone 0: Scaffold -- DONE
+
+- [x] git repo, pyproject.toml, .gitignore, .env.example
+- [x] Core Pydantic models: Evidence, Hypothesis, DiagnosisResult, ResourceRef, Incident, RemediationAction
+- [x] Settings (pydantic-settings) and structured JSON logging
+
+## Milestone 1: Vertical slice -- DONE
+
+- [x] Kubernetes client setup: in-cluster / local kubeconfig (`observer/client.py`)
+- [x] Pod watch loop with list-then-watch, 410 Gone relist, exponential backoff reconnect,
+      bounded resync timer (`observer/watchers.py`, `observer/backoff.py`)
+- [x] Evidence extraction from Pod status/conditions/container states (`observer/inspector.py`)
+- [x] Diagnostic rules: CrashLoopBackOff, OOMKilled (incl. inferred-from-exit-code-137
+      fallback), ImagePullBackOff/ErrImagePull
+- [x] Diagnostic engine: runs all rules, ranks hypotheses by confidence (`diagnostics/engine.py`)
+- [x] Incident manager: dedup by resource UID, health classification, severity mapping,
+      recovery detection (`incidents/`)
+- [x] SQLite repository behind an abstract interface (`persistence/`)
+- [x] FastAPI read endpoints: `/health /ready /incidents /incidents/{id}
+      /incidents/{id}/evidence /incidents/{id}/actions /incidents/{id}/diagnose
+      /cluster/summary /metrics`
+- [x] CLI: `inspect`, `diagnose`, `incidents`, `evidence`, `audit`
+- [x] Prometheus metrics wired for everything implemented so far (counters/gauges/histograms)
+- [x] kind lab: namespace + 4 scenarios (crashloop, oom, imagepull, transient-recovery)
+- [x] 40 unit tests (rules, health classification, dedup, SQLite roundtrip, backoff math,
+      observer deletion-timestamp handling) -- `./scripts/test.sh`, all passing
+- [x] Verified live end-to-end against a real kind cluster: all 3 permanent failure
+      scenarios detected and correctly diagnosed; the transient-recovery scenario opened
+      *and resolved* an incident with a real measured `recovery_duration_seconds`,
+      confirmed via the API, CLI, and `/metrics`
+- [x] ruff + mypy clean
+
+## Milestone 2: Remaining diagnostic rules -- DONE (13 of 14; DNS deliberately deferred)
+
+- [x] `MissingConfigReferenceRule` -- `CreateContainerConfigError`/`CreateContainerError`
+      waiting reasons (no new watch needed -- already in Pod evidence)
+- [x] `PendingSchedulingRule` -- classifies the Pod's own `PodScheduled=False/Unschedulable`
+      condition message into `PENDING_INSUFFICIENT_RESOURCES` or
+      `PENDING_SCHEDULING_CONSTRAINT` (taint/affinity), with an honest MEDIUM-confidence
+      fallback when the message doesn't match a known pattern
+- [x] `ReadinessProbeFailingRule` / `LivenessProbeFailingRule` -- required wiring up the
+      `EventWatcher` that Milestone 1 had built but never activated; readiness failures in
+      particular have **no** container-state signal at all, only the Warning Event
+- [x] `RolloutFailedRule` / `UnsatisfiedReplicasRule` -- new `DeploymentWatcher`; Deployment-
+      kind incidents, proving IncidentManager's UID-based dedup generalizes to any resource
+      kind, not just Pods
+- [x] `PvcBindingFailureRule` -- new `PVCWatcher` + Event correlation; deliberately does NOT
+      treat PVC `Pending` phase alone as a failure (this project's kind cluster uses
+      `WaitForFirstConsumer`, where Pending-with-no-consumer is normal)
+- [x] `NodeConditionRule` -- new `NodeWatcher` (cluster-scoped, needs a ClusterRole --
+      see `rbac/clusterrole.yaml`); NotReady/pressure conditions open an incident,
+      cordoning alone does not (too often deliberate maintenance)
+- [x] `ServiceSelectorMismatchRule` -- new `EndpointSliceWatcher`; fires only on *zero*
+      endpoints (not zero-*ready*), to avoid misdiagnosing a Pod readiness problem as a
+      Service problem
+- [ ] DNS/connectivity (#11 in the original spec) -- **deliberately deferred**, not
+      forgotten: the spec itself qualifies this one with "when the available evidence
+      supports a diagnosis," unlike the other 13. Passive evidence alone (no active probe,
+      which is out of scope) gives very weak DNS signal; building a rule anyway just to
+      check a box would mean fabricating confidence the evidence doesn't support -- exactly
+      what this project is trying not to do.
+- [x] Refactored three near-duplicate watcher implementations (Pod/Event, then
+      Deployment) into one shared `_ListWatchLoop` before adding a fourth and fifth
+      (PVC, Node) -- see ARCHITECTURE.md
+- [x] 77 new unit tests (119 total) -- `./scripts/test.sh`, all passing; ruff + mypy clean
+- [x] Verified live against the real kind cluster for every new rule: cordon/uncordon
+      for Node, a bad StorageClass for PVC, a non-matching Service selector, and the
+      pre-existing Deployments' real `Available=False`/`Progressing` conditions
+- [x] Found and fixed two more real bugs during live verification (see Known limitations
+      #7 and #8) and one upstream client library bug (see #9)
+- [x] RBAC (`rbac/role.yaml`, new `rbac/clusterrole.yaml` + `clusterrolebinding.yaml`)
+      grown to match exactly the new resources watched
+
+## Milestone 3: Policy engine -- DONE
+
+- [x] `PolicyEngine.evaluate()` (`policy/engine.py`): a pure function, same shape as
+      `DiagnosticEngine` -- no Kubernetes API, no DB, no clock reads of its own, every
+      fact supplied by the caller in a `PolicyRequest`
+- [x] Advisory action types (`RECOMMEND_*`) always `ALLOWED`, even in `OBSERVE`, since
+      they never mutate cluster state
+- [x] `OBSERVE` mode denies every mutating action type outright (not "proposes but
+      never executes" -- denied before an action is even modeled as proposable)
+- [x] Namespace allowlist (existing `action_allowed_namespace_list`) and a new,
+      optional resource-name allowlist (`action_allowed_resource_name_list`, empty =
+      no extra restriction)
+- [x] Resource-type consistency check: `RESTART_DEPLOYMENT`/`ROLLBACK_DEPLOYMENT`/
+      `SCALE_DEPLOYMENT` only apply to `Deployment` targets -- this project's reading
+      of "whether the resource is managed by a controller"
+- [x] Cooldown (per target + action type) and per-incident / per-window action budgets,
+      using the config fields Milestone 1 had already scaffolded for this
+- [x] `ROLLBACK_DEPLOYMENT`/`SCALE_DEPLOYMENT` always require approval, even in
+      `CONTROLLED_AUTO` -- matches the spec's explicit "approval-gated scaling"
+- [x] `CONTROLLED_AUTO` auto-allows only `RESTART_DEPLOYMENT`, and only when the
+      incident is HIGH+ severity, the triggering hypothesis was HIGH confidence, *and*
+      the target's desired replica count is known and > 1 (unknown is treated as
+      "could be 1" -- conservative, not optimistic)
+- [x] 27 new unit tests (147 total) -- `./scripts/test.sh`, all passing; ruff + mypy clean
+- [x] Exercised against a **real incident pulled live from the cluster**
+      (`crashloop-demo`'s Deployment-level `UNSATISFIED_REPLICAS` incident,
+      `desired_replicas=1`) across all three modes -- confirmed the single-replica
+      guard correctly blocks auto-execution even once severity reaches HIGH, and
+      flips to `ALLOWED` once replica count is raised in the simulation. No
+      remediation engine exists yet to make this an actual end-to-end cluster flow;
+      see docs/REMEDIATION_SAFETY.md for the exact commands and output.
+- [x] Found and fixed one more real bug while pulling that live incident data (see
+      Known limitations #10) -- a second, more subtle instance of the same
+      name-reuse problem #7 already covered: the existence check added for #7 only
+      confirmed a same-*named* object existed, not the same object (by UID)
+
+## Milestone 4: Remediation actions -- DONE
+
+- [x] `remediation/executor.py::RemediationExecutor` -- the only code in this project
+      permitted to mutate cluster state. Implements `RESTART_DEPLOYMENT` (patches a
+      rollout-restart annotation, exactly what `kubectl rollout restart` does),
+      `SCALE_DEPLOYMENT` (patches the scale subresource), `ROLLBACK_DEPLOYMENT` (reads
+      ReplicaSet revision history via `deployment.kubernetes.io/revision` annotations,
+      full-`replace`s the Deployment's `spec.template` with the target revision's),
+      and the two `RECOMMEND_*` types (no cluster call at all)
+- [x] Every mutating action re-reads the live Deployment first and verifies its UID
+      still matches what the action was proposed against -- directly implements the
+      spec's "the workload changes before the action executes" test case
+- [x] Every API call carries a hard timeout (`action_execution_timeout_seconds`); every
+      failure path is caught and recorded on the action (`execution_result` /
+      `execution_error`), never raised to the caller
+- [x] `remediation/service.py::RemediationService` -- the first code that actually
+      calls `PolicyEngine.evaluate()` with live data: `propose()` builds an action,
+      evaluates it, and executes immediately if `ALLOWED`; `approve()`/`reject()`
+      handle the human-in-the-loop path for `REQUIRES_APPROVAL` actions
+- [x] `remediation/recommendations.py` -- turns an OOM/ImagePull/config/probe/PVC/
+      Service hypothesis into `RECOMMEND_*` action text, reusing the rule's own
+      `explanation` + `recommended_next_steps` verbatim rather than inventing new advice
+- [x] Fixed a real gap in Milestone 3's policy engine while building this: it never
+      checked the diagnosing hypothesis's own `auto_remediation_permitted` flag, so
+      `CONTROLLED_AUTO` could in theory have auto-allowed a restart a rule explicitly
+      said wouldn't help. Added `PolicyRequest.hypothesis_auto_remediation_permitted`
+      and gated `_auto_execution_eligible` on it.
+- [x] `rbac/remediation-role.yaml` + `remediation-rolebinding.yaml` -- the first write
+      permissions anywhere in this project, in a Role kept separate from the read-only
+      observer Role so "what can read" and "what can change" stay independently
+      auditable. Scoped to `patch`/`get`/`list`/`watch` on `deployments` (+ the `scale`
+      subresource) and read-only `get`/`list` on `replicasets` -- no `delete` anywhere.
+- [x] New lab fixture `lab/manifests/remediation-test/deployment.yaml` -- a healthy,
+      stable, 2-replica Deployment that exists only to exercise remediation actions
+      safely, deliberately separate from the broken failure-scenario Deployments
+- [x] 182 total unit tests, all passing; ruff + mypy clean
+- [x] **Verified live against the real kind cluster**, not just unit-tested: scaled
+      `remediation-test` 2->3 (confirmed via a live GET that `spec.replicas` actually
+      changed), restarted it (confirmed a new `resourceVersion` and a new ReplicaSet),
+      and rolled it back to its original revision (confirmed the restart annotation
+      was actually gone from the live Deployment and the original ReplicaSet was
+      scaled back up) -- each verified against the cluster's own state, not just the
+      action's own reported "success"
+- [x] **Found and fixed three real bugs during that live verification**, each
+      confirmed both via a unit test and a live re-run after the fix (see Known
+      limitations #11-13): a `.to_dict()` serialization bug that would have sent
+      wrong-cased keys and explicit `null`s in a merge patch (caught before it ever
+      ran against the cluster); rejected actions wrongly counting against
+      cooldowns/budgets; and a merge-PATCH-based rollback that silently failed to
+      clear a field the newer revision had added, fixed by switching to a full
+      `replace`
+- [x] **Honest demonstration**: proposed a restart against imagepull-demo's real
+      `ROLLOUT_FAILED` incident (HIGH severity, HIGH confidence) in `CONTROLLED_AUTO`
+      mode. Confirmed it correctly stayed `PENDING_APPROVAL` rather than auto-executing,
+      because the diagnosing rule's own `auto_remediation_permitted=False` says restart
+      won't help. A human-approved override then executed the restart anyway, and the
+      pod was confirmed still `ImagePullBackOff` afterward -- exactly as the diagnosis
+      predicted. This is the spec's "a restart is not a universal fix" principle shown
+      actually happening, not just asserted in a doc.
+
+## Milestone 5: Recovery verifier -- DONE
+
+- [x] `verification/verifier.py::RecoveryVerifier` -- polls the target Deployment
+      with a deadline (`KUBESENTINEL_VERIFICATION_DEADLINE_SECONDS`, default 60s) and
+      interval (`KUBESENTINEL_VERIFICATION_POLL_INTERVAL_SECONDS`, default 2s), never
+      waiting indefinitely, and returns one of three outcomes --
+      `RECOVERED`/`FAILED`/`INCONCLUSIVE` -- never collapsing "ran out of time with no
+      clear signal" into either of the other two
+- [x] Deliberately reuses Milestone 1-2's own `deployment_evidence`,
+      `has_failure_signal`, `is_confirmed_healthy` rather than inventing a third
+      definition of "is this Deployment healthy" -- the verifier's own job is just
+      polling-with-a-deadline and picking the outcome, not redefining health
+- [x] `models/action.py::VerificationOutcome` changed from a bare `recovered: bool`
+      (unused Milestone 1 scaffolding) to a `VerificationStatus` enum
+      (`RECOVERED`/`FAILED`/`INCONCLUSIVE`), with `.recovered` kept as a convenience
+      property -- nothing else in the codebase depended on the old shape
+- [x] Wired into `RemediationService._run()`: after `EXECUTED`, transitions to
+      `VERIFYING`, calls the verifier, and sets the final terminal status
+      (`VERIFIED_RECOVERED`/`VERIFICATION_FAILED`/`VERIFICATION_INCONCLUSIVE`) based
+      on the outcome -- an action that failed to even execute skips verification
+      entirely, per the spec's "never mark anything resolved on an action that
+      didn't succeed"
+- [x] `kubesentinel_recovery_duration_seconds` (defined in Milestone 1, unused until
+      now) is recorded on a confirmed `RECOVERED` outcome, measuring
+      executed-to-verified time, not the action's own reported timing
+- [x] 196 total unit tests, all passing; ruff + mypy clean
+- [x] **Verified live** against `remediation-test`: a real restart, verified end to
+      end with the project's real (non-test-shortened) 60s/2s deadline/poll settings
+- [x] **Found and fixed a real bug during that live run** (see Known limitations
+      #15): the first version reported `RECOVERED` within 0.1s of triggering a
+      restart, because Kubernetes deliberately keeps old Pods serving during a
+      rollout -- the Deployment's aggregate ready/available counts looked fully
+      satisfied via the *old* ReplicaSet before the new one had even started.
+      Re-verified live after the fix (requiring `updatedReplicas` to also catch up
+      for restart/rollback specifically): took 11.5s, and the pod list confirmed the
+      new ReplicaSet had genuinely replaced the old one before `RECOVERED` was
+      reported this time.
+
+## Milestone 6: Full API + CLI -- DONE
+
+- [x] `POST /incidents/{id}/actions/plan` (with a `dry_run: bool` body field --
+      previews the policy decision with zero side effects, no action created),
+      `/{action_id}/approve`, `/{action_id}/execute`, and `/{action_id}/reject`
+      (the last isn't in the spec's literal endpoint list but is the natural
+      complement to approve, and the service already supported it)
+- [x] `require_api_token` dependency on every mutating endpoint: an **unset**
+      `KUBESENTINEL_API_TOKEN` returns `503` (disabled), not `200` -- "no token
+      configured" is never treated as "no auth needed." A set-but-wrong token is
+      `401`. Matches the spec's "do not expose an unauthenticated, unrestricted
+      remediation endpoint" literally -- there is no code path where this surface
+      is reachable without a token someone deliberately configured.
+- [x] **Split `RemediationService.approve()` from a new `execute()`**: Milestone 4/5
+      had `approve()` execute inline, collapsing two of the spec's three distinct
+      operations into one. Refactored so `approve()` only marks `APPROVED` (a human
+      can approve now, execute later, or never); `execute()` is the second, separate
+      call that actually runs the executor+verifier. `CONTROLLED_AUTO`'s `ALLOWED`
+      path is unaffected -- it still executes inline from `propose()`, since there's
+      no human to wait for.
+- [x] New `RemediationService.dry_run()`: builds a `PolicyRequest` and evaluates it
+      against the *real* current action history (realistic cooldown/budget preview)
+      but never builds, persists, or executes a `RemediationAction` -- true zero
+      side effects, not just "doesn't call the executor."
+- [x] CLI: `dry-run`, `plan`, `approve`, `execute`, `reject` -- all direct, like the
+      existing CLI commands (construct the same service objects the API uses, no
+      HTTP round-trip, work whether or not the API server is running)
+- [x] 215 total unit tests (including a new `tests/unit/test_api.py` exercising the
+      full plan/approve/execute/reject flow and the auth boundary via FastAPI's
+      `TestClient`, bypassing the real-cluster `lifespan` by injecting state
+      directly); ruff + mypy clean
+- [x] **Verified live** both ways: via raw `curl` against the running API server
+      (auth boundary: no token -> 401 here since a token *was* configured; wrong
+      token -> 401; dry-run and real plan/reject against a genuine `crashloop-demo`
+      incident) and via the CLI's `plan`/`approve`/`execute` against the real
+      `remediation-test` Deployment (a real scale-down, confirmed against the
+      cluster afterward)
+- [x] Found and fixed two more real bugs during this live verification (see Known
+      limitations #16 and #17)
+
+## Milestone 7: Observability -- DONE
+
+Metrics implemented: `kubesentinel_incidents_detected_total`, `_incidents_active`,
+`_diagnostics_total`, `_diagnostic_duration_seconds`, `_recovery_duration_seconds`,
+`_observer_errors_total` (wired into every watcher's exception handlers, labeled
+by component -- `pod_watcher`, `event_watcher`, `deployment_watcher`, `pvc_watcher`,
+`node_watcher`, `endpointslice_watcher`), plus remediation metrics
+(`_remediation_attempts_total`, `_remediation_success_total`,
+`_remediation_failures_total`, `_actions_requiring_approval`). All labels are a
+small, bounded set of known values (category, action_type, reason, component) --
+never incident IDs, pod names, or other unbounded strings.
+
+Added `observability/prometheus.yml` (a minimal standalone scrape config -- this
+project runs as a local process against the cluster via kubeconfig, not an
+in-cluster workload, so there is no Service/Pod to discover; the one real target
+is the FastAPI process's own `/metrics`) and `observability/grafana-dashboard.json`
+(importable dashboard: active incidents by category, detection rate, diagnostic
+duration p50/p95, recovery duration p50/p95 by category, remediation
+attempts/successes/failures, actions requiring approval, observer errors by
+component).
+
+**Live-verified, not just written**: ran a throwaway `prom/prometheus` container
+against the real demo server's `/metrics` and confirmed every PromQL expression
+used by the dashboard's panels evaluates successfully against real exported
+samples (`histogram_quantile` over the real duration buckets, `rate()` over the
+real counters) -- not just that the JSON is well-formed. This process is also
+what surfaced the real `incidents_active` reconciliation bug documented as Known
+limitation #18 below; the dashboard's "active incidents" panel would otherwise
+have quietly under-reported on every real restart.
+
+## Milestone 8: Remaining lab scenarios -- DONE (9 of 9)
+
+Built: crashloop, oom, imagepull, transient-recovery (Milestone 1), pvc-binding,
+service-selector-mismatch (Milestone 2), and now pending-resources,
+readiness-probe-failure, failed-rollout -- all verified live via their actual
+manifest files, not just ad hoc `kubectl` commands. See FAILURE_LAB.md for each
+scenario's exact mechanism and expected/confirmed behavior.
+
+**Live-verified**: applied all three new manifests to the real kind cluster.
+`pending-resources-demo`'s `PodScheduled` condition read exactly
+`status=False, reason=Unschedulable, message="0/1 nodes are available: 1
+Insufficient cpu, 1 Insufficient memory."`. `readiness-probe-failure-demo`
+produced a real `Warning Unhealthy / Readiness probe failed` Event while staying
+`Running` with `restartCount=0`. Both the real observer+incident-manager
+pipeline (via the long-running demo API server) and the unit-tested rules
+diagnosed `PENDING_INSUFFICIENT_RESOURCES` and `READINESS_PROBE_FAILING`
+respectively, confirmed via `/incidents`.
+
+Also found and fixed a real bug in my own first draft of the `failed-rollout`
+manifest while verifying it live -- see Known limitation #19 below. After the
+fix, `kubectl wait --for=jsonpath='{.status.conditions[?(@.type=="Progressing")].reason}'=ProgressDeadlineExceeded`
+succeeded within the 15s `progressDeadlineSeconds`, and the real pipeline
+correctly opened a `ROLLOUT_FAILED` incident on the Deployment itself (a
+separate incident from the Pod-level ones the same Pods also produced).
+
+Updated `scripts/demo.sh`'s `all` scenario loop and
+`lab/scripts/run-scenario.sh`'s usage text (previously hardcoded to only the
+first three scenarios ever built) to reflect all nine.
+
+## Milestone 9: Integration/e2e tests -- DONE
+
+Added `tests/integration/` (16 RBAC-boundary tests, plus watch-resync,
+observer-live-detection x2, restart-recovery, and concurrent-remediation -- 21
+tests) and `tests/e2e/` (the full propose/approve/execute/verify lifecycle
+against the real `remediation-test` Deployment -- 1 test). All 22 run against
+the real `kind-kubesentinel` cluster through `tests/conftest.py`'s shared
+fixtures, never mocked, and every one skips (not fails) when its precondition
+isn't met -- confirmed live by pointing `KUBECONFIG` at a nonexistent file:
+all 22 skipped cleanly in 0.22s. Also added a fast mock-based regression test
+for the concurrency fix below directly to `tests/unit/`, so a regression there
+is caught by plain `./scripts/test.sh`, not only `--all`. `./scripts/test.sh
+--all` now runs 240 tests total (218 unit + 22 integration/e2e); plain
+`./scripts/test.sh` runs 218 (no cluster touched). Re-ran the full combined
+240-test suite four consecutive times with no failures, after finding and
+fixing the flake described below. See TESTING.md for what each file covers.
+
+Three real bugs were found and fixed in the process of writing these tests
+(not theoretical edge cases -- each confirmed failing against the pre-fix
+code, then re-confirmed passing after the fix):
+
+- **A genuine concurrency race in `RemediationService.propose()`'s per-incident
+  budget** -- see Known limitation #20 below.
+- **Two test-design timing traps specific to this long-running demo
+  environment** that would have made otherwise-correct tests flaky --
+  `crashloop-demo`'s exponentially-growing kubelet restart backoff, and
+  kubelet/client-go's own event-spam rate limiter delaying a freshly recreated
+  Pod's first `Unhealthy` Event by over a minute after many hours of
+  identical repeated events. Neither is a KubeSentinel bug; both are
+  documented in `tests/integration/conftest.py`'s fixture docstrings as the
+  reason those specific tests target `pending-resources`/
+  `readiness-probe-failure` instead of `crashloop`.
+- **A race in one of the new tests itself, not the product**: initially
+  misdiagnosed as a system-load timing issue (raising the poll timeout from
+  20s to 45s to 90s didn't help -- the real failure happened almost
+  immediately every time, not after waiting out a long timeout, which was the
+  tell that it wasn't actually a timeout problem). Root cause:
+  `test_observer_opens_real_incident_for_live_probe_failure_pod`'s
+  `poll_until` predicate checked "is *any* `DIAGNOSED` incident open in the
+  namespace yet," not specifically the one for the pod under test -- in the
+  full combined suite, several other scenarios in `kubesentinel-lab` are also
+  broken at once, each handled by an independent watcher thread, so the weak
+  predicate could be satisfied by an unrelated scenario's incident before this
+  Event-driven one had been processed, returning early with the wrong result.
+  Fixed by polling specifically for an incident matching the exact pod name
+  under test. Re-ran the full 240-test suite four times after the fix with no
+  further failures (the timeout was put back down to 30s once the real bug,
+  not the timeout, was the problem).
+
+## Milestone 10: Documentation -- DONE
+
+Every doc file brought up to date with the project's actual current scope
+(Milestones 1-9), not left matching whatever milestone last touched it:
+
+- **README.md**: status line corrected to "1-9 of 11," added lab-scenario and
+  testing completeness, fixed two broken documented CLI commands (see #21).
+- **ARCHITECTURE.md**: full rewrite -- the pipeline diagram only showed
+  Milestone 1's observe/diagnose/persist/expose boxes; added the
+  policy/remediation/verification/metrics layers, a new "why this shape"
+  passage for each, and replaced the stale "planned additions" (describing
+  Milestones 3-5 as not yet built) with what's genuinely still not built.
+- **KUBERNETES_CONCEPTS.md**: expanded from a Milestone-1-only stub (explicitly
+  said "Milestone 1 doesn't even watch Events yet," false since Milestone 2)
+  to cover every concept this project actually exercises: probes, scheduler
+  messages, rollout semantics (including both live-caught verifier bugs),
+  PVC binding modes, Service/EndpointSlice mismatches, Node RBAC, PATCH vs.
+  PUT verb semantics, and concurrency -- each tied to the specific code and
+  the specific live finding, not a generic primer.
+- **DESIGN_DECISIONS.md**: added the Milestones 3-9 decisions that were made
+  but never written down (ordered policy checks, why `RECOMMEND_*` bypasses
+  gating, why `REJECTED` excludes from budget/cooldown, why
+  propose/approve/execute are three methods not two, why the verifier needs a
+  stricter check than the passive incident manager, why `incidents_active`
+  needs explicit reconciliation, why `propose()`'s lock is scoped narrowly).
+- **RBAC_AND_THREAT_MODEL.md**: fixed two outright false claims ("the policy
+  engine... not yet built" and "API authentication: not yet enforced," both
+  false since Milestones 3 and 6 respectively); added a note on the
+  Milestone 9 automated RBAC boundary tests.
+- **docs/DEMO_SCRIPT.md**: replaced the false "no remediation is possible yet"
+  closing section with a real, live-verified remediation walkthrough (step 8)
+  against an actual diagnosed incident, plus all nine lab scenarios in the
+  setup steps (previously only listed the first three ever built).
+- **FAILURE_LAB.md, TESTING.md, TROUBLESHOOTING.md, DIAGNOSTIC_RULES.md**:
+  already current from Milestones 7-9's own documentation passes; re-checked
+  for staleness, none found beyond TROUBLESHOOTING.md's new entry (#21).
+
+Re-ran `./scripts/test.sh` (218 passed) after all doc edits to confirm nothing
+was inadvertently broken, since this milestone touched zero application code
+except the TROUBLESHOOTING-documented CLI fix, which was a README correction,
+not a code change.
+
+## Milestone 11: Optional AI integration -- DONE
+
+Added `src/kubesentinel/ai/` (`client.py::OllamaClient`/`AiClient` Protocol,
+`summarizer.py::summarize_incident()`/`build_prompt()`) and
+`models/ai.py::AiSummary`. The only backend is a local Ollama server --
+genuinely free (no API key, no cloud account, no per-request cost), not a
+"free tier." Disabled by default (`KUBESENTINEL_AI_ENABLED=false`); every
+other feature in this project works fully without it.
+
+Wired into both surfaces, read-only:
+
+- `GET /incidents/{id}/ai-summary` (no auth token needed -- it's read-only
+  and mutates nothing, same reasoning as the other GET endpoints; gated on
+  `KUBESENTINEL_AI_ENABLED` instead, since disabling it is about availability/
+  cost, not a security boundary). `503` if disabled, `502` if the backend is
+  unreachable/errors, never a silently fabricated summary.
+- `kubesentinel explain <incident-id>` (CLI, same direct-construction pattern
+  as every other command).
+
+**Why this can never become an authorization path, not just "won't" but
+"structurally can't":** `summarize_incident()` takes an already-built
+`Incident` and an `AiClient`; it has no reference to `ClusterClients`, the
+repository, or `PolicyEngine` at all, so there is no code path from a model's
+output back into a diagnosis, a policy decision, or an executed action.
+`build_prompt()` only includes the same structured `Hypothesis`/
+`RemediationAction` fields a human already sees via `kubesentinel evidence` --
+never raw Pod/Event/annotation text -- so there is nothing in the prompt a
+workload could use to try to inject instructions into the model. See
+RBAC_AND_THREAT_MODEL.md and DESIGN_DECISIONS.md.
+
+**Live-verified**, against a real local Ollama server (`qwen2.5-coder:3b`,
+already installed): `tests/integration/test_ai_summary_live.py` (skips if
+Ollama isn't reachable), plus manual verification of both surfaces --
+`kubesentinel explain` against a real `READINESS_PROBE_FAILING` incident
+returned an accurate, policy-respecting summary ("This issue needs to be
+addressed..." -- notably, it did *not* say "I restarted it" or invent a
+next step not already in the hypothesis); the `/ai-summary` HTTP endpoint
+returned the same quality of result with `200`; disabling
+`KUBESENTINEL_AI_ENABLED` correctly returned `503` on both surfaces.
+16 new unit tests (`test_ai_client.py`, `test_ai_summarizer.py`, plus 4 in
+`test_api.py`) mock the HTTP call entirely, so `./scripts/test.sh` (no
+cluster, no Ollama) stays fast and fully offline -- 234 unit tests total.
+
+---
+
+## Known limitations (found during Milestone 1's own live verification, not theoretical)
+
+1. **Pod-UID dedup doesn't survive a Deployment rollout.** A Deployment template
+   change (e.g. a real fix) creates new Pods with new UIDs. The old incident has no
+   further events to tell it the old Pod recovered -- it stays open until an operator
+   or a future reconciliation mechanism closes it. Pod-level incidents work correctly
+   for in-place recovery (same UID, e.g. a transient CrashLoopBackOff clearing up);
+   Deployment-level incident correlation is planned alongside Milestone 2's
+   ROLLOUT_FAILED / UNSATISFIED_REPLICAS rules.
+2. **A terminating Pod is excluded from observation entirely** (fixed in this
+   milestone after finding it live: a Pod with `deletionTimestamp` set can transiently
+   report container statuses with no "bad" waiting/termination reason while tearing
+   down, which the health classifier would otherwise read as recovery). The fix skips
+   any Pod with `deletionTimestamp` set rather than trying to interpret its transient
+   state.
+3. **PodWatcher's live watch stream only follows the first configured namespace**,
+   not an arbitrary list of several (its periodic resync LIST does cover all of
+   them, so other namespaces are picked up at most once per resync interval, not on
+   every change). Fine for the single-namespace lab; needs a proper multi-watch-stream
+   merge before it'd be safe for multiple arbitrary namespaces.
+4. **`incidents_active` Prometheus gauge can drift** if an incident's diagnosed
+   category changes between open and resolve (decrement uses the category *at resolve
+   time*, which may differ from the one used at increment time). Not hit in the
+   verified scenarios (category was stable throughout each), but a real gap.
+5. **OOMKilled detection needed a fallback heuristic in this project's own dev
+   environment**: this kind-on-Colima/macOS setup's kubelet reports OOM kills with the
+   generic reason `Error` and `exit_code=137` rather than `OOMKilled`, confirmed
+   against the node's own cgroup v2 `memory.events` `oom_kill` counter. The rule now
+   treats a direct `OOMKilled` reason as HIGH-confidence observed fact and an inferred
+   exit-code-137-with-repeated-restarts pattern as a separate, explicitly-labeled
+   MEDIUM-confidence hypothesis. See DIAGNOSTIC_RULES.md.
+6. **Diagnosis history dedup is coarse**: a materially-unchanged top hypothesis
+   (same reason code) is not re-appended to `diagnosis_history`, which keeps the log
+   readable but discards confidence/explanation refinements between observations of
+   the same reason code.
+
+## Known limitations (found during Milestone 2's own live verification)
+
+7. **A Kubernetes Event outlives the resource it describes.** Event garbage
+   collection runs on its own, longer TTL, independent of the described object's
+   deletion. Found live: a `ProvisioningFailed` Event for an already-deleted PVC was
+   still present on process restart and opened a phantom `PVC_BINDING_FAILURE`
+   incident for a PVC that no longer existed. Fixed in
+   `observer/service.py::ObserverService._still_exists` -- a live GET confirms the
+   object is still there before an Event is allowed to open or enrich an incident.
+   Only implemented for the two kinds Events are currently correlated against (Pod,
+   PersistentVolumeClaim); a third kind added later needs its own branch there.
+8. **`Deployment.status.conditions[Available]=False` does not mean "still rolling
+   out."** Confirmed live: a Deployment whose Pods start crashing *after* a
+   successful initial rollout shows `Progressing=True/NewReplicaSetAvailable` (the
+   rollout itself genuinely succeeded) alongside `Available=False/
+   MinimumReplicasUnavailable` -- the second condition is the one that actually
+   reflects the ongoing problem, and `has_failure_signal` had to be extended to open
+   on it directly (not just on `ProgressDeadlineExceeded`). Known tradeoff: a
+   brand-new Deployment is also briefly `Available=False` while its first replicas
+   start, so this can open a short-lived incident that resolves within the
+   2-observation debounce once minimum availability is reached.
+9. **Upstream bug in the generated `kubernetes` Python client (confirmed against
+   installed version 30.1.0, not yet checked against the latest 37.x):** several
+   `discovery.k8s.io/v1` models -- `V1EndpointSlice.endpoints` among them -- mark a
+   list field as required and raise `ValueError` if the API server sends JSON
+   `null` for it. The API server legitimately does this for a genuinely empty
+   list (Go's `omitempty` on a nil slice serializes to `null`, not `[]`), which is
+   exactly what a zero-endpoint EndpointSlice looks like -- confirmed live by
+   fetching the raw JSON directly (`_preload_content=False`) and seeing
+   `"endpoints": null` where the typed client crashed. This broke the *entire*
+   list/watch call, not just one malformed object, and would have made
+   `ServiceSelectorMismatchRule` non-functional for its primary case (zero
+   endpoints) had it shipped unfixed. Worked around in
+   `observer/watchers.py::_ListWatchLoop` (`raw_object_watch=True`): LIST fetches
+   raw JSON directly; WATCH uses `kubernetes.watch.Watch(return_type="object")`,
+   which the client's own `unmarshal_event`/`__deserialize` treats as a pass-through
+   to `object` rather than attempting strict model validation. `EndpointSliceWatcher`
+   and `endpointslice_evidence()` work on plain dicts as a result, not typed
+   `V1EndpointSlice` instances -- the one place in this codebase where that's true.
+   See TROUBLESHOOTING.md.
+
+## Known limitations (found during Milestone 3's own live verification)
+
+10. **The "Events outlive the resource" fix (#7) checked existence by name, not by
+    the specific object.** Found live immediately after pulling real incident data
+    for the policy-engine demo: a deleted-and-recreated `pvc-binding-demo` PVC (same
+    name, new UID) produced *two* separate incidents -- correctly, per this
+    project's UID-based dedup design -- but a stale `ProvisioningFailed` Event about
+    the *first* (now-deleted) PVC was wrongly "revalidated" by
+    `ObserverService._still_exists`, because a *different* PVC with the same name
+    now existed under that name. Fixed by comparing the live object's UID against
+    the UID the Event's `involved_object` actually names, not just checking that
+    some object with that name exists. This is the exact name-reuse scenario
+    UID-based dedup exists to handle correctly everywhere else in this codebase --
+    the one spot that had regressed to name-based matching is now fixed too.
+
+## Known limitations (found during Milestone 4's own live verification)
+
+11. **Almost shipped a merge-patch body built from `.to_dict()`.** Caught before
+    ever running it against the cluster, by reading `api_client.py`'s
+    `sanitize_for_serialization` directly: a plain dict's values are sent through
+    verbatim (no attribute-name conversion), so `V1PodTemplateSpec.to_dict()`
+    nested inside a dict would have sent snake_case keys (`restart_policy`, not
+    `restartPolicy`) *and* explicit `null` for every unset field -- which a merge
+    patch would interpret as "clear this field," a far more destructive outcome
+    than just a silently-ignored patch. Fixed by passing the typed model object
+    directly (`{"spec": {"template": target_rs.spec.template}}`, no `.to_dict()`);
+    the serializer only does the correct attribute-name conversion for nested
+    typed objects, not for dicts.
+12. **A `REJECTED` action still counted against cooldowns and per-incident/per-
+    window budgets.** Found live running the real remediation demo: a scale-down
+    cleanup step got `DENIED` by the per-incident budget, because two *successful*
+    actions plus one *harmless, unrelated cooldown rejection* had already pushed
+    the count to the budget ceiling -- even though the rejected action never
+    touched the cluster. Left unfixed, a handful of transient rejections could
+    permanently lock a real incident out of remediation. Fixed in
+    `PolicyEngine._check_cooldown` / `_check_per_incident_budget` /
+    `_check_per_window_budget`: all three now exclude actions with
+    `status == ActionStatus.REJECTED` (but still count `EXECUTION_FAILED`, which
+    did genuinely reach the cluster and is exactly what these limits exist to bound).
+13. **Rollback used a merge PATCH and silently failed to remove a field the newer
+    revision had added.** Found live: rolling back from a template with a restart
+    annotation to an older template *without* one reported `EXECUTED` with a
+    plausible-looking result, but the live Deployment's `spec.template` annotations
+    were completely unchanged afterward. Root cause: the target (older) template's
+    annotations field is `None`, which the client's serializer drops from the JSON
+    entirely -- and under merge-patch semantics, an absent key means "no change,"
+    not "clear it." Fixed by switching rollback to `replace_namespaced_deployment`
+    (a full PUT of the whole Deployment object with `spec.template` mutated to the
+    target revision's), which actually replaces the field rather than merging into
+    it. Re-verified live after the fix: the restart annotation was confirmed gone
+    and the original ReplicaSet correctly scaled back up.
+14. **`rbac/remediation-role.yaml` granted `patch` but not `update` on
+    `deployments`.** All of the live verification above ran under an admin
+    kubeconfig, not the `kubesentinel-remediator` ServiceAccount, so it never
+    actually exercised this Role's real boundary -- rollback's
+    `replace_namespaced_deployment` call issues an HTTP PUT, which Kubernetes RBAC
+    maps to the `update` verb, not `patch`. Confirmed live with `kubectl auth
+    can-i update deployments --as=system:serviceaccount:kubesentinel-lab:
+    kubesentinel -n kubesentinel-lab`: answered `no` before the fix, `yes` after
+    adding `update` to the Role and re-applying it. A reminder that "it worked
+    when I ran it" under a privileged kubeconfig is not the same claim as "the
+    ServiceAccount this actually runs as in-cluster can do this."
+
+## Known limitations (found during Milestone 5's own live verification)
+
+15. **The first version of the verifier would have reported `RECOVERED` within
+    0.1s of triggering a real restart -- while `kubectl get pods` still showed the
+    new Pod `ContainerCreating` and both old Pods still `Running`.** Root cause:
+    `is_confirmed_healthy()` (reused from Milestones 1-2) only checks
+    `readyReplicas >= desired` and similar aggregates -- which during a rolling
+    update can be satisfied entirely by the *old* ReplicaSet's still-serving Pods,
+    well before the new one has done anything. That check is correct for the
+    passive incident-manager use case it was built for ("is this Deployment
+    healthy right now, regardless of why"), but wrong for "did *this specific
+    restart/rollback* actually complete," which is what post-action verification
+    needs to answer. Fixed by adding a separate, stricter `_rollout_complete()`
+    check -- also requiring `updatedReplicas >= desired` -- used only for
+    `RESTART_DEPLOYMENT`/`ROLLBACK_DEPLOYMENT` (both start a new rollout);
+    `SCALE_DEPLOYMENT` (no new template, no new rollout) keeps using the simpler
+    shared check. Re-verified live: the fixed version took 11.5s and the pod list
+    confirmed the new ReplicaSet had genuinely taken over before reporting
+    `RECOVERED`.
+
+## Known limitations (found during Milestone 6's own live verification)
+
+16. **Upstream version-compatibility bug between `typer==0.12.5` and `click`:
+    every CLI command crashed.** `typer==0.12.5` declares only `click>=8.0.0`
+    (no upper bound), so pip resolved the newest click (8.5.0) -- which changed
+    `click.Argument.make_metavar()`'s signature (added a required `ctx`
+    parameter). `typer`'s own `TyperArgument.make_metavar()` override wasn't
+    updated to match, so the moment Click needed to render *any* usage or error
+    text, every CLI invocation crashed with `TyperArgument.make_metavar() takes
+    1 positional argument but 2 were given` -- including, confusingly, while
+    trying to report an unrelated argument-parsing issue, which made the first
+    few attempts look like a bug in my own command definitions rather than a
+    dependency conflict. Confirmed by reading both packages' actual installed
+    versions (`pip show typer click`) rather than guessing. Fixed by pinning
+    `click==8.1.8` explicitly in `pyproject.toml` rather than leaving it to
+    float -- exactly the "pin compatible dependency versions" the spec itself
+    asked for, which this gap shows is worth taking literally even for
+    dependencies-of-dependencies. See TROUBLESHOOTING.md.
+17. **A routine `SCALE_DEPLOYMENT` 2->3 on a perfectly healthy Deployment was
+    verified as `FAILED`.** Found live running the real CLI demo against
+    `remediation-test`: one poll caught Kubernetes reporting
+    `Available=False (MinimumReplicasUnavailable)` -- which is entirely normal
+    for a few seconds while a newly-requested replica hasn't started yet, not
+    evidence that anything is actually wrong. The Milestone 5 verifier reused
+    `has_failure_signal` (correct for the *passive* incident manager, where
+    Available=False observed with no context is a reasonable thing to open an
+    incident about) for its FAILED path too -- but the *active* verifier is, by
+    definition, watching a transition it just triggered, where a brief dip in
+    availability is often exactly what recovering looks like. Fixed with a new,
+    stricter `_deployment_definitively_stuck()` check used only for the
+    verifier's FAILED path: it trusts `ProgressDeadlineExceeded` (set only after
+    the controller has waited out its own deadline and given up -- a durable,
+    legitimate "won't resolve on its own" signal) but not a bare
+    `Available=False`. Re-verified live: the same scale action (this time
+    scaling back down, 3->2) correctly reported `VERIFIED_RECOVERED`, confirmed
+    against the real cluster afterward.
+18. **`kubesentinel_incidents_active` read 0 (or undercounted) for incidents
+    that predated the current process.** Found live while building the
+    Milestone 7 Grafana dashboard and checking its panels against real
+    `/metrics` output: a long-running demo server had 9 genuinely open
+    incidents per `/incidents`, but `kubesentinel_incidents_active` showed
+    nothing for most of their categories. Root cause: the gauge is only ever
+    `.inc()`/`.dec()`'d by `IncidentManager._open_new`/`_resolve`, both of
+    which run only on a *freshly detected* incident -- an incident already
+    open in SQLite from a previous process restart is routed straight into
+    `_update_existing` instead, which never touches the gauge, so it silently
+    stayed at its process-local default. Fixed with
+    `IncidentManager.reconcile_metrics()`, called once at API startup right
+    after construction: it explicitly zeroes every known `ReasonCode` category
+    (so a category is never silently absent from `/metrics`, which looks
+    identical to "never happened" to a Grafana panel or an absence-based
+    alert) and then sets each category with currently-open incidents to its
+    real count from the repository. Re-verified live: restarted the real demo
+    server against the existing `kubesentinel.db` (9 open incidents across 6
+    categories) and confirmed `/metrics` showed the correct per-category
+    counts (`CRASH_LOOP_BACKOFF=2`, `IMAGE_PULL_BACKOFF=2`,
+    `UNSATISFIED_REPLICAS=2`, `ROLLOUT_FAILED=1`,
+    `SERVICE_SELECTOR_MISMATCH=1`, `PVC_BINDING_FAILURE=1`, matching
+    `/incidents` exactly) immediately on startup, before the observer's own
+    resync had produced a single new event.
+19. **A Pod with no `readinessProbe` at all can satisfy a Deployment rollout's
+    "available" check for a moment before it crashes, which silently prevents
+    `ProgressDeadlineExceeded` from ever firing.** Found live while building
+    the `failed-rollout` lab scenario (Milestone 8, `lab/manifests/scenario-
+    failed-rollout/deployment.yaml`): the first draft reused the `crashloop`
+    scenario's exact container (exits 1 after a 2s sleep, no probe defined) with
+    a short `progressDeadlineSeconds: 15`, expecting the rollout to never
+    progress and the controller to eventually give up. Instead,
+    `kubectl get deployment -o json` showed `Progressing=True,
+    reason=NewReplicaSetAvailable` -- the rollout was considered successful.
+    Root cause: a container with no `readinessProbe` is marked `Ready=true` the
+    instant it enters `Running`, with no check at all -- there was a real
+    (sub-second) window where the Pod was genuinely `Ready` before its `sleep 2`
+    elapsed and it crashed, and that window was enough for the Deployment
+    controller to mark the new ReplicaSet available. `ProgressDeadlineExceeded`
+    is therefore a correctness trap for a scenario author, not just an operator:
+    a rollout that *looks* permanently broken (the Pod keeps crash-looping
+    forever) can still read `Progressing=True` indefinitely if the crashing
+    container was ever briefly `Ready`, because the Deployment controller only
+    tracks "did the new ReplicaSet ever become available," not "is it available
+    right now." Fixed by adding an always-failing `exec` `readinessProbe`
+    (`/bin/false`) to the same container -- the same mechanism as the
+    `readiness-probe-failure` scenario -- so the Pod is never considered
+    `Ready`, not even for that brief window, guaranteeing the rollout genuinely
+    cannot progress. Re-verified live: `kubectl wait
+    --for=jsonpath='{.status.conditions[?(@.type=="Progressing")].reason}'=ProgressDeadlineExceeded`
+    succeeded within the 15s deadline after the fix, where it had timed out
+    at 40s before it.
+20. **`RemediationService.propose()`'s per-incident action budget could be
+    bypassed entirely by concurrent callers.** Found by the exact test
+    Milestone 9 set out to write ("concurrent remediation requests", flagged
+    as untested since TESTING.md was first written at Milestone 1) --
+    `tests/integration/test_concurrent_remediation.py` fires 10 real threads
+    at `propose()` for the same incident with `max_actions_per_incident=3`.
+    Root cause: `propose()` reads `recent_actions` fresh from the repository,
+    evaluates the policy decision against that snapshot, and only persists the
+    result afterward -- with nothing serializing that read-decide-write
+    sequence, N concurrent callers can all read "0 actions so far" before any
+    of them has saved, and all independently decide the budget isn't exceeded
+    yet. Confirmed failing exactly as predicted before any fix: all 10 threads
+    were accepted (`PENDING_APPROVAL`), none rejected, against a budget of 3.
+    Fixed with a `threading.Lock` on the `RemediationService` instance
+    (`self._propose_lock`) guarding `propose()`'s entire read-decide-persist
+    body -- a single process-wide lock is sufficient and proportionate for
+    this project's single-process, local-tool design (the same reasoning
+    already applied to `SQLiteIncidentRepository`'s own lock), not a
+    distributed-systems-grade fix for a tool that explicitly isn't one. Re-ran
+    the same test after the fix: exactly 3 accepted, 7 correctly rejected,
+    every single time. **Known, deliberately out-of-scope remainder**: this
+    lock only protects `propose()` against other `propose()` calls -- it does
+    not protect `approve()`/`execute()`/`reject()` against racing each other
+    (or against a concurrent `propose()`) on the *same* incident object held by
+    two different callers, which could still silently lose one caller's status
+    change via `repo.save()`'s whole-row overwrite. Closing that fully would
+    need either per-incident locking or a DB-level optimistic-concurrency
+    token (e.g. an `updated_at`/version check on save) -- a reasonable
+    direction for future work, not something this milestone claims to have
+    fixed.
+21. **README.md's own documented remediation CLI commands would have failed if
+    actually run.** Found live during Milestone 10's documentation pass,
+    specifically by re-running every documented command rather than trusting
+    it still matched the code (the spec's own "validate all documented
+    commands" requirement, taken literally): `kubesentinel dry-run
+    <incident-id> restart_deployment` fails outright --
+    `ActionType`'s CLI argument matches an enum member by its literal
+    (uppercase) value, not case-insensitively, so the lowercase form
+    README.md had shown since Milestone 6 was never actually executable.
+    Separately, the `approve` example was missing the required
+    `--approved-by` flag entirely. Both are now corrected in README.md and
+    docs/DEMO_SCRIPT.md, and the corrected sequence (`RESTART_DEPLOYMENT`
+    against the real `failed-rollout-demo` incident, through
+    `dry-run -> plan -> approve -> execute`) was re-run live end to end to
+    confirm it actually works -- including confirming the honest
+    `VERIFICATION_FAILED` outcome `execute` correctly reports, since a restart
+    was never going to fix an always-failing readiness probe. See
+    TROUBLESHOOTING.md.
+
+## Environment note (not a KubeSentinel limitation): shared-VM resource
+contention during this session's Milestone 11 verification
+
+While live-verifying Milestone 11, `./scripts/test.sh --all`'s e2e/integration
+run showed real flakiness (TLS handshake timeouts, a `kube-apiserver`
+self-restart, a `SCALE_DEPLOYMENT` that took over 90s instead of the usual
+~5-10s) that looked, at first, like a KubeSentinel or test-design bug. Root
+cause, confirmed via `docker stats`: this machine's Colima VM was running
+*two* separate kind clusters simultaneously -- this project's
+`kubesentinel-control-plane` and an unrelated `ai-platform-engineer-control-
+plane` -- with the second one alone using 259% CPU and 51% of the VM's total
+memory. The combined demand across both clusters plus a Jenkins container
+exceeded what the shared VM could actually provide. This is ordinary resource
+contention between two independent local dev environments sharing one VM, not
+a defect in this project; every test that showed flakiness had already passed
+cleanly earlier in this same session (and does again once contention eases).
+Not something to "fix" here -- noted so a future reader doesn't mistake
+environment noise for a regression. If this recurs, stop the unrelated
+cluster/VM workload first before re-running `--all`, rather than chasing it as
+a KubeSentinel bug.

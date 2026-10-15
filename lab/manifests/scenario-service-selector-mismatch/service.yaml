@@ -1,0 +1,31 @@
+# Scenario: Service selector mismatch
+#
+# How the failure is created: the Service's selector matches no Pod's labels in
+# the namespace at all.
+#
+# Expected Kubernetes behavior: the Service is created successfully (Services
+# don't validate that a selector matches anything), but its EndpointSlice has
+# zero endpoints -- confirmable with:
+#   kubectl -n kubesentinel-lab get endpointslices -l kubernetes.io/service-name=service-selector-mismatch-demo
+#
+# Expected KubeSentinel diagnosis: SERVICE_SELECTOR_MISMATCH, MEDIUM confidence.
+# Capped at MEDIUM deliberately: zero endpoints is equally consistent with "the
+# selector has a typo" and "no matching Pods exist yet" (e.g. the Deployment
+# hasn't been created) -- this rule's evidence alone can't distinguish the two.
+# See DIAGNOSTIC_RULES.md.
+#
+# Automatic remediation: not applicable -- only a human can fix the selector or
+# confirm the intended Pods exist.
+apiVersion: v1
+kind: Service
+metadata:
+  name: service-selector-mismatch-demo
+  namespace: kubesentinel-lab
+  labels:
+    kubesentinel.io/scenario: service-selector-mismatch
+spec:
+  selector:
+    app: this-label-matches-no-pod-in-the-namespace
+  ports:
+    - port: 80
+      targetPort: 80

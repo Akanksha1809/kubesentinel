@@ -1,0 +1,35 @@
+# The first write permissions anywhere in this project (Milestone 4). Kept in a
+# SEPARATE Role from kubesentinel-observer (role.yaml) rather than folded into it,
+# so "what can read the cluster" and "what can change it" stay independently
+# auditable -- a reviewer checking blast radius only needs to read this one file.
+#
+# Scoped to exactly what RemediationExecutor does:
+#   - patch Deployments: restart (template annotation)
+#   - update Deployments: rollback (replace_namespaced_deployment issues an HTTP
+#     PUT, which RBAC maps to the "update" verb, not "patch" -- confirmed by
+#     reading the generated client's own request method; "patch" alone is NOT
+#     sufficient and was caught live, by checking this before assuming the
+#     Milestone 4 live-verification run -- done under an admin kubeconfig, not
+#     this ServiceAccount -- had actually exercised this Role's real boundary)
+#   - get/list ReplicaSets: read-only, needed only to find a Deployment's revision
+#     history for rollback -- never patched or deleted
+#
+# Deliberately excludes: delete on anything, any verb on Pods (the executor never
+# deletes a Pod directly -- a Deployment rollout restart recreates Pods via the
+# ReplicaSet controller, not via this project touching Pods itself), and every
+# resource type Milestone 4 doesn't mutate (PVCs, Services, Nodes, Events).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kubesentinel-remediator
+  namespace: kubesentinel-lab
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "patch", "update"]
+  - apiGroups: ["apps"]
+    resources: ["deployments/scale"]
+    verbs: ["get", "patch"]
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["get", "list"]

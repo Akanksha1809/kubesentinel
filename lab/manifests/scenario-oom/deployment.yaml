@@ -1,0 +1,49 @@
+# Scenario: OOMKilled
+#
+# How the failure is created: the container repeatedly doubles an in-memory string,
+# an exponential, unbounded-looking allocation from the application's point of view --
+# but it is bounded in practice by the Pod's memory *limit* (16Mi), which the kernel's
+# cgroup OOM killer enforces within a couple of seconds. This keeps the "unbounded"
+# workload safe: node memory is never at risk, only this one container's own cgroup.
+#
+# Expected Kubernetes behavior: the container is killed by the OOM killer; the kubelet
+# reports containerStatuses[].state.terminated.reason=OOMKilled (exit_code=137) while
+# the container is down, then lastState.terminated.reason=OOMKilled once it restarts
+# and goes into CrashLoopBackOff from the repeated kills.
+#
+# Expected KubeSentinel diagnosis: OOM_KILLED (confidence HIGH), ranked above the
+# co-occurring CRASH_LOOP_BACKOFF hypothesis because it is the more specific root cause.
+#
+# Automatic remediation: NOT safe by default. Restarting does not fix a memory limit
+# that is genuinely too low for the workload; KubeSentinel only *recommends* a resource
+# limit adjustment for a human to apply.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: oom-demo
+  namespace: kubesentinel-lab
+  labels:
+    app: oom-demo
+    kubesentinel.io/scenario: oom
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: oom-demo
+  template:
+    metadata:
+      labels:
+        app: oom-demo
+    spec:
+      containers:
+        - name: app
+          image: busybox:latest
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c", "x='a'; while true; do x=\"$x$x\"; done"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 50m
+              memory: 16Mi

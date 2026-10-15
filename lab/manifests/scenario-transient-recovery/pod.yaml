@@ -1,0 +1,60 @@
+# Scenario: transient CrashLoopBackOff that recovers on its own
+#
+# This is a bare Pod (not a Deployment) on purpose: the point is to demonstrate
+# recovery of a single Pod *in place*, same UID throughout, which is exactly the
+# resolution path the incident manager implements in this milestone. A Deployment
+# rollout fix instead replaces Pods (new UID -> a new incident), which is a separate,
+# documented limitation -- see TODO.md "Known limitations".
+#
+# How the failure is created: the container counts its own restarts in a file on an
+# emptyDir volume (which survives container restarts within the same Pod). It exits 1
+# on its first two starts, then runs `sleep infinity` from the third start onward --
+# simulating a dependency that wasn't ready yet and later became available.
+#
+# Expected Kubernetes behavior: restart_count reaches 2, waiting reason becomes
+# CrashLoopBackOff, then the container starts cleanly and stays Running/Ready.
+#
+# Expected KubeSentinel behavior: opens a CRASH_LOOP_BACKOFF incident on the first
+# unhealthy observation, then marks it RESOLVED with a recorded recovery_duration_seconds
+# once it observes the same Pod UID running healthily -- verified via the Kubernetes API,
+# not assumed from the earlier failure going away.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: transient-recovery-demo
+  namespace: kubesentinel-lab
+  labels:
+    app: transient-recovery-demo
+    kubesentinel.io/scenario: transient-recovery
+spec:
+  restartPolicy: Always
+  volumes:
+    - name: state
+      emptyDir: {}
+  containers:
+    - name: app
+      image: busybox:latest
+      imagePullPolicy: IfNotPresent
+      command:
+        - sh
+        - -c
+        - |
+          count=$(cat /data/count 2>/dev/null || echo 0)
+          count=$((count + 1))
+          echo "$count" > /data/count
+          if [ "$count" -le 2 ]; then
+            echo "simulated dependency not ready yet (attempt $count), crashing"
+            exit 1
+          fi
+          echo "dependency ready, staying up"
+          sleep infinity
+      volumeMounts:
+        - name: state
+          mountPath: /data
+      resources:
+        requests:
+          cpu: 10m
+          memory: 16Mi
+        limits:
+          cpu: 50m
+          memory: 32Mi
