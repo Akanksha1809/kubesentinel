@@ -9,7 +9,20 @@ Runs entirely on a local [kind](https://kind.sigs.k8s.io/) cluster. No paid clou
 services, no required AI model. See [DEMO_SCRIPT.md](docs/DEMO_SCRIPT.md) for a
 guided walkthrough and [TODO.md](TODO.md) for exactly what is and isn't built yet.
 
-## Status: Milestones 1-11 (troubleshooting) + 12-18 (resource optimization) complete
+## Demo
+
+![KubeSentinel demo: diagnosis, policy-controlled remediation, and resource optimization recommendations, all against a real kind cluster](docs/images/demo.gif)
+
+A real, unedited terminal session against a real kind cluster: what Kubernetes
+itself reports vs. what KubeSentinel diagnoses, a full policy-controlled
+`plan -> approve -> execute -> verify` remediation (correctly reporting
+`VERIFICATION_FAILED` rather than lying about an action that didn't fix
+anything), and the resource optimization engine producing a real
+`CPU_OVERSIZED`/`MEMORY_OVERSIZED` recommendation from real metrics-server
+samples. Recorded with [asciinema](https://asciinema.org) + [agg](https://github.com/asciinema/agg) --
+every line is genuine command output, not staged.
+
+## Status: Milestones 1-11 (troubleshooting) + 12-19 (resource optimization) complete
 
 The full **observe -> diagnose -> persist -> expose** pipeline is implemented,
 tested, and verified end-to-end against a real kind cluster for 13 of the 14
@@ -49,7 +62,7 @@ recommendation is a reviewable record (`new -> reviewed/approved/rejected ->
 expired`), and analysis never mutates the cluster -- confirmed live with an
 HTTP-transport-level check that an entire `analyze()` pass issues nothing but
 GET requests. See [RESOURCE_OPTIMIZATION_DESIGN.md](docs/RESOURCE_OPTIMIZATION_DESIGN.md)
-for the full design and TODO.md's Milestones 12-18 for the build and
+for the full design and TODO.md's Milestones 12-19 for the build and
 live-verification history.
 
 Every stage above is exported as Prometheus metrics with bounded-cardinality

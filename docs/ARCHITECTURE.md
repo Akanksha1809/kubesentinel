@@ -59,7 +59,7 @@ an incident ID or resource name. Exposed at GET /metrics; see observability/
 for a scrape config and dashboard.
 ```
 
-## Optimization pipeline (Milestones 12-18)
+## Optimization pipeline (Milestones 12-19)
 
 A second, read-only pipeline, built as its own module tree
 (`optimization/`) rather than extended into the pipeline above -- it shares
