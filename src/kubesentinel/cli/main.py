@@ -26,6 +26,8 @@ from kubesentinel.ai.client import AiClientError, OllamaClient
 from kubesentinel.ai.summarizer import summarize_incident
 from kubesentinel.config import Settings, get_settings
 from kubesentinel.diagnostics.engine import DiagnosticEngine
+from kubesentinel.evaluation.harness import EvaluationHarness
+from kubesentinel.evaluation.scenarios import SCENARIOS
 from kubesentinel.logging_config import configure_logging
 from kubesentinel.models.action import ActionType
 from kubesentinel.observer.client import build_clients
@@ -41,6 +43,7 @@ from kubesentinel.network.service import (
     NetworkService,
     PodNotFoundError as NetworkPodNotFoundError,
 )
+from kubesentinel.persistence.evaluation_repo import SQLiteEvaluationRepository
 from kubesentinel.persistence.network_repo import SQLiteNetworkRepository
 from kubesentinel.persistence.optimization_repo import SQLiteOptimizationRepository
 from kubesentinel.persistence.scheduling_repo import SQLiteSchedulingRepository
@@ -831,6 +834,119 @@ def show_security_finding(
     for item in finding.evidence:
         console.print(f"    - {item}")
     console.print(f"  Remediation: {finding.remediation}")
+
+
+@app.command("evaluate")
+def evaluate(
+    scenario: list[str] = typer.Option(
+        [], "--scenario", help=f"Scenario(s) to run (repeatable). Known: {', '.join(s.name for s in SCENARIOS)}"
+    ),
+    all_scenarios: bool = typer.Option(False, "--all", help="Run every registered scenario"),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """Run the chaos & resilience evaluation harness: apply one or more lab
+    scenarios fresh, measure time-to-detection/time-to-diagnosis/recovery-
+    time against the real cluster, and persist the result. See
+    docs/CHAOS_RESILIENCE_LAB.md.
+
+    Mutates the shared kubesentinel-lab namespace (deletes then reapplies
+    each scenario touched, for a clean timing baseline) and can take
+    several minutes -- requires KUBESENTINEL_WATCH_NAMESPACES to include
+    kubesentinel-lab for the TROUBLESHOOTING-capability scenarios, exactly
+    like the real API server's own observer. CLI-only, never exposed over
+    HTTP (see docs/CHAOS_RESILIENCE_LAB.md §8)."""
+    if not scenario and not all_scenarios:
+        console.print("[red]Specify --scenario NAME (repeatable) or --all[/red]")
+        raise typer.Exit(code=1)
+    unknown = [s for s in scenario if s not in {spec.name for spec in SCENARIOS}]
+    if unknown:
+        console.print(f"[red]Unknown scenario(s): {', '.join(unknown)}[/red]")
+        raise typer.Exit(code=1)
+
+    settings = get_settings()
+    configure_logging(settings.log_level)
+    harness = EvaluationHarness(settings)
+    run = harness.run(scenario)
+    SQLiteEvaluationRepository(settings.db_path).save_run(run)
+
+    if json_output:
+        print(json_module.dumps(run.model_dump(mode="json"), indent=2))
+        return
+
+    table = Table(title=f"Evaluation run {run.run_id[:8]}")
+    for col in ("Scenario", "Capability", "Outcome", "Detected (s)", "Diagnosed (s)", "Recovery (s)", "Observed"):
+        table.add_column(col)
+    for result in run.scenario_results:
+        table.add_row(
+            result.scenario_name,
+            result.capability.value,
+            result.outcome.value,
+            f"{result.time_to_detection_seconds:.1f}" if result.time_to_detection_seconds is not None else "-",
+            f"{result.time_to_diagnosis_seconds:.1f}" if result.time_to_diagnosis_seconds is not None else "-",
+            f"{result.recovery_time_seconds:.1f}" if result.recovery_time_seconds is not None else "-",
+            result.observed or "-",
+        )
+    console.print(table)
+    console.print(
+        f"False positives: {run.false_positive_count}/{run.total_open_findings_count}"
+        f" (rate={run.false_positive_rate:.3f})"
+        if run.false_positive_rate is not None
+        else "False positives: 0/0 (no open findings)"
+    )
+
+
+@app.command("evaluation-runs")
+def list_evaluation_runs(json_output: bool = typer.Option(False, "--json")) -> None:
+    """List persisted evaluation harness runs, most recent first."""
+    settings = get_settings()
+    repo = SQLiteEvaluationRepository(settings.db_path)
+    runs = repo.list_runs()
+
+    if json_output:
+        print(json_module.dumps([r.model_dump(mode="json") for r in runs], indent=2))
+        return
+
+    table = Table(title="Evaluation Runs")
+    for col in ("Run ID", "Started", "Scenarios", "False Positive Rate"):
+        table.add_column(col)
+    for r in runs:
+        table.add_row(
+            r.run_id[:8],
+            r.started_at.isoformat(),
+            str(len(r.scenario_results)),
+            f"{r.false_positive_rate:.3f}" if r.false_positive_rate is not None else "-",
+        )
+    console.print(table)
+
+
+@app.command("evaluation-run")
+def show_evaluation_run(
+    run_id: str = typer.Argument(..., help="Run to show"),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """Show one evaluation harness run in full."""
+    settings = get_settings()
+    repo = SQLiteEvaluationRepository(settings.db_path)
+    run = repo.get_run(run_id)
+    if run is None:
+        console.print(f"[red]Evaluation run '{run_id}' not found[/red]")
+        raise typer.Exit(code=1)
+
+    if json_output:
+        print(json_module.dumps(run.model_dump(mode="json"), indent=2))
+        return
+
+    console.print(f"[bold]{run.run_id}[/bold] ({run.started_at.isoformat()} -> {run.finished_at.isoformat()})")
+    for result in run.scenario_results:
+        console.print(
+            f"  {result.scenario_name} [{result.capability.value}]: {result.outcome.value} -- {result.detail}"
+        )
+    console.print(
+        f"False positives: {run.false_positive_count}/{run.total_open_findings_count}"
+        f" (rate={run.false_positive_rate:.3f})"
+        if run.false_positive_rate is not None
+        else "False positives: 0/0 (no open findings)"
+    )
 
 
 def _state_label(cs) -> str:

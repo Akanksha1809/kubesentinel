@@ -21,7 +21,13 @@ from pydantic import BaseModel, Field
 
 from kubesentinel.ai.client import AiClientError, OllamaClient
 from kubesentinel.ai.summarizer import summarize_incident
-from kubesentinel.api import network_routes, optimization_routes, scheduling_routes, security_routes
+from kubesentinel.api import (
+    evaluation_routes,
+    network_routes,
+    optimization_routes,
+    scheduling_routes,
+    security_routes,
+)
 from kubesentinel.api.state import require_api_token, state
 from kubesentinel.config import get_settings
 from kubesentinel.incidents.manager import IncidentManager
@@ -32,6 +38,7 @@ from kubesentinel.network.service import NetworkService
 from kubesentinel.observer.client import build_clients
 from kubesentinel.observer.service import ObserverService
 from kubesentinel.optimization.service import OptimizationService
+from kubesentinel.persistence.evaluation_repo import SQLiteEvaluationRepository
 from kubesentinel.persistence.network_repo import SQLiteNetworkRepository
 from kubesentinel.persistence.optimization_repo import SQLiteOptimizationRepository
 from kubesentinel.persistence.scheduling_repo import SQLiteSchedulingRepository
@@ -73,6 +80,7 @@ async def lifespan(app: FastAPI):
     state.scheduling_repo = SQLiteSchedulingRepository(settings.db_path)
     state.network_repo = SQLiteNetworkRepository(settings.db_path)
     state.security_repo = SQLiteSecurityRepository(settings.db_path)
+    state.evaluation_repo = SQLiteEvaluationRepository(settings.db_path)
 
     try:
         clients = build_clients(settings)
@@ -107,6 +115,7 @@ async def lifespan(app: FastAPI):
     state.scheduling_repo.close()
     state.network_repo.close()
     state.security_repo.close()
+    state.evaluation_repo.close()
 
 
 app = FastAPI(title="KubeSentinel", version="0.1.0", lifespan=lifespan)
@@ -114,6 +123,7 @@ app.include_router(optimization_routes.router)
 app.include_router(scheduling_routes.router)
 app.include_router(network_routes.router)
 app.include_router(security_routes.router)
+app.include_router(evaluation_routes.router)
 
 
 def _require_remediation_service() -> RemediationService:

@@ -2446,3 +2446,141 @@ list now includes in-Pod volume mount failures).
 Immediately after, per the user's own standing instruction, proceeds to
 Milestone 7 ("Chaos and resilience lab") per `docs/PLATFORM_ROADMAP.md`'s
 own sequencing.
+
+## Milestone 26: Chaos & resilience evaluation harness -- DONE
+
+Milestone 7 of `docs/PLATFORM_ROADMAP.md`, per the user's own standing
+instruction to continue there after Milestone 25's closure work. Design-
+first, per this project's established precedent:
+`docs/CHAOS_RESILIENCE_LAB.md` before any code -- including the genuine
+architectural decision this capability needed that no prior milestone
+did: this is the project's first capability that doesn't read the
+cluster to find a new problem, it *drives and times* the six engines that
+already exist, so none of `MASTER_ARCHITECTURE.md`'s "one pattern" quite
+applies as written. Stated explicitly in the design doc rather than
+silently bent to fit.
+
+**What was added**:
+
+- `evaluation/scenarios.py` -- a hardcoded `ScenarioSpec` registry of all
+  16 lab scenarios, each entry transcribing that scenario's own manifest
+  comment (every one already states its own "Expected ... diagnosis" --
+  confirmed by reading all 16 before writing the registry) as machine-
+  readable ground truth. Deliberately not a new YAML schema or a comment
+  parser -- see docs/CHAOS_RESILIENCE_LAB.md §2 for why either would mean
+  two sources of truth drifting apart. `pending-resources` is registered
+  twice (TROUBLESHOOTING and SCHEDULING), reusing the one manifest the lab
+  already shares between those two engines' own live verification, rather
+  than inventing a second manifest the roadmap's own scope said not to
+  add.
+- `evaluation/harness.py::EvaluationHarness` -- the orchestrator. Applies/
+  cleans up a scenario via a `kubectl` subprocess (reusing exactly what
+  `lab/scripts/run-scenario.sh`/`cleanup.sh` already do, under the
+  ambient kubeconfig -- lab tooling, never through `ClusterClients`, so no
+  new RBAC grant was needed anywhere). Every run deletes-then-confirms-
+  absent before applying, so time-to-detection is measured from a genuine
+  verified-zero baseline regardless of whatever stale state the shared,
+  long-lived lab namespace happened to be in. Dispatches per scenario to
+  one of two measurement strategies: a harness-owned, short-lived
+  `ObserverService`+`IncidentManager` for the push-based troubleshooting
+  engine (reusing `ObserverService` wholesale, no watch logic duplicated);
+  re-triggering `OptimizationService.analyze()` /
+  `SchedulingService.analyze_pod()` / `NetworkService.analyze_pod()` /
+  `SecurityService.audit()` directly in-process each poll attempt for the
+  five pull-based engines, the same construction `cli/main.py`'s own
+  `_build_*_service` helpers already use. Recovery time is read straight
+  off `Incident.recovery_duration_seconds` and is `None` for every
+  scenario except `transient-recovery` -- the only one that defines a
+  recovery path at all; no other scenario's "recovery" is fabricated or
+  silently assumed. False-positive rate is computed once per whole battery
+  (`_count_false_positives`): every currently-open incident/finding across
+  all five repositories that cannot be attributed to any registered
+  scenario's own resource name is counted as unattributed.
+- `models/evaluation.py` (`EvaluationCapability`, `DetectionOutcome`,
+  `ScenarioResult`, `EvaluationRun`) and a sixth sibling repository,
+  `EvaluationRepository`/`SQLiteEvaluationRepository` behind
+  `persistence/interface.py` -- unlike `SecurityRepository`'s whole-run
+  replace, `save_run` is an upsert by `run_id` and every past run is kept:
+  an evaluation run's entire purpose is comparing against history, not
+  describing only the latest cluster state.
+- `api/evaluation_routes.py` -- `GET /evaluation/runs[/{run_id}]` only.
+  Deliberately **no `POST /evaluation/run`**: unlike `/optimization/
+  analyze` or `/security/audit`, running a battery mutates the shared lab
+  namespace and can take several minutes -- this stays CLI-only
+  (`kubesentinel evaluate`/`evaluation-runs`/`evaluation-run`), the same
+  boundary that already keeps `lab/scripts/*.sh` out of the HTTP surface
+  entirely.
+
+**A real bug caught live, not by any unit test**: a single scenario can
+open *more than one* real incident whose resource names share the same
+prefix -- `scenario-failed-mount` opens both a Deployment-level
+`UNSATISFIED_REPLICAS` incident (the Deployment's own name exactly equals
+`resource_name_prefix`) and the real Pod-level `FAILED_MOUNT` one (the
+Pod's randomly-suffixed name also starts with that prefix). The harness's
+first version took whichever the repository happened to list first the
+instant either one existed, reporting a false `WRONG_CATEGORY` for a
+scenario that was actually correctly diagnosed moments later. Root cause
+confirmed from a live run's own JSON output, not assumed. Fixed in
+`_check_troubleshooting` to keep polling every candidate for an exact
+match against `expected` until the deadline, only settling for the
+first-seen non-matching candidate once time genuinely runs out (for an
+honest `WRONG_CATEGORY`/`TIMED_OUT` detail) -- reconfirmed live
+immediately after with an identical run.
+
+**Live-verified against the real cluster**: a bounded, representative
+run -- one scenario per capability (`failed-mount`, `missing-requests`,
+`pending-resources-scheduling-fit`, `security-findings`,
+`service-port-mismatch`), not the full 16-scenario battery, deliberately:
+a full run is disruptive to the shared lab (every scenario touched gets
+torn down and recreated) and dominated by `oversized-resources`'s own
+400s floor (it needs real metrics-server history to accumulate, per its
+own manifest). All 5 reported `DETECTED` with the correct observed value
+after the fix above -- `failed-mount` -> `FAILED_MOUNT`, `missing-
+requests` -> `DATA_QUALITY`, `pending-resources-scheduling-fit` ->
+`UNSCHEDULABLE`, `security-findings` -> `PRIVILEGED_CONTAINER`,
+`service-port-mismatch` -> `CONFIGURATION_ERROR`. The same shared-VM
+contention pattern documented repeatedly throughout this project's
+history (`kube-apiserver`/`kube-scheduler`/`kube-controller-manager`
+crash-looping from the two unrelated containers on this host) blocked the
+cluster mid-verification twice; both times, waited for `kubectl get
+nodes` to succeed again before retrying, per this project's own
+established discipline, rather than working around it.
+
+A full `./scripts/test.sh --all` run afterward showed 29 failed/4 errored
+-- re-running those files in isolation once the host settled confirmed 59
+of 60 were this exact same contention pattern, passing cleanly. The one
+exception, `test_hpa_capacity_pressure_scenario_is_flagged_at_max`, kept
+failing even in isolation -- investigated rather than dismissed as more
+contention noise, since it's a different *kind* of failure (a wrong flag
+value, not a connection timeout). Root cause, confirmed via
+`kubectl -n kube-system get pods -l k8s-app=metrics-server`: the real
+`metrics-server` Pod has been in `CrashLoopBackOff` for over 24 hours on
+this specific host tonight (172 restarts) -- the same shared-VM
+contention, just starving a *different* Pod than usual.
+`capacity.py`'s own `HPA_AT_MAX` flag correctly requires real, observed
+over-target utilization data before claiming a workload is pinned at its
+ceiling under load (`optimization/capacity.py:254-256`); with no
+metrics-server data at all, there is honestly no such evidence, so the
+code falls through to the `elif` branch and reports `HPA_AT_MIN` instead
+(`current_replicas <= min_replicas`, trivially true here since this
+scenario's own `minReplicas == maxReplicas == 1` by design -- see its own
+manifest comment). This is the *same* "honest about absence" discipline
+this project applies everywhere else working exactly as intended under a
+genuinely data-less condition, not a defect in `capacity.py`, and nothing
+in this milestone's own code touches that logic at all -- no fix needed
+or made here.
+
+**Tests**: 24 new unit tests across 4 files -- `test_evaluation_scenarios.py`
+(8, registry integrity), `test_evaluation_repo.py` (4, SQLite roundtrip/
+ordering/upsert), `test_evaluation_harness.py` (10, `_scenario_label` and
+the whole-battery false-positive computation against real model objects),
+`test_evaluation_api.py` (4, the two read-only routes' happy path/empty/
+404). `./scripts/test.sh`: ruff clean, mypy clean (104 source files),
+**755 unit tests passed** (731 + 24).
+
+**Documentation**: `docs/CHAOS_RESILIENCE_LAB.md` (new design doc),
+`docs/PLATFORM_ROADMAP.md` (Milestone 7 marked DONE),
+`docs/IMPLEMENTATION_STATUS.md` (Controlled Chaos & Resilience Lab:
+Partial -> Implemented), `docs/TESTING.md` (updated counts, new Milestone
+7 test-coverage section), and `README.md` (a new paragraph alongside the
+other five engines, plus the documentation index entry).

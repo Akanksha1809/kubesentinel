@@ -22,7 +22,7 @@ anything), and the resource optimization engine producing a real
 samples. Recorded with [asciinema](https://asciinema.org) + [agg](https://github.com/asciinema/agg) --
 every line is genuine command output, not staged.
 
-## Status: Milestones 1-11 (troubleshooting) + 12-19 (resource optimization) + scheduling advisor + network troubleshooting engine + capacity planning advisor + security auditor complete -- the full platform spec (Capabilities A-F)
+## Status: Milestones 1-11 (troubleshooting) + 12-19 (resource optimization) + scheduling advisor + network troubleshooting engine + capacity planning advisor + security auditor complete -- the full platform spec (Capabilities A-F) -- plus a chaos & resilience evaluation harness measuring all six engines against the real cluster
 
 The full **observe -> diagnose -> persist -> expose** pipeline is implemented,
 tested, and verified end-to-end against a real kind cluster for 13 of the 14
@@ -136,6 +136,19 @@ project has access to) and resolving a subject's *effective* permissions
 across every Role it's bound to combined -- both named as real gaps, not
 silently absent. No apply/write path exists here either. See
 [SECURITY_AUDITING.md](docs/SECURITY_AUDITING.md) for the design.
+
+A **chaos & resilience evaluation harness** drives all six engines above
+against the real cluster and measures them: it deletes-then-reapplies a
+lab scenario for a genuine, verified-absent timing baseline, then records
+real time-to-detection/time-to-diagnosis (the push-based troubleshooting
+engine via its own short-lived observer; the five pull-based engines by
+re-triggering `analyze()`/`audit()` each poll), recovery time where a
+scenario defines one, and a whole-battery false-positive rate against
+every currently-open incident/finding that can't be attributed to a
+registered scenario. `kubesentinel evaluate` -- CLI-only, deliberately
+never an HTTP endpoint, since a run mutates the shared lab namespace and
+can take minutes. See [CHAOS_RESILIENCE_LAB.md](docs/CHAOS_RESILIENCE_LAB.md)
+for the design.
 
 Every stage above is exported as Prometheus metrics with bounded-cardinality
 labels (category/action_type/reason/component, never incident IDs or pod
@@ -436,6 +449,7 @@ docs/            Architecture, diagnostic rules, RBAC/threat model, failure lab,
 - [NETWORK_DIAGNOSTICS.md](docs/NETWORK_DIAGNOSTICS.md) -- the network troubleshooting engine's own design: evidence chain, scope split, what's deliberately deferred
 - [CAPACITY_PLANNING.md](docs/CAPACITY_PLANNING.md) -- the capacity planning & autoscaling advisor's own design: HPA status, scale headroom, what's a pattern match vs. a diagnosis
 - [SECURITY_AUDITING.md](docs/SECURITY_AUDITING.md) -- the security & configuration auditor's own design: the 13-rule catalog, the build-vs-integrate decision, what's deliberately deferred
+- [CHAOS_RESILIENCE_LAB.md](docs/CHAOS_RESILIENCE_LAB.md) -- the evaluation harness's own design: ground truth, push-vs-pull timing, recovery/false-positive scope
 - [DIAGNOSTIC_RULES.md](docs/DIAGNOSTIC_RULES.md) -- every rule, its evidence, and its confidence logic
 - [FAILURE_LAB.md](docs/FAILURE_LAB.md) -- each lab scenario: how it fails, what's expected, how to clean up
 - [RBAC_AND_THREAT_MODEL.md](docs/RBAC_AND_THREAT_MODEL.md) -- least privilege, trust boundaries

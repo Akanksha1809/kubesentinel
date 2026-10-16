@@ -279,23 +279,37 @@ upsert with a whole-run replace (`save_findings`), the same semantics
 `optimization_repo.py::save_workload_snapshots` already uses for its own
 full-rescan shape.
 
-## Milestone 7: Chaos and resilience lab
+## Milestone 7: Chaos and resilience lab -- DONE
 
-**Scope**: not new failure scenarios (11 already exist and are
-live-verified -- see FAILURE_LAB.md) but the **evaluation harness** named
-as missing in `IMPLEMENTATION_STATUS.md`: an automated way to apply a
-scenario, measure time-to-detection/time-to-diagnosis/recovery-time/
-false-positive rate against it, and persist that measurement for later
-comparison -- turning the manually-observed, prose-only numbers scattered
-through TODO.md's history into something a later run can reproduce and
-diff against. Covers every analysis engine that exists by the time this
-milestone starts (A, B, and whichever of C/D/E/F are already built),
-not just the original troubleshooting scenarios.
+Built the **evaluation harness** named as missing in
+`IMPLEMENTATION_STATUS.md`, not new failure scenarios (all 16 already
+existed and were already live-verified). See `docs/CHAOS_RESILIENCE_LAB.md`
+for the full design. Covers every one of the six analysis engines, not
+just the original troubleshooting scenarios: a scenario registry
+(`evaluation/scenarios.py`) transcribes each manifest's own already-
+reviewed "Expected diagnosis" comment as ground truth, dispatched per
+scenario to whichever capability owns it.
 
-**Explicitly bounded**: measured values only, never illustrative or
-estimated numbers presented as measured -- matching this entire project's
-existing discipline (TODO.md's own "live-verified, not asserted" standard)
-extended to this harness specifically.
+Push (troubleshooting) vs. pull (optimization/scheduling/network/
+capacity/security) detection genuinely need different measurement
+strategies -- a harness-owned, short-lived `ObserverService` for the
+former; re-triggering `analyze()`/`audit()` each poll for the latter five
+-- documented honestly rather than forced into one shape, including that
+time-to-detection and time-to-diagnosis are the same number for every
+troubleshooting-capability scenario in this architecture (there is no
+separate detect-then-diagnose phase). Recovery time is measured only for
+the one scenario that defines a recovery path at all; false-positive rate
+is a whole-battery property against real, currently-open findings, not a
+synthetic injection.
+
+Live-verified across all 5 capabilities (one representative scenario
+each) -- all 5 correctly `DETECTED`. This caught a real bug: a scenario
+can open more than one real incident sharing the same resource-name
+prefix (`scenario-failed-mount`'s Deployment-level `UNSATISFIED_REPLICAS`
+incident and its own Pod-level `FAILED_MOUNT` one), and the harness's
+first version took whichever the repository listed first rather than the
+one whose diagnosis actually matched -- fixed to keep polling for an
+exact match until the deadline, reconfirmed live afterward.
 
 ## Milestone 8: Kubernetes operator
 

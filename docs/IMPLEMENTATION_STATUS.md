@@ -455,24 +455,45 @@ exist for it to expose as policy -- correctly sequenced last.
 
 ## Controlled Chaos & Resilience Lab
 
-**Partial.** The *scenario* half is strong and already live-verified: 12
-lab scenario directories under `lab/manifests/` (9 original troubleshooting
-scenarios + 2 resource-optimization scenarios + 1 scheduling-advisor
-scenario), each with setup
-instructions, expected symptoms, expected diagnosis, and cleanup --
-documented per-scenario in FAILURE_LAB.md. `lab/scripts/run-scenario.sh`
-and `lab/scripts/cleanup.sh` are generic, scenario-agnostic appliers, and
-every scenario is scoped to the single `kubesentinel-lab` namespace (no
-scenario targets anything outside it).
+**Implemented** (Milestone 7 of `docs/PLATFORM_ROADMAP.md`). The
+*scenario* half was already strong and live-verified: 16 lab scenario
+directories under `lab/manifests/`, each with setup instructions, expected
+symptoms, expected diagnosis, and cleanup -- documented per-scenario in
+FAILURE_LAB.md. `lab/scripts/run-scenario.sh` and `lab/scripts/cleanup.sh`
+remain the generic, scenario-agnostic appliers, and every scenario stays
+scoped to the single `kubesentinel-lab` namespace.
 
-What's missing is the **evaluation harness** the spec asks for: nothing in
-this codebase currently *measures* (and persists, for later comparison)
-time-to-detection, time-to-diagnosis, recovery time, or false-positive rate
-across a scenario run. Today these numbers only exist as one-off, manually
-observed figures written into TODO.md's prose during live verification
-(e.g. "the fixed version took 11.5s" from an early milestone) -- real, not
-fabricated, but not a repeatable, automated measurement a later run could
-reproduce or compare against.
+What was missing -- the **evaluation harness** the spec asks for -- is now
+built: `evaluation/harness.py::EvaluationHarness` deletes-then-reapplies a
+scenario fresh (a genuine, verified-absent baseline, not whatever stale
+state the shared lab happened to be in), then measures time-to-detection/
+time-to-diagnosis via a harness-owned `ObserverService` for the push-based
+troubleshooting engine, or by re-triggering `analyze()`/`audit()` each poll
+for the five pull-based engines (optimization, scheduling, network,
+capacity, security). Recovery time is measured only for
+`scenario-transient-recovery` (the one scenario that defines a recovery
+path at all); false-positive rate is a whole-battery property, computed
+from every currently-open incident/finding across all five repositories
+that cannot be attributed to any registered scenario's own resource name.
+Results persist via a sixth `EvaluationRepository`/`SQLiteEvaluationRun`
+pair, behind `kubesentinel evaluate`/`evaluation-runs`/`evaluation-run`
+(CLI-only -- deliberately never an HTTP `POST`, since running a battery
+mutates the shared lab namespace; `GET /evaluation/runs[/{id}]` serves
+already-persisted runs). See `docs/CHAOS_RESILIENCE_LAB.md` for the full
+design, including why time-to-detection and time-to-diagnosis are the same
+number for every TROUBLESHOOTING-capability scenario in this architecture.
+
+Live-verified against the real cluster across all 5 capabilities
+(`failed-mount`, `missing-requests`, `pending-resources-scheduling-fit`,
+`security-findings`, `service-port-mismatch`) -- all 5 reported `DETECTED`
+with the correct observed value. This run caught a real bug: a scenario
+can open *more than one* real incident (`scenario-failed-mount` opens both
+a Deployment-level `UNSATISFIED_REPLICAS` incident and the real Pod-level
+`FAILED_MOUNT` one, since both resource names start with the same
+`resource_name_prefix`), and the harness's first version took whichever
+one the repository listed first rather than the one whose own diagnosis
+matched -- reporting a false `WRONG_CATEGORY`. Fixed to keep polling for
+an exact match until the deadline, confirmed live afterward.
 
 ## Observability
 

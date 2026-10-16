@@ -11,6 +11,7 @@ from abc import ABC, abstractmethod
 from datetime import datetime
 
 from kubesentinel.models.action import RemediationAction
+from kubesentinel.models.evaluation import EvaluationRun
 from kubesentinel.models.incident import Incident
 from kubesentinel.models.network import NetworkFinding
 from kubesentinel.models.optimization import AnalysisRunSummary, ResourceRecommendation, WorkloadSnapshot
@@ -176,3 +177,22 @@ class SecurityRepository(ABC):
     def list_findings(
         self, *, namespace: str | None = None, severity: str | None = None, rule_id: str | None = None
     ) -> builtins.list[SecurityFinding]: ...
+
+
+class EvaluationRepository(ABC):
+    """Persistence for the chaos & resilience evaluation harness
+    (Milestone 7). A sixth sibling, same "may share the same underlying
+    SQLite file" note as every repository above -- an `EvaluationRun` has
+    no review/approval lifecycle either, and (like `SecurityFinding`) is
+    a whole-run record, not an upsert target: a `run_id` is generated once
+    per harness invocation and never reused.
+    """
+
+    @abstractmethod
+    def save_run(self, run: EvaluationRun) -> None: ...
+
+    @abstractmethod
+    def get_run(self, run_id: str) -> EvaluationRun | None: ...
+
+    @abstractmethod
+    def list_runs(self) -> builtins.list[EvaluationRun]: ...

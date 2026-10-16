@@ -15,6 +15,7 @@ from kubesentinel.incidents.manager import IncidentManager
 from kubesentinel.network.service import NetworkService
 from kubesentinel.observer.service import ObserverService
 from kubesentinel.optimization.service import OptimizationService
+from kubesentinel.persistence.evaluation_repo import SQLiteEvaluationRepository
 from kubesentinel.persistence.network_repo import SQLiteNetworkRepository
 from kubesentinel.persistence.optimization_repo import SQLiteOptimizationRepository
 from kubesentinel.persistence.scheduling_repo import SQLiteSchedulingRepository
@@ -40,6 +41,11 @@ class AppState:
     network: NetworkService | None = None
     security_repo: SQLiteSecurityRepository
     security: SecurityService | None = None
+    # No "evaluation" service field: the harness is CLI-only, never an HTTP
+    # endpoint (docs/CHAOS_RESILIENCE_LAB.md §8 -- running a battery mutates
+    # the shared lab namespace and can take minutes). This repo backs the
+    # two read-only GET routes only.
+    evaluation_repo: SQLiteEvaluationRepository
 
 
 state = AppState()

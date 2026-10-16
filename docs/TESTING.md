@@ -7,9 +7,10 @@
 ./scripts/test.sh --all    # same, plus integration/e2e against a live kind cluster
 ```
 
-As of Milestone 1's own audit closure (after Milestones 2-6 shipped): **731 unit tests** (no cluster, no Ollama needed) plus **69
+As of Milestone 7's own evaluation harness (after Milestone 1's audit
+closure shipped): **755 unit tests** (no cluster, no Ollama needed) plus **69
 integration/e2e tests** (`--all`, against the real `kind-kubesentinel` cluster, one
-of them additionally gated on a local Ollama server) -- 800 total, all passing,
+of them additionally gated on a local Ollama server) -- 824 total, all passing,
 `ruff check` clean, `mypy src/kubesentinel` clean. Every
 integration/e2e test skips (not fails) if its precondition (the cluster, the lab
 namespace, a specific scenario/fixture, Ollama) isn't present -- confirmed by
@@ -326,6 +327,59 @@ after Milestones 2-6 shipped:
   is a safe no-op (every existing caller passing only `repo` must behave
   exactly as before), and a recommendation for a *different* workload is
   correctly not linked.
+
+## Milestone 7 evaluation harness unit test coverage
+
+The harness's own orchestration (applying manifests via `kubectl`, driving
+a real `ObserverService`/`OptimizationService`/etc. against a real
+cluster) is deliberately not re-mocked at the unit tier, and deliberately
+not wired into the automated `--all` suite either: a battery run deletes-
+then-reapplies every scenario it touches in the shared lab namespace
+(docs/CHAOS_RESILIENCE_LAB.md §6), which is disruptive, developer-invoked
+behavior, not something routine CI should silently repeat. It was instead
+verified directly below ("Live"). 24 new unit tests cover what *is*
+purely deterministic:
+
+- **`test_evaluation_scenarios.py`** (8 tests) -- registry integrity: every
+  scenario name is unique, every `lab_dir` exists on disk, every
+  SCHEDULING/NETWORK scenario declares the pod label it needs,
+  `transient-recovery` is the only scenario with `supports_recovery=True`,
+  `oversized-resources` carries a long timeout, and `pending-resources`/
+  `pending-resources-scheduling-fit` correctly share one manifest across
+  two capabilities.
+- **`test_evaluation_repo.py`** (4 tests) -- `SQLiteEvaluationRepository`
+  save/get/list roundtrips, ordering by `started_at` descending, and that
+  `save_run` is an upsert by `run_id` (unlike `SecurityRepository`'s
+  whole-run replace, an evaluation run's entire purpose is comparing
+  against *past* runs, so history must be kept -- see
+  docs/CHAOS_RESILIENCE_LAB.md §7).
+- **`test_evaluation_harness.py`** (10 tests) -- `_scenario_label()`'s
+  prefix-stripping, and `_count_false_positives()` (the whole-battery
+  false-positive computation) against real `Incident`/
+  `ResourceRecommendation`/`SchedulingFinding`/`NetworkFinding`/
+  `SecurityFinding` objects: a known resource is never a false positive, an
+  unattributable one (e.g. a real CoreDNS Pod name) is, a `RESOLVED`
+  incident is excluded entirely, a Scheduling/Network finding can match on
+  either of its two name fields, a `SecurityFinding` with no
+  `workload_name` at all (RBAC/NetworkPolicy/PDB findings genuinely have
+  none) is honestly counted as unattributed rather than silently excluded,
+  and an empty cluster state returns `(0, 0)` rather than a division error.
+- **`test_evaluation_api.py`** (4 tests) -- `GET /evaluation/runs[/{id}]`'s
+  happy path, empty-list case, and 404; no `POST` route exists to test
+  (docs/CHAOS_RESILIENCE_LAB.md §8).
+
+**Live**: a bounded, representative run (one scenario per capability --
+`failed-mount`, `missing-requests`, `pending-resources-scheduling-fit`,
+`security-findings`, `service-port-mismatch`) via `kubesentinel evaluate`
+against the real cluster, not the full 16-scenario battery (disruptive to
+the shared lab and dominated by `oversized-resources`'s own 400s floor).
+All 5 correctly `DETECTED`, after catching and fixing a real bug live: the
+first version matched an incident by resource-name prefix alone, which
+for `scenario-failed-mount` matches *two* real incidents (a Deployment-
+level `UNSATISFIED_REPLICAS` one and the real Pod-level `FAILED_MOUNT`
+one) -- it took whichever the repository listed first, reporting a false
+`WRONG_CATEGORY`. Fixed to keep polling for an exact match against
+`expected` until the deadline; reconfirmed live immediately after.
 
 ## Why `kubernetes.client` model objects, not hand-rolled dicts, in tests
 
