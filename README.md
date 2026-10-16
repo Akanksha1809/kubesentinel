@@ -22,7 +22,7 @@ anything), and the resource optimization engine producing a real
 samples. Recorded with [asciinema](https://asciinema.org) + [agg](https://github.com/asciinema/agg) --
 every line is genuine command output, not staged.
 
-## Status: Milestones 1-11 (troubleshooting) + 12-19 (resource optimization) + scheduling advisor + network troubleshooting engine + capacity planning advisor complete
+## Status: Milestones 1-11 (troubleshooting) + 12-19 (resource optimization) + scheduling advisor + network troubleshooting engine + capacity planning advisor + security auditor complete -- the full platform spec (Capabilities A-F)
 
 The full **observe -> diagnose -> persist -> expose** pipeline is implemented,
 tested, and verified end-to-end against a real kind cluster for 13 of the 14
@@ -117,6 +117,26 @@ project has no tracing/latency evidence for at all, never silently
 assumed to be the cause. No apply/write path exists here either. See
 [CAPACITY_PLANNING.md](docs/CAPACITY_PLANNING.md) for the design.
 
+A sixth, read-only engine -- the **security & configuration auditor** --
+is a native rule catalog (no kube-linter/Kubescape dependency -- a
+deliberate build-vs-integrate decision, not an oversight) covering
+container security context (privileged, allowPrivilegeEscalation,
+runAsNonRoot, readOnlyRootFilesystem, host namespace sharing, hostPath
+volumes, mutable image tags, Secrets as env vars), RBAC
+over-permissiveness (cluster-admin bindings and wildcard verb+resource
+rules, both excluding Kubernetes' own built-in, unfixable Roles/bindings
+-- confirmed live that a real cluster has *two* such built-in identities,
+not the one better-known one), NetworkPolicy coverage (namespaces with
+zero policies, policies with an unrestricted-allow-all ingress rule,
+reusing the network engine's own classification rather than re-reading
+NetworkPolicy objects a second time), and PodDisruptionBudget coverage
+for multi-replica workloads. Deliberately out of scope: CVE/image
+vulnerability scanning (no maintained vulnerability database this
+project has access to) and resolving a subject's *effective* permissions
+across every Role it's bound to combined -- both named as real gaps, not
+silently absent. No apply/write path exists here either. See
+[SECURITY_AUDITING.md](docs/SECURITY_AUDITING.md) for the design.
+
 Every stage above is exported as Prometheus metrics with bounded-cardinality
 labels (category/action_type/reason/component, never incident IDs or pod
 names) at `GET /metrics`. [observability/](observability/) has a scrape config
@@ -131,7 +151,9 @@ one dedicated manifest each) plus 2 resource-optimization scenarios
 scenario (an impossible nodeSelector) plus 2 network-engine scenarios (a
 Service selector matching no Pod, and a Service matching a real, Ready
 Pod whose `targetPort` name doesn't resolve) plus 1 capacity-advisor
-scenario (a real HPA pinned at its maximum, still over target) are built
+scenario (a real HPA pinned at its maximum, still over target) plus 1
+security-auditor scenario (a privileged container, an over-permissive
+ClusterRoleBinding, and an unrestricted-ingress NetworkPolicy) are built
 and live-verified -- see [FAILURE_LAB.md](docs/FAILURE_LAB.md). The test suite now includes
 integration and e2e tests that exercise the real cluster directly (RBAC
 boundary enforcement, watch resync, UID-based dedup across a delete/recreate,
@@ -141,10 +163,13 @@ engine's own read-only guarantee and real-usage-data right-sizing, the
 scheduling advisor's own independent constraint math reaching the same
 conclusion the real scheduler already did, the network engine's own
 independent selector/port matching reaching the right conclusion against
-real Services/EndpointSlices/CoreDNS, and the capacity advisor's own
+real Services/EndpointSlices/CoreDNS, the capacity advisor's own
 HPA-status/scale-headroom reasoning reaching the right conclusion against
-a real HorizontalPodAutoscaler and real Node capacity) --
-`./scripts/test.sh --all` runs all 668 tests (611 unit + 57 integration/e2e);
+a real HorizontalPodAutoscaler and real Node capacity, and the security
+auditor's own rule catalog reaching the right conclusion against real
+RBAC/NetworkPolicy/container state while correctly never flagging the
+cluster's own built-in RBAC bootstrap identities) --
+`./scripts/test.sh --all` runs all 783 tests (715 unit + 68 integration/e2e);
 see [TESTING.md](docs/TESTING.md).
 
 Optional AI summarization (`kubesentinel explain <incident-id>`, or
@@ -231,6 +256,21 @@ Workload inventory (reused)   -->  HPA status (reused scheduling    -->  CAPACIT
                         Same ResourceRecommendation row  <-->  Same FastAPI/CLI/`/metrics` surfaces
 ```
 
+A sixth pipeline, same shared infrastructure again, two new read-only
+clients (`RbacAuthorizationV1Api`, `PolicyV1Api`) -- the full A-F
+capability list from the platform spec is now complete:
+
+```
+Pod/RBAC/NetworkPolicy/PDB   -->  13 native rules (container        -->  SecurityFinding(s):
+inventory (one-shot,              security context, RBAC                severity, evidence,
+Pods grouped by owning            over-permissiveness, NetworkPolicy     explanation, remediation
+workload, reused owner             coverage, PDB coverage) --
+resolution)                        no external scanner dependency
+                                                            |
+                                                            v
+                                            SQLite persistence  <-->  FastAPI + CLI + /metrics
+```
+
 ## Quickstart
 
 Prerequisites: Docker (or Colima), [kind](https://kind.sigs.k8s.io/), kubectl, Python 3.11+.
@@ -307,6 +347,15 @@ commands as CPU/MEMORY/SCHEDULING, under a new category:
 .venv/bin/kubesentinel recommendation <recommendation-id>
 ```
 
+The security & configuration auditor runs a cluster-wide audit -- also
+no extra setup needed:
+
+```bash
+.venv/bin/kubesentinel security-audit --namespace kubesentinel-lab
+.venv/bin/kubesentinel security-findings --severity CRITICAL
+.venv/bin/kubesentinel security-finding <finding-id>
+```
+
 AI summarization is off by default (works with no AI at all). To try it:
 [install Ollama](https://ollama.com), `ollama pull qwen2.5-coder:3b` (or any
 model you have), then:
@@ -353,9 +402,10 @@ src/kubesentinel/
                  and capacity.py (HPA status/scale-headroom reasoning, Milestone 5)
   scheduling/    Read-only placement analysis: node inventory, per-constraint evaluators, analyzer
   network/       Read-only connectivity analysis: service/policy inventory, DNS health, analyzer
-  persistence/   Repository interfaces + SQLite implementations (incidents, optimization, scheduling, network)
-  api/           FastAPI app (health/ready/incidents/evidence/actions/metrics/optimization/scheduling/network)
-  cli/           Typer CLI mirroring the API for one-shot cluster inspection, remediation, optimization, scheduling, and network analysis
+  security/      Read-only security/config auditing: inventory, 13 native rules, engine, service
+  persistence/   Repository interfaces + SQLite implementations (incidents, optimization, scheduling, network, security)
+  api/           FastAPI app (health/ready/incidents/evidence/actions/metrics/optimization/scheduling/network/security)
+  cli/           Typer CLI mirroring the API for one-shot cluster inspection, remediation, optimization, scheduling, network, and security analysis
   metrics/       Prometheus metric definitions
   policy/        Policy engine: OBSERVE/APPROVAL_REQUIRED/CONTROLLED_AUTO decisions
   remediation/   Remediation executor + service (propose/approve/execute/reject/dry_run)
@@ -364,10 +414,11 @@ src/kubesentinel/
 lab/             kind cluster config, namespace, failure scenario manifests, scripts,
                  optional metrics-server installer
 rbac/            Least-privilege Role/RoleBinding/ServiceAccount for what's implemented today
-                 (observer, remediator, optimizer, scheduling-advisor, network-advisor, and
-                 capacity-advisor Roles -- network-advisor's own one narrow, documented
-                 kube-system exception for CoreDNS/kube-dns health -- each independently
-                 auditable)
+                 (observer, remediator, optimizer, scheduling-advisor, network-advisor,
+                 capacity-advisor, and security-advisor Roles -- network-advisor's own one
+                 narrow, documented kube-system exception for CoreDNS/kube-dns health, and
+                 security-advisor's own cluster-scoped ClusterRole for ClusterRole/
+                 ClusterRoleBinding reads -- each independently auditable)
 observability/   Prometheus scrape config + importable Grafana dashboard
 tests/unit/      Deterministic unit tests, no cluster required
 docs/            Architecture, diagnostic rules, RBAC/threat model, failure lab, resource
@@ -377,13 +428,14 @@ docs/            Architecture, diagnostic rules, RBAC/threat model, failure lab,
 ## Documentation
 
 - [MASTER_ARCHITECTURE.md](docs/MASTER_ARCHITECTURE.md) -- the platform-wide shape every analysis engine follows, built or planned
-- [PLATFORM_ROADMAP.md](docs/PLATFORM_ROADMAP.md) -- milestone plan: scheduling advisor and network troubleshooting engine done, capacity/security/operator ahead
+- [PLATFORM_ROADMAP.md](docs/PLATFORM_ROADMAP.md) -- milestone plan: all six platform-spec capabilities (A-F) now done
 - [IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md) -- evidence-backed, capability-by-capability status audit
 - [ARCHITECTURE.md](docs/ARCHITECTURE.md) -- component design and data flow for the troubleshooting and resource-optimization engines
 - [RESOURCE_OPTIMIZATION_DESIGN.md](docs/RESOURCE_OPTIMIZATION_DESIGN.md) -- the resource optimization engine's own design, algorithms, and milestone plan
 - [SCHEDULING_ANALYSIS.md](docs/SCHEDULING_ANALYSIS.md) -- the scheduling advisor's own design: what's evaluated for real vs. only detected
 - [NETWORK_DIAGNOSTICS.md](docs/NETWORK_DIAGNOSTICS.md) -- the network troubleshooting engine's own design: evidence chain, scope split, what's deliberately deferred
 - [CAPACITY_PLANNING.md](docs/CAPACITY_PLANNING.md) -- the capacity planning & autoscaling advisor's own design: HPA status, scale headroom, what's a pattern match vs. a diagnosis
+- [SECURITY_AUDITING.md](docs/SECURITY_AUDITING.md) -- the security & configuration auditor's own design: the 13-rule catalog, the build-vs-integrate decision, what's deliberately deferred
 - [DIAGNOSTIC_RULES.md](docs/DIAGNOSTIC_RULES.md) -- every rule, its evidence, and its confidence logic
 - [FAILURE_LAB.md](docs/FAILURE_LAB.md) -- each lab scenario: how it fails, what's expected, how to clean up
 - [RBAC_AND_THREAT_MODEL.md](docs/RBAC_AND_THREAT_MODEL.md) -- least privilege, trust boundaries

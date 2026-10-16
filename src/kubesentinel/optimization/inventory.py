@@ -47,7 +47,13 @@ _UNHEALTHY_RESTART_THRESHOLD = 5
 _DIRECT_TEMPLATE_KINDS = {WorkloadKind.STATEFULSET, WorkloadKind.DAEMONSET, WorkloadKind.JOB}
 
 
-def _list_all(list_namespaced: Callable[..., Any], list_all_namespaces: Callable[..., Any], namespaces: list[str]) -> list:
+def list_all(list_namespaced: Callable[..., Any], list_all_namespaces: Callable[..., Any], namespaces: list[str]) -> list:
+    """Lists across every namespace in `namespaces`, or cluster-wide when
+    empty -- the "empty list means all watched namespaces" convention this
+    project uses everywhere. Public specifically so `security/inventory.py`
+    can reuse this exact namespace-fanout shape rather than re-deriving it
+    a second time (the same promotion precedent as `requirement_matches`/
+    `summarize_policy`)."""
     if namespaces:
         items: list = []
         for namespace in namespaces:
@@ -166,20 +172,20 @@ def build_workload_inventory(
     namespaces = namespaces or []
     excluded = set(excluded_namespaces or [])
 
-    pods = _list_all(clients.core.list_namespaced_pod, clients.core.list_pod_for_all_namespaces, namespaces)
-    replica_sets = _list_all(
+    pods = list_all(clients.core.list_namespaced_pod, clients.core.list_pod_for_all_namespaces, namespaces)
+    replica_sets = list_all(
         clients.apps.list_namespaced_replica_set, clients.apps.list_replica_set_for_all_namespaces, namespaces
     )
-    deployments = _list_all(
+    deployments = list_all(
         clients.apps.list_namespaced_deployment, clients.apps.list_deployment_for_all_namespaces, namespaces
     )
-    stateful_sets = _list_all(
+    stateful_sets = list_all(
         clients.apps.list_namespaced_stateful_set, clients.apps.list_stateful_set_for_all_namespaces, namespaces
     )
-    daemon_sets = _list_all(
+    daemon_sets = list_all(
         clients.apps.list_namespaced_daemon_set, clients.apps.list_daemon_set_for_all_namespaces, namespaces
     )
-    jobs = _list_all(clients.batch.list_namespaced_job, clients.batch.list_job_for_all_namespaces, namespaces)
+    jobs = list_all(clients.batch.list_namespaced_job, clients.batch.list_job_for_all_namespaces, namespaces)
 
     replicasets_by_uid = {rs.metadata.uid: rs for rs in replica_sets}
     controllers_by_kind_and_uid: dict[WorkloadKind, dict[str, Any]] = {

@@ -127,3 +127,21 @@ network_analysis_total = Counter(
     "producing a finding.",
     ["result"],
 )
+
+security_audit_total = Counter(
+    "kubesentinel_security_audit_total",
+    "Security & configuration auditor audit() runs, by result: success "
+    "(every rule family evaluated with no sub-read failures), partial (at "
+    "least one rule family's own inventory read failed, see the run's "
+    "warnings), or failed (the run itself raised).",
+    ["result"],
+)
+
+security_findings_total = Counter(
+    "kubesentinel_security_findings_total",
+    "Security & configuration findings produced by audit() runs, by "
+    "severity -- the one metric in this project labeled by severity "
+    "rather than category/result, since severity is this engine's own "
+    "primary triage axis.",
+    ["severity"],
+)

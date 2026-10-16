@@ -258,3 +258,38 @@ def test_cannot_patch_hpas():
 
 def test_cannot_list_hpas_outside_lab_namespace():
     assert kubectl_can_i("list", "horizontalpodautoscalers.autoscaling", namespace="kube-system") is False
+
+
+# --- Security auditor ClusterRole (rbac/security-clusterrole.yaml): read-only, cluster-scoped ---
+
+
+def test_can_list_and_get_clusterroles_and_clusterrolebindings():
+    assert kubectl_can_i("list", "clusterroles.rbac.authorization.k8s.io") is True
+    assert kubectl_can_i("list", "clusterrolebindings.rbac.authorization.k8s.io") is True
+    assert kubectl_can_i("get", "clusterroles.rbac.authorization.k8s.io") is True
+
+
+def test_cannot_patch_clusterroles_or_clusterrolebindings():
+    # Read-only ClusterRole: security/inventory.py only ever lists these,
+    # never mutates any Role/binding anywhere.
+    assert kubectl_can_i("patch", "clusterroles.rbac.authorization.k8s.io") is False
+    assert kubectl_can_i("patch", "clusterrolebindings.rbac.authorization.k8s.io") is False
+
+
+# --- Security auditor Role (rbac/security-role.yaml): read-only, lab namespace only ---
+
+
+def test_can_list_roles_rolebindings_and_pdbs_in_lab_namespace():
+    assert kubectl_can_i("list", "roles.rbac.authorization.k8s.io", namespace=LAB_NAMESPACE) is True
+    assert kubectl_can_i("list", "rolebindings.rbac.authorization.k8s.io", namespace=LAB_NAMESPACE) is True
+    assert kubectl_can_i("list", "poddisruptionbudgets.policy", namespace=LAB_NAMESPACE) is True
+
+
+def test_cannot_patch_roles_rolebindings_or_pdbs():
+    assert kubectl_can_i("patch", "roles.rbac.authorization.k8s.io", namespace=LAB_NAMESPACE) is False
+    assert kubectl_can_i("patch", "rolebindings.rbac.authorization.k8s.io", namespace=LAB_NAMESPACE) is False
+    assert kubectl_can_i("patch", "poddisruptionbudgets.policy", namespace=LAB_NAMESPACE) is False
+
+
+def test_cannot_list_roles_outside_lab_namespace():
+    assert kubectl_can_i("list", "roles.rbac.authorization.k8s.io", namespace="kube-system") is False

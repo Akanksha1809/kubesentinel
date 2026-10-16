@@ -1780,6 +1780,198 @@ all documented commands" discipline). ARCHITECTURE.md left untouched by
 design, same reasoning as Milestones 21/22 -- `docs/CAPACITY_PLANNING.md`
 is Capability E's own design doc.
 
+## Milestone 24: Security & Configuration Auditor -- DONE
+
+Per `docs/PLATFORM_ROADMAP.md`'s own sequencing (Milestone 6 of the
+platform spec -- the full A-F capability list from the original platform
+specification is now complete). Design-first, per this project's own
+established precedent: `docs/SECURITY_AUDITING.md` before any code,
+including a genuine build-vs-integrate decision (a native rule catalog,
+not kube-linter/Kubescape -- see that doc's §2) made explicitly during
+the design pass, not pre-decided or discovered mid-build.
+
+Added:
+
+- `security/inventory.py` -- `build_security_inventory()`: a one-shot
+  read of Pods grouped by owning workload (reusing
+  `optimization/ownership.py::resolve_pod_owner`, now reused by a fourth
+  capability), ClusterRoles/ClusterRoleBindings/Roles/RoleBindings,
+  NetworkPolicies, and Deployments/StatefulSets/PodDisruptionBudgets. A
+  sub-read that fails (e.g. a 403) is recorded in `SecurityInventory.warnings`
+  and that one rule family evaluates against an empty list, rather than
+  aborting the whole audit.
+- `security/rules/container.py` -- 8 rules: `PRIVILEGED_CONTAINER`,
+  `ALLOW_PRIVILEGE_ESCALATION` (explicit `true` vs. merely unset reported
+  at different severities -- an absent field is itself evidence, the same
+  discipline `analyzer.py::_data_quality_recommendation` already
+  established for missing resource requests), `RUN_AS_ROOT` (effective
+  value considering the real container-overrides-Pod-level inheritance
+  rule), `MISSING_READ_ONLY_ROOT_FS`, `HOST_NAMESPACE_SHARING`,
+  `HOST_PATH_VOLUME`, `MUTABLE_IMAGE_TAG` (reusing the exact `:latest`
+  gotcha already documented in TROUBLESHOOTING.md for an unrelated
+  reason, now also a security finding), `SECRET_AS_ENV_VAR`.
+- `security/rules/rbac.py` -- 2 rules: `CLUSTER_ADMIN_BINDING` (CRITICAL
+  cluster-wide / HIGH namespace-scoped) and `WILDCARD_RBAC_RULE` (HIGH),
+  both excluding Kubernetes' own built-in, unfixable Roles/bindings --
+  see the real correction below for why the exclusion needed a second
+  pass.
+- `security/rules/network_policy.py` -- 2 rules:
+  `NAMESPACE_WITHOUT_NETWORK_POLICY` and `UNRESTRICTED_INGRESS_POLICY`.
+  The latter reuses a newly-promoted-public
+  `network/policy_inventory.py::has_unrestricted_ingress_rule()`
+  (alongside `summarize_policy()`, `_summarize_policy` likewise promoted)
+  rather than re-reading and re-classifying NetworkPolicy objects a
+  second time, per the roadmap's own explicit instruction.
+- `security/rules/availability.py` -- 1 rule:
+  `MISSING_PDB_FOR_MULTI_REPLICA_WORKLOAD`, the roadmap's own named
+  optional item, included since `PolicyV1Api` was simple to add. Its own
+  `_pdb_selector_matches()` deliberately implements the *standard*
+  Kubernetes LabelSelector semantics (null selector matches nothing,
+  empty-but-present matches everything) -- the *opposite* null-handling
+  from `network/policy_inventory.py`'s own podSelector matching, which
+  defensively treats null as "matches all" for a documented,
+  NetworkPolicy-specific reason. Reusing that function directly would
+  have been a real, silent correctness bug for this different domain;
+  written as its own small helper instead, reusing only
+  `scheduling/constraints.py::requirement_matches` for the
+  `matchExpressions` half (safely generic across both domains).
+- `security/engine.py` -- `SecurityAuditEngine`, mirrors
+  `diagnostics/engine.py::DiagnosticEngine` exactly. Two rules
+  (`WildcardRbacRuleRule`, `NamespaceWithoutNetworkPolicyRule`,
+  `ClusterAdminBindingRule`, `MissingPdbForMultiReplicaWorkloadRule`)
+  need `Settings` for their own exclusion lists/thresholds, so
+  `SecurityAuditEngine` builds its own rules list per instance rather
+  than a static module-level singleton list the way
+  `diagnostics/engine.py::DEFAULT_RULES` does (none of *its* rules need
+  configuration) -- the same settings-threading shape
+  `OptimizationService` already uses for its own pure functions.
+- `security/service.py` -- `SecurityService`, the one module with side
+  effects. Deliberately **no incident linking** -- unlike every other
+  engine in this project, a security/config finding (an RBAC grant, a
+  missing NetworkPolicy) has no single owning Pod-level incident the way
+  a resource problem does.
+- `models/security.py`, `persistence/security_repo.py`
+  (`SQLiteSecurityRepository`, a fourth sibling behind
+  `persistence/interface.py`), `api/security_routes.py` (`POST
+  /security/audit`, `GET /security/findings[/{id}]`), and 3 new CLI
+  commands (`security-audit`, `security-findings`, `security-finding`).
+- `observer/client.py::ClusterClients` -- `rbac_authorization:
+  RbacAuthorizationV1Api` and `policy: PolicyV1Api` added (new,
+  additive); the client-surface table in MASTER_ARCHITECTURE.md is now
+  fully populated for every capability A-F.
+- `rbac/security-clusterrole.yaml` + `rbac/security-clusterrolebinding.yaml`
+  (ClusterRole/ClusterRoleBinding read access -- the **third** documented
+  cluster-scope exception in this project, after the Node ClusterRole and
+  the network engine's kube-system-bound RoleBinding) and
+  `rbac/security-role.yaml` + `rbac/security-rolebinding.yaml`
+  (Roles/RoleBindings/PodDisruptionBudgets, lab namespace only).
+- A new lab scenario, `scenario-security-findings` (a privileged
+  container, a throwaway ServiceAccount bound to `cluster-admin`, and an
+  unrestricted-ingress NetworkPolicy), chosen to exercise all three rule
+  families with minimal, individually-verifiable manifests -- the
+  existing `remediation-test`/lab-namespace state was reused as-is for
+  the PDB-coverage and namespace-without-policy findings rather than
+  building redundant new fixtures for those two.
+
+**Two real findings caught live during this milestone's own
+verification, by this project's own Milestone 20-23 audit standard, not
+caught by unit tests alone**:
+
+1. The RBAC built-in-subject exclusion first assumed only the well-known
+   `system:masters` Group needed excluding. Live-checking this project's
+   own lab cluster's real `ClusterRoleBindings` (`kubectl get
+   clusterrolebindings`) showed a *second* genuine built-in binding --
+   `kubeadm:cluster-admins`, the Group kubeadm itself uses for
+   `admin.conf` -- being mis-flagged as a real finding. Fixed by
+   excluding Group subjects by *prefix* (`system:`, `kubeadm:`,
+   configurable via the new `security_builtin_subject_group_prefixes`
+   setting) rather than one hardcoded exact name; a new unit test
+   (`test_does_not_fire_for_builtin_kubeadm_cluster_admins_binding`) and
+   a new live test (`test_builtin_rbac_bootstrap_bindings_are_never_flagged`)
+   both pin this against a real value, not a mock.
+2. `SecurityService.audit()` re-evaluates the entire cluster on every
+   call, but the first persistence design -- an upsert-by-`finding_id`,
+   copied directly from `NetworkFinding`/`SchedulingFinding`'s own
+   per-*Pod* shape -- silently accumulated every past run's findings
+   forever. Caught live, not in unit tests: applying the fix for gap #1
+   above and re-running `kubesentinel security-audit` still showed the
+   *stale*, now-incorrect `kubeadm:cluster-admins` finding from the
+   previous run sitting in `kubesentinel security-findings` alongside the
+   corrected result -- three `CLUSTER_ADMIN_BINDING` findings where only
+   two should exist. Root cause: a full-cluster re-scan every call is a
+   fundamentally different persistence shape from "one finding per Pod,"
+   and the design had silently borrowed the wrong precedent. Fixed by
+   replacing the per-finding upsert (`save_finding`) with a whole-run
+   replace (`save_findings`, delete-then-insert), the same semantics
+   `optimization_repo.py::save_workload_snapshots` already uses for its
+   own full-cluster-rescan shape. New regression tests at both layers:
+   `test_save_findings_replaces_the_entire_previous_set` (repo) and
+   `test_second_audit_does_not_accumulate_stale_findings` (service and,
+   live, `test_security_live.py`).
+
+**A third, smaller gap found and fixed in the same pass, in shared lab
+infrastructure rather than this milestone's own code**: building this
+milestone's lab scenario (a NetworkPolicy, a ServiceAccount, a
+ClusterRoleBinding) surfaced that `lab/scripts/cleanup.sh` only ever
+deleted `deployment,pod,pvc,service` -- never `networkpolicy`/
+`serviceaccount` (needed by this milestone) nor
+`horizontalpodautoscaler` (needed since Milestone 23, three milestones
+ago, and silently never cleaned up by any `cleanup.sh` run since).
+ClusterRoleBinding/ClusterRole have no namespace at all, so a `-n
+kubesentinel-lab`-scoped delete could never reach them regardless of the
+resource list -- fixed with a second, explicit cluster-scoped delete
+call. Confirmed live via `kubectl ... --dry-run=client` against the real
+cluster showing every scenario-labeled resource across every milestone
+(including the Milestone 23 HPA) now correctly targeted, not assumed from
+reading the script alone.
+
+**Live-verified against the real cluster**: the `scenario-security-findings`
+scenario correctly produced `PRIVILEGED_CONTAINER`, `CLUSTER_ADMIN_BINDING`,
+and `UNRESTRICTED_INGRESS_POLICY` findings with their real evidence named
+explicitly, while the cluster's own two real built-in RBAC bootstrap
+bindings were correctly never flagged. The pre-existing `remediation-test`
+Deployment (2 replicas, no PDB) and the lab namespace's prior total
+absence of any NetworkPolicy both triggered their own coverage findings
+from existing state, with no new manifest needed for either. Confirmed
+via `kubesentinel security-audit`/`security-findings --severity
+CRITICAL`/`security-finding <id>`, a real HTTP server's `POST
+/security/audit` and `GET /security/findings?severity=CRITICAL` (422 on
+an invalid severity confirmed too), and that a second `audit()` call
+leaves the repository showing only the current run's findings. The two
+new RBAC grants verified against the real `kubesentinel` ServiceAccount,
+not just admin: cluster-scoped `ClusterRole` checks (no namespace) and
+namespaced `Role` checks both confirmed via `kubectl auth can-i
+--as=...`, with the `horizontalpodautoscalers.autoscaling`-style
+non-aggregated-API reliability already established in Milestone 23
+extended here with zero new workarounds needed for
+`rbac.authorization.k8s.io`/`policy` either.
+
+**Tests**: 104 new unit tests across 8 files (`test_security_container_rules.py`:
+31, `test_security_rbac_rules.py`: 14, `test_security_network_policy_rules.py`:
+7, `test_security_availability_rule.py`: 11, `test_security_engine.py`: 7,
+`test_security_inventory.py`: 6, `test_security_repo.py`: 11,
+`test_security_service.py`: 9, `test_security_api.py`: 8 -- totals 104)
+plus 6 new live integration tests (`test_security_live.py`) plus 5 new
+RBAC boundary tests. `./scripts/test.sh`: ruff clean, mypy clean (97
+source files), **715 unit tests passed** (611 + 104). `./scripts/test.sh
+--all`: collected **783 tests** (715 unit + 68 integration/e2e). A full
+`--all` run hit the same shared-VM-contention pattern documented
+repeatedly throughout this project's history (29 failed/4 errored, every
+one of them a pre-existing contention-class test unrelated to this
+milestone's own new tests -- zero of the 110 new security-specific tests
+failed); every affected test passed cleanly (59 passed) when re-run
+together in isolation immediately afterward. This is at least the ninth
+confirmation of this exact environmental pattern across this project's
+history, using the identical "isolate and re-run" method each time.
+
+**Documentation**: README.md, PLATFORM_ROADMAP.md, IMPLEMENTATION_STATUS.md,
+MASTER_ARCHITECTURE.md (the client-surface table and the "proven N times"
+count are both now complete across every platform-spec capability),
+TESTING.md, RBAC_AND_THREAT_MODEL.md, FAILURE_LAB.md, and DEMO_SCRIPT.md.
+ARCHITECTURE.md left untouched by design, same reasoning as every prior
+milestone here -- `docs/SECURITY_AUDITING.md` is Capability F's own
+design doc.
+
 ## Known limitations (found during Milestone 1's own live verification, not theoretical)
 
 1. **Pod-UID dedup doesn't survive a Deployment rollout.** A Deployment template

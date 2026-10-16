@@ -210,6 +210,54 @@ advisor's own `horizontalpodautoscalers.autoscaling` checks needed no
 such workaround -- confirmed live that plain `can-i` answers correctly
 for this ordinary, non-aggregated API group.
 
+```yaml
+# rbac/security-clusterrole.yaml (current, in full) -- a new ClusterRole,
+# for the security & configuration auditor's RBAC checks (Milestone 6 of
+# the platform spec). THE THIRD documented cluster-scope exception in
+# this project, after the Node ClusterRole (Capability A) and the network
+# engine's kube-system-bound RoleBinding (Capability D) -- ClusterRole/
+# ClusterRoleBinding are themselves cluster-scoped resources, so no
+# namespaced Role can grant read access to them, no matter how narrow.
+rules:
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["clusterroles", "clusterrolebindings"]
+    verbs: ["get", "list"]
+```
+
+```yaml
+# rbac/security-role.yaml (current, in full) -- the namespaced half:
+# Roles/RoleBindings genuinely are namespace-scoped, so this grant
+# belongs in a namespaced Role; PodDisruptionBudgets too, lab namespace
+# only. Pods/Deployments/StatefulSets (container-security + PDB-coverage
+# checks) are already granted by role.yaml/optimization-role.yaml;
+# NetworkPolicy read access is already granted by network-role.yaml --
+# all reused, none re-granted.
+rules:
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings"]
+    verbs: ["get", "list"]
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["get", "list"]
+```
+
+This entire boundary -- all seven Roles/ClusterRoles plus the kube-system
+exception, both directions -- is now covered by
+`tests/integration/test_rbac_boundary.py`: 38 automated checks. The
+security auditor's own RBAC rules needed a real, found-live correction
+of their own, worth recording here rather than only in TODO.md: the
+built-in-subject exclusion (`CLUSTER_ADMIN_BINDING`) first assumed only
+the well-known `system:masters` Group needed excluding, but this
+project's own real kind cluster has a *second* built-in cluster-admin
+Group binding -- `kubeadm:cluster-admins`, bound to the Group kubeadm
+itself uses for `admin.conf` -- confirmed by reading this cluster's own
+real `ClusterRoleBindings` (`kubectl get clusterrolebindings`) rather
+than trusting the one better-known identity. Fixed by excluding Group
+subjects by *prefix* (`system:`, `kubeadm:`) rather than one hardcoded
+exact name; `test_builtin_rbac_bootstrap_bindings_are_never_flagged` in
+`tests/integration/test_security_live.py` pins both exclusions against
+this project's own real cluster.
+
 ## What will be added, and when
 
 - **ConfigMaps/Secrets** (if `MISSING_CONFIG_REFERENCE` ever needs to confirm a

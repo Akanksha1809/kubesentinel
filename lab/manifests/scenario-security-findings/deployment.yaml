@@ -1,0 +1,50 @@
+# Scenario: container security context findings (Milestone 6 -- security
+# & configuration auditor)
+#
+# How the finding is created: this container runs privileged, with no
+# other security-context hardening set at all -- deliberately minimal,
+# not deliberately exhaustive, so each finding below comes from an
+# absence/an explicit flag a reader can verify by eye against this file,
+# not from a contrived combination.
+#
+# Expected KubeSentinel diagnosis (via `kubesentinel security-audit`):
+#   - PRIVILEGED_CONTAINER (CRITICAL): securityContext.privileged=true.
+#   - ALLOW_PRIVILEGE_ESCALATION (LOW): not explicitly set to false.
+#   - RUN_AS_ROOT (MEDIUM): runAsNonRoot not set at either level.
+#   - MISSING_READ_ONLY_ROOT_FS (LOW): readOnlyRootFilesystem not set.
+#   - MUTABLE_IMAGE_TAG (LOW): "busybox:latest".
+#
+# Automatic remediation: not applicable -- only a human can decide the
+# right securityContext for this workload.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: security-findings-demo
+  namespace: kubesentinel-lab
+  labels:
+    app: security-findings-demo
+    kubesentinel.io/scenario: security-findings
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: security-findings-demo
+  template:
+    metadata:
+      labels:
+        app: security-findings-demo
+    spec:
+      containers:
+        - name: app
+          image: busybox:latest
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c", "sleep infinity"]
+          securityContext:
+            privileged: true
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 50m
+              memory: 32Mi

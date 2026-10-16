@@ -324,10 +324,76 @@ catch.
 
 ## Capability F: Kubernetes Security & Configuration Auditor
 
-**Missing.** No `security/` module, no `RbacAuthorizationV1Api`/`PolicyV1Api`
-client on `ClusterClients`, no rule catalog, no integration with an
-external scanner (kube-linter/Kubescape -- neither is installed or
-referenced anywhere in this repo today, confirmed by grep).
+**Implemented** (Milestone 6 of `docs/PLATFORM_ROADMAP.md`;
+`docs/SECURITY_AUDITING.md` is the design). A new `security/` package:
+`inventory.py` (one-shot read, Pods grouped by owning workload via the
+reused `optimization/ownership.py::resolve_pod_owner`, RBAC objects,
+NetworkPolicies, Deployments/StatefulSets/PodDisruptionBudgets), 13 rules
+across `rules/{container,rbac,network_policy,availability}.py`,
+`engine.py` (mirrors `diagnostics/engine.py::DiagnosticEngine` exactly),
+`service.py` (the one module with side effects). `RbacAuthorizationV1Api`
+and `PolicyV1Api` added to `ClusterClients` (new, additive).
+
+| Spec item | Status | Evidence |
+|---|---|---|
+| Container privilege/security-context settings | Implemented | 8 rules: `PRIVILEGED_CONTAINER` (CRITICAL), `ALLOW_PRIVILEGE_ESCALATION` (HIGH if true, LOW if merely unset -- absence is itself evidence, same discipline `_data_quality_recommendation` already established), `RUN_AS_ROOT` (effective value considering Pod-level fallback), `MISSING_READ_ONLY_ROOT_FS`, `HOST_NAMESPACE_SHARING`, `HOST_PATH_VOLUME`, `MUTABLE_IMAGE_TAG` (reusing the exact gotcha already documented in TROUBLESHOOTING.md for an unrelated reason), `SECRET_AS_ENV_VAR` |
+| RBAC over-permissiveness | Implemented | `CLUSTER_ADMIN_BINDING` (CRITICAL cluster-wide / HIGH namespace-scoped) and `WILDCARD_RBAC_RULE` (HIGH) -- both excluding Kubernetes' own built-in, unfixable Roles/bindings by name-prefix/exact-name, confirmed live to need *two* built-in Group prefixes (`system:`, `kubeadm:`), not the one originally assumed |
+| Missing/overly-broad NetworkPolicies | Implemented, reused not re-read | `NAMESPACE_WITHOUT_NETWORK_POLICY` and `UNRESTRICTED_INGRESS_POLICY`, the latter reusing `network/policy_inventory.py::has_unrestricted_ingress_rule`/`summarize_policy` (both promoted to public for this reuse) rather than re-reading and re-classifying NetworkPolicy objects a second time, per the roadmap's own explicit instruction |
+| PodDisruptionBudget coverage | Implemented | `MISSING_PDB_FOR_MULTI_REPLICA_WORKLOAD`, the roadmap's own named optional item, included since `PolicyV1Api` was simple to add. Uses standard Kubernetes LabelSelector semantics (null selector matches nothing, empty-but-present matches everything) -- deliberately a *separate*, correctly-scoped helper from `network/policy_inventory.py`'s own podSelector matching, which uses the opposite null-handling for a documented, NetworkPolicy-specific reason |
+| Finding shape: ID, rule ID, severity, evidence, explanation, remediation | Implemented | `SecurityFinding`, individually persisted and addressable (`get_finding`/`list_findings`), the same first-class-entity shape `SchedulingFinding`/`NetworkFinding` already established |
+| Applicable/inconclusive distinction | Implemented at the run level | `SecurityAuditResult.warnings`: a rule family whose own inventory read failed (e.g. 403 listing ClusterRoleBindings) is named there, distinct from "evaluated and found nothing" |
+| Build vs. integrate an external scanner | Decided: build natively | no kube-linter/Kubescape integration -- consistent with every other capability being a native, in-repo rule engine with zero external-scanner subprocess dependency; see docs/SECURITY_AUDITING.md Section 2 |
+| CVE/image vulnerability scanning | **Not built**, named as a real gap | no maintained vulnerability database this project has access to; the one item where an external tool (Trivy/Grype) would genuinely add capability this native catalog cannot responsibly claim |
+| Pod Security Admission namespace labels | **Not built**, deliberately | redundant with the already-built, more granular container-level checks -- a candidate for a later pass, not forgotten |
+
+**Two real findings caught live during this milestone's own
+verification, by this project's own Milestone 20-23 audit standard**:
+
+1. The RBAC rule's built-in-subject exclusion first assumed only
+   `system:masters` needed excluding. Live-checking this project's own
+   lab cluster's real `ClusterRoleBindings` (`kubectl get
+   clusterrolebindings`) showed a *second* genuine built-in binding --
+   `kubeadm:cluster-admins`, bound to the Group kubeadm itself uses for
+   `admin.conf` -- being mis-flagged as a real finding. Fixed by
+   excluding Group subjects by *prefix* (`system:`, `kubeadm:`,
+   configurable via `security_builtin_subject_group_prefixes`) rather
+   than one hardcoded exact name.
+2. `SecurityService.audit()` re-evaluates the entire cluster on every
+   call, but the first persistence design (an upsert-by-`finding_id`,
+   copied from `NetworkFinding`/`SchedulingFinding`'s own per-Pod shape)
+   silently accumulated every past run's findings forever -- caught live
+   when the fix for gap #1 was applied and the *stale*, now-incorrect
+   `kubeadm:cluster-admins` finding from the previous run was still
+   showing up in `kubesentinel security-findings` alongside the corrected
+   result. Fixed by replacing the per-finding upsert with a whole-run
+   replace (`SecurityRepository.save_findings`), the same semantics
+   `optimization_repo.py::save_workload_snapshots` already uses for its
+   own full-cluster-rescan shape -- a real, found-live mismatch between
+   "one finding per Pod" and "a full cluster re-scan every call," not an
+   oversight that would have been caught by unit tests alone (the unit
+   tests were written against the already-correct `save_findings`
+   contract; this gap was only visible by actually running two live
+   audits in sequence).
+
+**Live-verified against the real cluster**: a new
+`scenario-security-findings` lab scenario (a privileged container, an
+over-permissive `ClusterRoleBinding` on a throwaway ServiceAccount, and a
+NetworkPolicy with an unrestricted ingress rule) correctly produced
+`PRIVILEGED_CONTAINER`, `CLUSTER_ADMIN_BINDING`, and
+`UNRESTRICTED_INGRESS_POLICY` findings live, while the cluster's own two
+real built-in RBAC bootstrap bindings (`system:masters`,
+`kubeadm:cluster-admins`) were correctly never flagged. The existing
+`remediation-test` Deployment (2 replicas, no PodDisruptionBudget) and
+the lab namespace's own pre-existing lack of any NetworkPolicy both
+triggered their respective coverage findings without any new manifest
+needed. Confirmed via `kubesentinel security-audit`/`security-findings
+--severity CRITICAL`/`security-finding <id>`, a real HTTP server's `POST
+/security/audit` and `GET /security/findings?severity=CRITICAL` (422 on
+an invalid severity confirmed too), and that a second `audit()` call
+leaves the repository showing only the current run's findings, not the
+first run's stale ones. A live integration test
+(`tests/integration/test_security_live.py`) patches the HTTP transport
+itself and confirms a full `audit()` pass issues only `GET`.
 
 ## Shared policy, approval, and remediation layer
 

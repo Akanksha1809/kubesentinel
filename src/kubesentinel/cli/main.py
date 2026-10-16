@@ -44,6 +44,7 @@ from kubesentinel.network.service import (
 from kubesentinel.persistence.network_repo import SQLiteNetworkRepository
 from kubesentinel.persistence.optimization_repo import SQLiteOptimizationRepository
 from kubesentinel.persistence.scheduling_repo import SQLiteSchedulingRepository
+from kubesentinel.persistence.security_repo import SQLiteSecurityRepository
 from kubesentinel.persistence.sqlite_repo import SQLiteIncidentRepository
 from kubesentinel.policy.engine import PolicyEngine
 from kubesentinel.remediation.executor import RemediationExecutor
@@ -53,6 +54,7 @@ from kubesentinel.remediation.service import (
     RemediationService,
 )
 from kubesentinel.scheduling.service import FindingNotFoundError, PodNotFoundError, SchedulingService
+from kubesentinel.security.service import FindingNotFoundError as SecurityFindingNotFoundError, SecurityService
 from kubesentinel.verification.verifier import RecoveryVerifier
 
 app = typer.Typer(help="KubeSentinel: Kubernetes troubleshooting and controlled self-healing.")
@@ -733,6 +735,102 @@ def show_network_finding(
             console.print(f"    port {pr.service_port} -> {pr.target_port} [{mark}]: {pr.reasoning}")
     for policy in finding.applicable_network_policies:
         console.print(f"  NetworkPolicy '{policy.policy_name}' (applies={policy.applies_to_target}): {policy.summary}")
+
+
+def _build_security_service(settings: Settings) -> tuple[SecurityService, SQLiteSecurityRepository]:
+    clients = build_clients(settings)
+    repo = SQLiteSecurityRepository(settings.db_path)
+    return SecurityService(clients, repo, settings), repo
+
+
+@app.command("security-audit")
+def security_audit(
+    namespace: list[str] = typer.Option([], "--namespace", help="Namespace to audit (repeatable; default: all)"),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """Run a security & configuration audit against the live cluster:
+    container security context, RBAC over-permissiveness, NetworkPolicy
+    coverage, PodDisruptionBudget coverage. Read-only: inspects
+    Pods/RBAC objects/NetworkPolicies/PodDisruptionBudgets and persists
+    findings locally -- never modifies anything in the cluster. See
+    docs/SECURITY_AUDITING.md for exactly what is and isn't evaluated."""
+    settings = get_settings()
+    configure_logging(settings.log_level)
+    service, _repo = _build_security_service(settings)
+
+    result = service.audit(namespaces=namespace)
+
+    if json_output:
+        print(json_module.dumps(result.model_dump(mode="json"), indent=2))
+        return
+    console.print(f"Audited {len(result.namespaces) or 'all'} namespace(s), {len(result.findings)} finding(s).")
+    if result.warnings:
+        for warning in result.warnings:
+            console.print(f"[yellow]{warning}[/yellow]")
+    by_severity: dict[str, int] = {}
+    for finding in result.findings:
+        by_severity[finding.severity.value] = by_severity.get(finding.severity.value, 0) + 1
+    for severity in ("CRITICAL", "HIGH", "MEDIUM", "LOW"):
+        if severity in by_severity:
+            console.print(f"  {severity}: {by_severity[severity]}")
+
+
+@app.command("security-findings")
+def list_security_findings(
+    namespace: str = typer.Option(None, help="Filter by namespace"),
+    severity: str = typer.Option(None, help="Filter by severity: CRITICAL, HIGH, MEDIUM, LOW"),
+    rule_id: str = typer.Option(None, help="Filter by rule ID, e.g. PRIVILEGED_CONTAINER"),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """List persisted security findings from the last audit."""
+    settings = get_settings()
+    service, _repo = _build_security_service(settings)
+    findings = service.list_findings(namespace=namespace, severity=severity, rule_id=rule_id)
+
+    if json_output:
+        print(json_module.dumps([f.model_dump(mode="json") for f in findings], indent=2))
+        return
+
+    table = Table(title="Security Findings")
+    for col in ("ID", "Namespace", "Resource", "Rule", "Severity"):
+        table.add_column(col)
+    for f in findings:
+        table.add_row(
+            f.finding_id[:8],
+            f.resource.namespace or "(cluster-scoped)",
+            f"{f.resource.kind}/{f.resource.name}",
+            f.rule_id,
+            f.severity.value,
+        )
+    console.print(table)
+
+
+@app.command("security-finding")
+def show_security_finding(
+    finding_id: str = typer.Argument(..., help="Finding to show"),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """Show one security finding in full, including its evidence and remediation."""
+    settings = get_settings()
+    service, _repo = _build_security_service(settings)
+    try:
+        finding = service.get_finding(finding_id)
+    except SecurityFindingNotFoundError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from exc
+
+    if json_output:
+        print(json_module.dumps(finding.model_dump(mode="json"), indent=2))
+        return
+
+    console.print(f"[bold]{finding.rule_id}[/bold] ({finding.severity.value}) -- {finding.resource.kind}/{finding.resource.name}")
+    if finding.resource.namespace:
+        console.print(f"  Namespace: {finding.resource.namespace}")
+    console.print(f"  {finding.explanation}")
+    console.print("  Evidence:")
+    for item in finding.evidence:
+        console.print(f"    - {item}")
+    console.print(f"  Remediation: {finding.remediation}")
 
 
 def _state_label(cs) -> str:

@@ -1,0 +1,30 @@
+# Scenario: unrestricted-ingress NetworkPolicy finding
+#
+# How the finding is created: this policy exists (so the namespace is not
+# flagged by NAMESPACE_WITHOUT_NETWORK_POLICY for having zero policies at
+# all) but its one ingress rule has no `from`/`ports` restriction -- an
+# effective allow-all despite the policy object existing.
+#
+# Expected KubeSentinel diagnosis: UNRESTRICTED_INGRESS_POLICY (MEDIUM),
+# reusing network/policy_inventory.py's own classification. Same
+# kindnet-non-enforcement caveat as every other NetworkPolicy-related
+# finding in this project -- static analysis of the object, never a claim
+# about actually-observed traffic.
+#
+# Automatic remediation: not applicable -- only a human can decide the
+# right scope for this rule.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: unrestricted-ingress-demo
+  namespace: kubesentinel-lab
+  labels:
+    kubesentinel.io/scenario: security-findings
+spec:
+  podSelector:
+    matchLabels:
+      app: security-findings-demo
+  policyTypes:
+    - Ingress
+  ingress:
+    - {}

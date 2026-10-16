@@ -32,7 +32,22 @@ def _pod_selector_matches(selector, pod: V1Pod) -> bool:
     return all(requirement_matches(req, labels) for req in match_expressions)
 
 
-def _summarize_policy(policy: V1NetworkPolicy) -> str:
+def has_unrestricted_ingress_rule(policy: V1NetworkPolicy) -> bool:
+    """True when this policy has an Ingress rule with no `from`/`ports`
+    restriction at all -- an effective allow-all despite the policy
+    object existing. Public specifically so the security auditor's own
+    `UNRESTRICTED_INGRESS_POLICY` check (docs/SECURITY_AUDITING.md
+    Section 3.3) can reuse this exact classification rather than
+    re-reading and re-interpreting NetworkPolicy objects a second time,
+    per the platform spec's own instruction."""
+    spec = policy.spec
+    policy_types = spec.policy_types or ["Ingress"]
+    if "Ingress" not in policy_types:
+        return False
+    return any(not (rule._from or rule.ports) for rule in (spec.ingress or []))
+
+
+def summarize_policy(policy: V1NetworkPolicy) -> str:
     spec = policy.spec
     policy_types = spec.policy_types or ["Ingress"]  # k8s default when unset
     parts = [f"policyTypes={policy_types}"]
@@ -64,7 +79,7 @@ def build_applicable_policies(clients: ClusterClients, namespace: str, target_po
                 policy_name=policy.metadata.name,
                 applies_to_target=applies,
                 policy_types=list(policy.spec.policy_types or ["Ingress"]),
-                summary=_summarize_policy(policy),
+                summary=summarize_policy(policy),
             )
         )
     return results

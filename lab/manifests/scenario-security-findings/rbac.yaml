@@ -1,0 +1,38 @@
+# Scenario: over-permissive RBAC binding finding
+#
+# How the finding is created: a throwaway, unused ServiceAccount bound to
+# the built-in `cluster-admin` ClusterRole via a ClusterRoleBinding --
+# deliberately a *separate* ServiceAccount from `kubesentinel` itself
+# (never touching this project's own real ServiceAccount or the cluster's
+# own bootstrap `system:masters` binding).
+#
+# Expected KubeSentinel diagnosis: CLUSTER_ADMIN_BINDING (CRITICAL) for
+# the `security-findings-demo-sa` ServiceAccount subject -- the real
+# built-in binding (subject Group `system:masters`) is explicitly
+# excluded by this rule and must NOT also be flagged; see
+# docs/SECURITY_AUDITING.md Section 3.2.
+#
+# Automatic remediation: not applicable -- only a human can decide the
+# narrowest Role this subject actually needs.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: security-findings-demo-sa
+  namespace: kubesentinel-lab
+  labels:
+    kubesentinel.io/scenario: security-findings
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: security-findings-demo-cluster-admin
+  labels:
+    kubesentinel.io/scenario: security-findings
+subjects:
+  - kind: ServiceAccount
+    name: security-findings-demo-sa
+    namespace: kubesentinel-lab
+roleRef:
+  kind: ClusterRole
+  name: cluster-admin
+  apiGroup: rbac.authorization.k8s.io

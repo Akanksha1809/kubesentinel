@@ -180,6 +180,40 @@ class Settings(BaseSettings):
     # is just "hit its limit," not evidence of a single-threaded ceiling.
     capacity_min_limit_ratio_for_bottleneck_check: float = 1.5
 
+    # Security & configuration auditor (read-only; see
+    # docs/SECURITY_AUDITING.md). Namespace exclusion reuses
+    # optimization_excluded_namespace_list directly -- never a second,
+    # possibly-diverging exclusion list for the same system namespaces.
+    #
+    # Kubernetes' own built-in, intentionally-broad ClusterRoles -- never
+    # flagged by WILDCARD_RBAC_RULE (there is no fix a cluster operator
+    # can apply to a built-in Role). Anything with a "system:" prefix is
+    # excluded structurally (not configurable), since that's a stable
+    # Kubernetes naming convention, not a threshold to tune.
+    security_builtin_wildcard_role_names: str = "cluster-admin,admin,edit,view"
+    # CLUSTER_ADMIN_BINDING: a Group subject whose name starts with one of
+    # these prefixes is one of Kubernetes' own bootstrap identities, never
+    # flagged -- confirmed live against this project's own kind cluster to
+    # need *two* prefixes, not one: `system:masters` (the universal
+    # Kubernetes bootstrap Group) and `kubeadm:cluster-admins` (kubeadm's
+    # own, used by admin.conf). A ServiceAccount or User subject is never
+    # exempted by this list, no matter its name -- only a cluster's own
+    # built-in Group identities are.
+    security_builtin_subject_group_prefixes: str = "system:,kubeadm:"
+    # MISSING_PDB_FOR_MULTI_REPLICA_WORKLOAD only applies once a workload
+    # has at least this many desired replicas -- a single-replica workload
+    # has no "voluntary disruption while staying available" concern a PDB
+    # would address.
+    security_min_replicas_for_pdb_check: int = 2
+
+    @property
+    def security_builtin_subject_group_prefix_list(self) -> list[str]:
+        return [p.strip() for p in self.security_builtin_subject_group_prefixes.split(",") if p.strip()]
+
+    @property
+    def security_builtin_wildcard_role_name_list(self) -> list[str]:
+        return [n.strip() for n in self.security_builtin_wildcard_role_names.split(",") if n.strip()]
+
     @property
     def watch_namespace_list(self) -> list[str]:
         return [n.strip() for n in self.watch_namespaces.split(",") if n.strip()]

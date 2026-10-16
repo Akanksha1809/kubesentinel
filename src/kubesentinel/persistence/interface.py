@@ -15,6 +15,7 @@ from kubesentinel.models.incident import Incident
 from kubesentinel.models.network import NetworkFinding
 from kubesentinel.models.optimization import AnalysisRunSummary, ResourceRecommendation, WorkloadSnapshot
 from kubesentinel.models.scheduling import SchedulingFinding
+from kubesentinel.models.security import SecurityFinding
 
 
 class IncidentRepository(ABC):
@@ -143,3 +144,35 @@ class NetworkRepository(ABC):
     def list_findings(
         self, *, namespace: str | None = None, classification: str | None = None
     ) -> builtins.list[NetworkFinding]: ...
+
+
+class SecurityRepository(ABC):
+    """Persistence for the security & configuration auditor.
+
+    Unlike `NetworkRepository`/`SchedulingRepository` (one `analyze_pod()`
+    call, one finding, so an upsert-by-`finding_id` makes sense),
+    `SecurityService.audit()` re-evaluates the *entire* cluster on every
+    call -- every finding gets a fresh `finding_id` each run (there is no
+    stable identity to upsert against: a rule firing again on the same
+    object is not "the same finding," it's "still true"). `save_findings`
+    is therefore whole-run replace-not-append, the same semantics
+    `optimization_repo.py::save_workload_snapshots` already uses for its
+    own full-cluster-rescan shape -- found live, not assumed: an earlier
+    per-finding upsert design left two full audit runs' worth of findings
+    (several stale) sitting in the table together before this was caught
+    and fixed.
+    """
+
+    @abstractmethod
+    def get_finding(self, finding_id: str) -> SecurityFinding | None: ...
+
+    @abstractmethod
+    def save_findings(self, findings: builtins.list[SecurityFinding]) -> None:
+        """Replaces every previously-persisted finding with this run's
+        own set -- never an incremental upsert."""
+        ...
+
+    @abstractmethod
+    def list_findings(
+        self, *, namespace: str | None = None, severity: str | None = None, rule_id: str | None = None
+    ) -> builtins.list[SecurityFinding]: ...

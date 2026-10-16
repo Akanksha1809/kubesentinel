@@ -1,0 +1,25 @@
+# Read-only Role for the security & configuration auditor's namespaced
+# RBAC and PodDisruptionBudget checks (docs/SECURITY_AUDITING.md,
+# Milestone 6 of the platform spec). The cluster-scoped half
+# (ClusterRole/ClusterRoleBinding) is granted separately by
+# rbac/security-clusterrole.yaml -- Roles/RoleBindings genuinely are
+# namespace-scoped, so this one grant belongs in a namespaced Role, the
+# same split `role.yaml`/`clusterrole.yaml` already established for
+# Pods vs. Nodes.
+#
+# Pods/Deployments/StatefulSets (container-security + PDB-coverage
+# checks) are already granted by rbac/role.yaml/rbac/optimization-role.yaml;
+# NetworkPolicy read access is already granted by rbac/network-role.yaml --
+# all reused, none re-granted.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kubesentinel-security-auditor
+  namespace: kubesentinel-lab
+rules:
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings"]
+    verbs: ["get", "list"]
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["get", "list"]

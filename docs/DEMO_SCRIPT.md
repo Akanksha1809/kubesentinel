@@ -327,6 +327,39 @@ curl -s "http://127.0.0.1:8000/optimization/workloads?namespace=kubesentinel-lab
 The second command shows the live `HpaSnapshot` -- exposed automatically
 on the existing `/optimization/workloads` route, no new endpoint needed.
 
+**8f. Show the security & configuration auditor flag a real
+over-permissive grant and a real privileged container.**
+
+```bash
+./lab/scripts/run-scenario.sh security-findings
+.venv/bin/kubesentinel security-audit --namespace kubesentinel-lab
+.venv/bin/kubesentinel security-findings --severity CRITICAL
+```
+
+Pick one of the two CRITICAL rows and show it in full:
+
+```bash
+.venv/bin/kubesentinel security-finding <finding-id>
+```
+
+Point out `PRIVILEGED_CONTAINER`: a real `securityContext.privileged:
+true` on a real Pod, with the exact evidence and remediation text named.
+Then point out `CLUSTER_ADMIN_BINDING`: a real `ClusterRoleBinding`
+granting `cluster-admin` to a throwaway ServiceAccount -- and that the
+cluster's own *real* built-in bootstrap bindings (`system:masters`,
+`kubeadm:cluster-admins`) are never flagged, confirmed live, not assumed
+(this is exactly the kind of "known built-in, never actionable" exclusion
+the scheduling/network engines also apply to their own domains). Worth
+noting out loud: the rule catalog here is entirely native -- no
+kube-linter/Kubescape dependency -- a deliberate build-vs-integrate
+decision, not an oversight; see SECURITY_AUDITING.md Section 2.
+
+```bash
+curl -s -X POST http://127.0.0.1:8000/security/audit -H "Content-Type: application/json" \
+  -d '{"namespaces":["kubesentinel-lab"]}' | python3 -c "import json,sys; print(len(json.load(sys.stdin)['findings']), 'findings')"
+curl -s "http://127.0.0.1:8000/security/findings?severity=CRITICAL" | python3 -m json.tool
+```
+
 **9. Be upfront about what this isn't, yet.**
 
 Nothing in the live diagnosis pipeline *automatically* calls `propose()` --
@@ -341,8 +374,13 @@ see NETWORK_DIAGNOSTICS.md Section 2. The capacity planning advisor has no
 visibility into external dependencies/latency at all (no tracing/APM data
 exists in this project) -- every finding says so explicitly rather than
 guessing at the cause of a bottleneck it can't actually see; see
-CAPACITY_PLANNING.md Section 2. There's no AI layer yet (Milestone 11,
-optional). The resource optimization engine never applies a
+CAPACITY_PLANNING.md Section 2. The security auditor doesn't do CVE/image
+vulnerability scanning (no maintained vulnerability database this
+project has access to) and doesn't resolve a subject's *effective*
+permissions across every Role it's bound to combined -- it checks direct
+bindings and rules only; see SECURITY_AUDITING.md Section 3/12. There's
+no AI layer yet (Milestone 11, optional). The resource optimization
+engine never applies a
 recommendation itself -- every number it produces still needs a human (or a
 future, explicitly-built policy-engine path) to act on it; see
 RESOURCE_OPTIMIZATION_DESIGN.md's known limitations for what's deliberately

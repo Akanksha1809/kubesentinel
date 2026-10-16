@@ -1,0 +1,25 @@
+# Read-only ClusterRole for the security & configuration auditor's RBAC
+# checks (docs/SECURITY_AUDITING.md, Milestone 6 of the platform spec).
+#
+# ClusterRole/ClusterRoleBinding are themselves cluster-scoped resources --
+# no namespaced Role can grant read access to them, no matter how narrow.
+# This is the THIRD documented cluster-scope exception in this project,
+# after the Node ClusterRole (Capability A, rbac/clusterrole.yaml) and the
+# network engine's kube-system-bound RoleBinding (Capability D,
+# rbac/network-dns-rolebinding.yaml).
+#
+# "get"/"list" only, never "watch" -- this engine takes a one-shot
+# inventory snapshot per audit() call, the same as every other
+# optimization/scheduling/network/capacity engine before it.
+#
+# Deliberately excludes: any write verb. No code anywhere in
+# `security/` creates, patches, or deletes a Role/ClusterRole/binding --
+# see docs/SECURITY_AUDITING.md Section 7.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kubesentinel-security-auditor
+rules:
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["clusterroles", "clusterrolebindings"]
+    verbs: ["get", "list"]

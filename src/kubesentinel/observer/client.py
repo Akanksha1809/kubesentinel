@@ -30,6 +30,9 @@ class ClusterClients:
     engine (NetworkPolicy has no client on any of the existing five).
     `autoscaling` was added for the capacity planning & autoscaling advisor
     (HorizontalPodAutoscaler has no client on any of the existing six).
+    `rbac_authorization` and `policy` were added for the security &
+    configuration auditor (ClusterRole/ClusterRoleBinding/Role/RoleBinding
+    and PodDisruptionBudget have no client on any of the existing seven).
     """
 
     def __init__(
@@ -41,6 +44,8 @@ class ClusterClients:
         batch: client.BatchV1Api,
         networking: client.NetworkingV1Api,
         autoscaling: client.AutoscalingV2Api,
+        rbac_authorization: client.RbacAuthorizationV1Api,
+        policy: client.PolicyV1Api,
     ):
         self.core = core
         self.apps = apps
@@ -49,6 +54,8 @@ class ClusterClients:
         self.batch = batch
         self.networking = networking
         self.autoscaling = autoscaling
+        self.rbac_authorization = rbac_authorization
+        self.policy = policy
 
 
 def load_kube_config(settings: Settings) -> None:
@@ -81,4 +88,6 @@ def build_clients(settings: Settings) -> ClusterClients:
         batch=client.BatchV1Api(api_client),
         networking=client.NetworkingV1Api(api_client),
         autoscaling=client.AutoscalingV2Api(api_client),
+        rbac_authorization=client.RbacAuthorizationV1Api(api_client),
+        policy=client.PolicyV1Api(api_client),
     )

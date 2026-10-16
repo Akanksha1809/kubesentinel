@@ -2,9 +2,11 @@
 
 All lab resources live in the `kubesentinel-lab` namespace
 (`lab/manifests/namespace.yaml`), never in a system namespace, and KubeSentinel's RBAC
-(`rbac/role.yaml`) is scoped to that namespace only -- with one narrow, documented
-exception for the network troubleshooting engine's CoreDNS/`kube-dns` health check
-(`rbac/network-dns-role.yaml`, bound in `kube-system`; see RBAC_AND_THREAT_MODEL.md).
+(`rbac/role.yaml`) is scoped to that namespace only -- with narrow, documented
+exceptions for the network troubleshooting engine's CoreDNS/`kube-dns` health check
+(`rbac/network-dns-role.yaml`, bound in `kube-system`) and the security auditor's
+cluster-scoped RBAC checks (`rbac/security-clusterrole.yaml`, a ClusterRole --
+ClusterRole/ClusterRoleBinding have no namespace at all); see RBAC_AND_THREAT_MODEL.md.
 
 ```bash
 ./lab/create-cluster.sh                      # create the kind cluster + namespace
@@ -19,6 +21,7 @@ kubectl apply -f lab/manifests/scenario-transient-recovery/pod.yaml
 ./lab/scripts/run-scenario.sh service-selector-mismatch  # network engine's own scenarios
 ./lab/scripts/run-scenario.sh service-port-mismatch
 ./lab/scripts/run-scenario.sh hpa-capacity-pressure # capacity planning advisor's own scenario
+./lab/scripts/run-scenario.sh security-findings     # security auditor's own scenario
 ./lab/scripts/cleanup.sh                      # removes all scenario Deployments/Pods
 ./lab/delete-cluster.sh                       # destroys the kind cluster entirely
 ```
@@ -221,6 +224,61 @@ kubectl apply -f lab/manifests/scenario-transient-recovery/pod.yaml
   `GET /optimization/workloads` correctly exposed the live `HpaSnapshot`
   (replica bounds, metrics, `ScalingLimited` reason) with zero route
   changes needed.
+
+## Scenario: `security-findings` (Milestone 6 of the platform spec --
+## security & configuration auditor)
+
+- **Manifests**: `lab/manifests/scenario-security-findings/` (`deployment.yaml` +
+  `networkpolicy.yaml` + `rbac.yaml`).
+- **How it's built**: three independent, minimal findings, each isolated
+  to its own small manifest so each is individually verifiable by eye
+  against the file that causes it:
+  - `deployment.yaml`: a container with `securityContext.privileged: true`
+    and nothing else hardened -- deliberately minimal, so
+    `ALLOW_PRIVILEGE_ESCALATION`/`RUN_AS_ROOT`/`MISSING_READ_ONLY_ROOT_FS`/
+    `MUTABLE_IMAGE_TAG` all fire too, from absence alone, not a contrived
+    combination.
+  - `rbac.yaml`: a throwaway `security-findings-demo-sa` ServiceAccount
+    (used by no Pod) bound to the built-in `cluster-admin` ClusterRole via
+    a dedicated ClusterRoleBinding -- never the project's own real
+    `kubesentinel` ServiceAccount, never the cluster's own bootstrap
+    bindings.
+  - `networkpolicy.yaml`: a NetworkPolicy with one empty (`{}`) Ingress
+    rule -- a policy object exists, but restricts nothing.
+- **Expected diagnosis**: `PRIVILEGED_CONTAINER` (CRITICAL),
+  `CLUSTER_ADMIN_BINDING` (CRITICAL, cluster-scoped), and
+  `UNRESTRICTED_INGRESS_POLICY` (MEDIUM) -- plus, from this lab's own
+  pre-existing state rather than any new manifest:
+  `MISSING_PDB_FOR_MULTI_REPLICA_WORKLOAD` on the existing
+  `remediation-test` Deployment (2 replicas, no PDB) and
+  `NAMESPACE_WITHOUT_NETWORK_POLICY` would have fired too, had this
+  scenario's own `networkpolicy.yaml` not given `kubesentinel-lab` its
+  first NetworkPolicy.
+- **Automatic remediation**: not applicable -- only a human can decide
+  the right securityContext/RBAC scope/ingress rule for each.
+- **Two real corrections, caught live during this scenario's own build,
+  by this project's own Milestone 20-23 audit standard**: the
+  `CLUSTER_ADMIN_BINDING` rule's built-in-subject exclusion first assumed
+  only `system:masters` needed excluding; live-checking this lab
+  cluster's real `ClusterRoleBindings` showed a second genuine built-in
+  binding (`kubeadm:cluster-admins`) being mis-flagged, fixed by excluding
+  Group subjects by prefix rather than one exact name. Separately,
+  `SecurityService.audit()`'s first persistence design silently
+  accumulated every past run's findings forever; caught when the fix
+  above was applied and the *stale*, now-incorrect finding from the
+  previous run was still showing up in `kubesentinel security-findings`
+  alongside the corrected result -- fixed by replacing the per-finding
+  upsert with a whole-run replace. See `docs/SECURITY_AUDITING.md` and
+  `docs/IMPLEMENTATION_STATUS.md` Capability F for the full writeup.
+- **Verified live**: `kubesentinel security-audit --namespace
+  kubesentinel-lab` followed by `kubesentinel security-findings
+  --severity CRITICAL` and `kubesentinel security-finding <id>` correctly
+  showed all three scenario findings with the real evidence named
+  explicitly in each, confirmed via both the CLI and a real HTTP server
+  (`POST /security/audit`, `GET /security/findings?severity=CRITICAL`,
+  422 on an invalid severity). A second `audit()` call was confirmed to
+  leave the repository showing only the current run's findings, not the
+  first run's stale ones.
 
 ## Remediation test fixture (not a failure scenario)
 

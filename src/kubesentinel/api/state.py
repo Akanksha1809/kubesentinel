@@ -18,9 +18,11 @@ from kubesentinel.optimization.service import OptimizationService
 from kubesentinel.persistence.network_repo import SQLiteNetworkRepository
 from kubesentinel.persistence.optimization_repo import SQLiteOptimizationRepository
 from kubesentinel.persistence.scheduling_repo import SQLiteSchedulingRepository
+from kubesentinel.persistence.security_repo import SQLiteSecurityRepository
 from kubesentinel.persistence.sqlite_repo import SQLiteIncidentRepository
 from kubesentinel.remediation.service import RemediationService
 from kubesentinel.scheduling.service import SchedulingService
+from kubesentinel.security.service import SecurityService
 
 
 class AppState:
@@ -36,6 +38,8 @@ class AppState:
     scheduling: SchedulingService | None = None
     network_repo: SQLiteNetworkRepository
     network: NetworkService | None = None
+    security_repo: SQLiteSecurityRepository
+    security: SecurityService | None = None
 
 
 state = AppState()

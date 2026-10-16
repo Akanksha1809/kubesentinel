@@ -47,6 +47,12 @@ from kubesentinel.models.scheduling import (
     NodeTaint,
     SchedulingFinding,
 )
+from kubesentinel.models.security import (
+    SecurityAuditResult,
+    SecurityFinding,
+    SecurityResourceRef,
+    SecuritySeverity,
+)
 
 __all__ = [
     "ActionStatus",
@@ -92,4 +98,8 @@ __all__ = [
     "NetworkPolicyRelevance",
     "PortMatchResult",
     "ServiceMatchResult",
+    "SecurityAuditResult",
+    "SecurityFinding",
+    "SecurityResourceRef",
+    "SecuritySeverity",
 ]

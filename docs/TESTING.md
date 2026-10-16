@@ -7,9 +7,9 @@
 ./scripts/test.sh --all    # same, plus integration/e2e against a live kind cluster
 ```
 
-As of Milestone 5 (capacity planning & autoscaling advisor): **611 unit tests** (no cluster, no Ollama needed) plus **57
+As of Milestone 6 (security & configuration auditor): **715 unit tests** (no cluster, no Ollama needed) plus **68
 integration/e2e tests** (`--all`, against the real `kind-kubesentinel` cluster, one
-of them additionally gated on a local Ollama server) -- 668 total, all passing,
+of them additionally gated on a local Ollama server) -- 783 total, all passing,
 `ruff check` clean, `mypy src/kubesentinel` clean. Every
 integration/e2e test skips (not fails) if its precondition (the cluster, the lab
 namespace, a specific scenario/fixture, Ollama) isn't present -- confirmed by
@@ -28,7 +28,10 @@ boundary tests, covering its two new Roles); the capacity planning &
 autoscaling advisor's own tests (Milestone 5 of the platform spec) added
 a further 45 unit tests (41 in `test_capacity.py` plus 4 integration
 tests added to `test_optimization_service.py`) and 3 integration tests
-(plus 3 more RBAC boundary tests, covering its one new Role); see below.
+(plus 3 more RBAC boundary tests, covering its one new Role); the
+security & configuration auditor's own tests (Milestone 6 of the
+platform spec) added a further 104 unit tests and 6 integration tests
+(plus 5 more RBAC boundary tests, covering its two new Roles); see below.
 
 This was verified in-session, not assumed -- see the commands actually run, below.
 
@@ -235,6 +238,57 @@ This was verified in-session, not assumed -- see the commands actually run, belo
   degrades the one headroom check gracefully rather than aborting the
   entire `analyze()` pass).
 
+## Security & configuration auditor unit test coverage (Milestone 6 of the platform spec)
+
+- **`test_security_container_rules.py`** (31 tests) -- all 8 container
+  rules exhaustively: each rule's fire/don't-fire cases, `RunAsRootRule`'s
+  Pod-level-fallback-with-container-override precedence, `HostNamespace
+  SharingRule` firing once (not three times) for three shared namespaces
+  at once, and `_has_mutable_tag()` on its own across six cases including
+  a digest-pinned reference and a registry host with a port (so the
+  `:5000` isn't mistaken for a tag).
+- **`test_security_rbac_rules.py`** (14 tests) -- `ClusterAdminBindingRule`
+  across both binding kinds (cluster-wide CRITICAL vs. namespace-scoped
+  HIGH), mixed subjects on one binding only flagging the non-built-in
+  one, and both real built-in Group exclusions (`system:masters` and
+  `kubeadm:cluster-admins` -- the second found live, see below);
+  `WildcardRbacRuleRule` across verb+resource and verb+apiGroup
+  combinations, a wildcard verb alone *not* firing, and both the
+  exact-name and `system:`-prefix built-in-Role exclusions.
+- **`test_security_network_policy_rules.py`** (7 tests) -- namespace
+  coverage with/without a policy and with the system-namespace exclusion;
+  unrestricted-ingress firing/not-firing including the deny-all
+  (zero-rules) and egress-only cases, reusing
+  `network/policy_inventory.py`'s own classification.
+- **`test_security_availability_rule.py`** (11 tests) -- `_pdb_selector_matches()`
+  on its own (the standard null-matches-nothing/empty-matches-everything
+  semantics, deliberately the *opposite* of NetworkPolicy's own
+  podSelector handling) plus the full rule across covered/uncovered/
+  single-replica/wrong-namespace/wrong-selector cases for both
+  Deployment and StatefulSet.
+- **`test_security_engine.py`** (7 tests) -- `SecurityAuditEngine`
+  collecting findings from every rule, `rules_evaluated` listing every
+  rule ID, inventory `warnings` propagating to the result, determinism,
+  and `default_rules()` including every one of the 13 documented rule IDs
+  (a pin against silently dropping a rule from the catalog).
+- **`test_security_inventory.py`** (6 tests) -- Pod-to-workload dedup via
+  a real resolvable owner chain, `namespaces_with_pods` tracking, a
+  ClusterRoleBinding-list failure recorded as a warning without affecting
+  any other read, and the all-namespaces-vs-per-namespace fanout.
+- **`test_security_repo.py`** (11 tests) -- including the real bug this
+  milestone caught live: `test_save_findings_replaces_the_entire_previous_set`
+  pins that a second `save_findings()` call replaces, never appends to,
+  the first run's rows.
+- **`test_security_service.py`** (9 tests) -- including
+  `test_second_audit_does_not_accumulate_stale_findings`, the
+  service-level version of the same regression, plus the
+  `kubesentinel_security_audit_total`/`kubesentinel_security_findings_total`
+  metrics.
+- **`test_security_api.py`** (8 tests) -- every route's happy path, 404
+  (missing finding), 422 (an invalid `severity` filter value), 503
+  (service unavailable), and namespace/rule_id filtering on the findings
+  list.
+
 ## Why `kubernetes.client` model objects, not hand-rolled dicts, in tests
 
 `tests/unit/factories.py` builds `V1Pod`/`V1ContainerStatus`/etc. using the real
@@ -284,15 +338,18 @@ shared live-cluster fixtures, every one of which skips (never fails) if its
 precondition (a reachable cluster, the lab namespace, a specific scenario) isn't
 met.
 
-- **`test_rbac_boundary.py`** (33 tests) -- authenticates as the real
+- **`test_rbac_boundary.py`** (38 tests) -- authenticates as the real
   `kubesentinel` ServiceAccount (a token minted live with `kubectl create
   token`, not fabricated) and confirms both what it can do (read Pods/Events/
   Deployments/Nodes/StatefulSets/DaemonSets/Jobs/ResourceQuotas/pod-metrics/
-  Services/NetworkPolicies/HorizontalPodAutoscalers in the lab namespace,
-  update/patch Deployments, patch the scale subresource) and what it
-  cannot (read Secrets anywhere, read Pods outside the lab namespace,
-  delete Deployments/Pods/Nodes, mutate
-  PVCs/Services/NetworkPolicies/HorizontalPodAutoscalers, patch
+  Services/NetworkPolicies/HorizontalPodAutoscalers/ClusterRoles/
+  ClusterRoleBindings/Roles/RoleBindings/PodDisruptionBudgets in the lab
+  namespace (or cluster-wide for the cluster-scoped RBAC objects), update/
+  patch Deployments, patch the scale subresource) and what it cannot
+  (read Secrets anywhere, read Pods outside the lab namespace, delete
+  Deployments/Pods/Nodes, mutate PVCs/Services/NetworkPolicies/
+  HorizontalPodAutoscalers/ClusterRoles/ClusterRoleBindings/Roles/
+  RoleBindings/PodDisruptionBudgets, patch
   StatefulSets/DaemonSets/Jobs/ReplicaSets/ResourceQuotas) -- using both a
   real authenticated API call and `kubectl auth can-i --as=...` (the same
   technique used to manually confirm this boundary in Milestone 4).
@@ -301,7 +358,7 @@ met.
   aggregated API even when the Role genuinely grants it, so that one check
   goes through a real authenticated request instead (treating a `503` --
   metrics-server itself down -- as inconclusive, not a failure, since
-  that's an availability question, not an RBAC one). Seven of the 33 cover
+  that's an availability question, not an RBAC one). Seven of the 38 cover
   the network engine's two new Roles specifically, including its
   `kube-system` exception: `kubectl_can_i()` gained an optional
   `resource_name` parameter (`TYPE/NAME` syntax) because that grant is
@@ -312,7 +369,12 @@ met.
   from the start rather than rediscovered. Three more cover the capacity
   advisor's one new Role (`rbac/capacity-role.yaml`): list/get
   HorizontalPodAutoscalers in the lab namespace allowed, patching one or
-  listing them outside the lab namespace denied.
+  listing them outside the lab namespace denied. Five more cover the
+  security auditor's two new Roles -- the cluster-scoped `ClusterRole`
+  (`rbac/security-clusterrole.yaml`, checked without a namespace, since
+  `ClusterRole`/`ClusterRoleBinding` are themselves cluster-scoped) and
+  the namespaced `Role` (`rbac/security-role.yaml`, Roles/RoleBindings/
+  PodDisruptionBudgets, lab namespace only).
 - **`test_scheduling_live.py`** (4 tests, Milestone 3 of the platform spec)
   -- the `pending-resources`/`invalid-node-selector` scenarios' real Pods
   analyzed against the real cluster's actual Node allocatable/requested
@@ -348,6 +410,18 @@ met.
   `docs/CAPACITY_PLANNING.md` §11), confirmed live via the CLI/HTTP
   surfaces instead (see TODO.md's Milestone 23 entry) rather than pinned
   into an automated test that could flake as the lab's own state changes.
+- **`test_security_live.py`** (6 tests, Milestone 6 of the platform spec)
+  -- the `security-findings-demo` scenario's real privileged Pod, real
+  over-permissive `ClusterRoleBinding`, and real unrestricted-ingress
+  `NetworkPolicy` (never mocked) correctly produce
+  `PRIVILEGED_CONTAINER`/`CLUSTER_ADMIN_BINDING`/`UNRESTRICTED_INGRESS_POLICY`
+  findings; the cluster's own two real built-in RBAC bootstrap bindings
+  (`system:masters`, `kubeadm:cluster-admins`) are confirmed live to never
+  be flagged; a second `audit()` call is confirmed to replace, not
+  accumulate alongside, the first run's findings (the live version of the
+  real bug this milestone caught and fixed, see
+  `docs/SECURITY_AUDITING.md`); plus the same HTTP-transport-level
+  read-only check every other engine's own live tests already establish.
 - **`test_optimization_inventory_live.py`** / **`test_optimization_live_scenarios.py`**
   (5 tests, Milestones 14/18) -- `build_workload_inventory()` against the
   real lab namespace matches known healthy/unhealthy workloads; the

@@ -2,10 +2,10 @@
 
 The platform-wide view: what's built, what's planned, and the one
 architectural pattern every analysis engine in this project follows,
-proven five times now (troubleshooting, then resource optimization, then
+proven six times now (troubleshooting, then resource optimization, then
 the scheduling advisor, then the network troubleshooting engine, then
-capacity planning) and intended to be followed a sixth time (security)
-rather than reinvented per capability.
+capacity planning, then the security & configuration auditor) -- the
+full platform spec's own Capability A-F list, now complete.
 
 This document does not re-explain any already-built pipeline in detail --
 `ARCHITECTURE.md` covers the troubleshooting and resource-optimization
@@ -65,22 +65,26 @@ Every analysis engine in this project, built or planned, is:
    that, not a silent fallback to zero or "healthy."
 
 This is not an aspirational list -- it is what `optimization/`,
-`scheduling/`, and `network/` all already do, verified against
-`diagnostics/`'s own original shape. Five data points is still not a law
-of nature, but the pattern has now held up through live verification five
-times without needing to bend, including three times with a genuine
-reason to extend it: a read-only placement *simulation* (`scheduling/`,
-deserializing a hypothetical, not-yet-real Pod spec into a typed object
-and analyzing it exactly like a real one); a deliberate, documented scope
-boundary (`network/`, where the spec's own active connectivity probe was
-reasoned out of this milestone entirely rather than built -- this
-project's first analysis engine to defer part of its own spec on a
-safety basis, not pick-and-choose expediency); and a deliberate
-*non*-package (capacity planning, where the spec's own "extend, don't
-duplicate the metrics collector" instruction was followed literally --
-zero new persistence, zero new API routes, zero new CLI commands,
-because the structures it extends were already generic enough to carry
-a new enum value and an optional field with no further code). All three
+`scheduling/`, `network/`, and `security/` all already do, verified
+against `diagnostics/`'s own original shape. Six data points is still
+not a law of nature, but the pattern has now held up through live
+verification six times without needing to bend, including three times
+with a genuine reason to extend it: a read-only placement *simulation*
+(`scheduling/`, deserializing a hypothetical, not-yet-real Pod spec into
+a typed object and analyzing it exactly like a real one); a deliberate,
+documented scope boundary (`network/`, where the spec's own active
+connectivity probe was reasoned out of this milestone entirely rather
+than built -- this project's first analysis engine to defer part of its
+own spec on a safety basis, not pick-and-choose expediency); and a
+deliberate *non*-package (capacity planning, where the spec's own
+"extend, don't duplicate the metrics collector" instruction was followed
+literally -- zero new persistence, zero new API routes, zero new CLI
+commands, because the structures it extends were already generic enough
+to carry a new enum value and an optional field with no further code).
+The security auditor (`security/`) is a fourth data point for the *base*
+pattern holding without needing to bend at all -- its own genuine
+decision was build-vs-integrate an external scanner (§2 of
+`docs/SECURITY_AUDITING.md`), not a deviation from this shape. All three
 extensions were written down explicitly in their own design docs
 (`docs/SCHEDULING_ANALYSIS.md`, `docs/NETWORK_DIAGNOSTICS.md`,
 `docs/CAPACITY_PLANNING.md`) rather than silently absorbed into "the
@@ -92,19 +96,22 @@ asks every future capability to follow too.
 `observer/client.py::ClusterClients` today bundles `core` (`CoreV1Api`),
 `apps` (`AppsV1Api`), `discovery` (`DiscoveryV1Api`), `custom_objects`
 (`CustomObjectsApi`, for `metrics.k8s.io`), `batch` (`BatchV1Api`),
-`networking` (`NetworkingV1Api`), and `autoscaling` (`AutoscalingV2Api`)
--- each added additively, in the milestone that first needed it, never
-ahead of time (`custom_objects`/`batch` were added specifically for the
-optimization engine; `networking` for the network troubleshooting
-engine; `autoscaling` for capacity planning; nothing before each needed
-them). The same rule applies going forward:
+`networking` (`NetworkingV1Api`), `autoscaling` (`AutoscalingV2Api`),
+`rbac_authorization` (`RbacAuthorizationV1Api`), and `policy`
+(`PolicyV1Api`) -- each added additively, in the milestone that first
+needed it, never ahead of time (`custom_objects`/`batch` were added
+specifically for the optimization engine; `networking` for the network
+troubleshooting engine; `autoscaling` for capacity planning;
+`rbac_authorization`/`policy` for the security auditor; nothing before
+each needed them). This table is now complete -- every capability the
+platform spec named (A-F) has shipped:
 
 | Capability | New client needed | Status |
 |---|---|---|
 | C: Scheduling | none -- `core.list_node()` already existed on the existing `core` client | **done** -- `scheduling/node_inventory.py` calls it; confirms the prediction that no new client was needed here |
 | D: Network | `NetworkingV1Api` (NetworkPolicy; no Ingress -- confirmed live that zero Ingress/Gateway resources or CRDs exist on this cluster) | **done** -- `network/policy_inventory.py` calls it |
 | E: Capacity | `AutoscalingV2Api` (HPA) | **done** -- `optimization/capacity.py` calls it |
-| F: Security | `RbacAuthorizationV1Api` (Roles/Bindings), `PolicyV1Api` (PodDisruptionBudget, if used) | not constructed |
+| F: Security | `RbacAuthorizationV1Api` (Roles/Bindings), `PolicyV1Api` (PodDisruptionBudget) | **done** -- `security/inventory.py` calls both |
 
 Each addition follows the existing pattern exactly: extend the
 `ClusterClients.__init__` signature, extend `build_clients()`, and add the

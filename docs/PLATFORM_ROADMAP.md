@@ -192,30 +192,56 @@ JSON-blob-persisted and already exposed generically by
 `GET /optimization/workloads`, confirmed by reading the persistence
 layer before assuming a migration was needed.
 
-## Milestone 6: Security and configuration auditor
+## Milestone 6: Security and configuration auditor -- DONE
 
-**Scope**: a new `security/` package. `RbacAuthorizationV1Api` (and
-`PolicyV1Api` if PodDisruptionBudget auditing is included) added to
-`ClusterClients` (new, additive). A versioned rule catalog (mirroring
-`diagnostics/engine.py::DEFAULT_RULES`'s own "list of rule objects,
-evaluated uniformly" shape) covering container privilege/security-context
-settings, RBAC over-permissiveness, missing/overly-broad NetworkPolicies
-(reusing whatever Milestone 4 builds, not re-reading NetworkPolicy objects
-a second time), and the other items the spec names. Each finding: finding
-ID, rule ID, severity, evidence, explanation, remediation, and an explicit
-applicable/inconclusive flag -- the same "never report a hypothesis as
-proven, always say what's missing" discipline `models/diagnosis.py`
-already established for Capability A, applied to a new domain.
+See `docs/SECURITY_AUDITING.md` for the design and TODO.md's own entry
+for the full build-and-verification history. A new `security/` package:
+`inventory.py` (one-shot read of Pods grouped by owning workload, RBAC
+objects, NetworkPolicies, Deployments/StatefulSets/PodDisruptionBudgets),
+`rules/{container,rbac,network_policy,availability}.py` (13 rules total),
+`engine.py` (mirrors `diagnostics/engine.py::DiagnosticEngine` exactly),
+`service.py`. `RbacAuthorizationV1Api` and `PolicyV1Api` added to
+`ClusterClients` (new, additive).
 
-**Optional external tool integration** (kube-linter or Kubescape, per the
-spec's own suggestion): a genuine build-vs-integrate decision for this
-milestone's own design pass, not pre-decided here. If integrated, its
-scope and version are documented explicitly, and it stays optional
-(the base security auditor must work without it, matching the project's
-existing "every optional component is genuinely optional" rule already
-applied to Ollama, Prometheus, and metrics-server).
+**Build vs. integrate, decided**: a native rule catalog, not kube-linter/
+Kubescape -- consistent with every other capability in this project being
+a native, deterministic, in-repo rule engine with zero external-scanner
+subprocess dependency; see docs/SECURITY_AUDITING.md Section 2 for the
+full reasoning.
 
-**Design-first**: `docs/SECURITY_AUDITING.md` before code.
+**Scope, evaluated for real**: container security context (privileged,
+allowPrivilegeEscalation, runAsNonRoot, readOnlyRootFilesystem, host
+namespace sharing, hostPath volumes, mutable image tags, Secrets as env
+vars), RBAC over-permissiveness (cluster-admin bindings, wildcard
+verb+resource/apiGroup rules -- both excluding Kubernetes' own built-in,
+unfixable Roles/bindings), NetworkPolicy coverage (namespaces with zero
+policies, policies with an unrestricted-allow-all ingress rule, reusing
+Milestone 4's own classification rather than re-reading NetworkPolicy
+objects a second time), and PodDisruptionBudget coverage for multi-replica
+workloads. **Deliberately deferred**: CVE/image vulnerability scanning (no
+maintained vulnerability database this project has access to), Pod
+Security Admission namespace-label auditing (redundant with the
+already-built, more granular container-level checks), ServiceAccount
+token automount auditing, and any compliance-framework scoring -- each
+named explicitly as a gap, not silently absent.
+
+**A real finding caught live during this milestone's own verification,
+by this project's own Milestone 20-23 audit standard**: a real kind
+cluster has *two* built-in cluster-admin Group bindings, not the one
+better-known `system:masters` this milestone first assumed --
+`kubeadm:cluster-admins` (kubeadm's own, used by `admin.conf`) was
+initially mis-flagged as a real finding until caught by reading this
+project's own lab cluster's actual `ClusterRoleBindings` rather than
+trusting the first assumption. A second, independent gap caught the same
+way: `SecurityService.audit()` re-evaluates the entire cluster on every
+call, but the first persistence design silently accumulated every past
+run's findings forever (an upsert-by-`finding_id` design borrowed from
+`NetworkFinding`/`SchedulingFinding`, which call `analyze_pod()` once per
+*Pod* rather than re-scanning the whole cluster -- a real, found-live
+mismatch between those two shapes). Fixed by replacing the per-finding
+upsert with a whole-run replace (`save_findings`), the same semantics
+`optimization_repo.py::save_workload_snapshots` already uses for its own
+full-rescan shape.
 
 ## Milestone 7: Chaos and resilience lab
 
