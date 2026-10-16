@@ -345,16 +345,31 @@ caught and fixed a real bug: the controller's own re-evaluation of a
 pending action initially included that action in its own recent-actions
 cooldown check, self-denying on a 0-second-old cooldown against itself.
 
-## Milestone 9: Final integration and portfolio demonstration
+## Milestone 9: Final integration and portfolio demonstration -- DONE
 
-**Scope**: full regression suite across every capability built by this
-point, a fresh local setup verification from a clean clone (catches the
-exact kind of documentation drift Milestone 19's own doc pass found twice
-in the prior extension -- a misleading CLI flag, a truncated ID a command
-doesn't actually accept), and a coherent end-to-end demo spanning every
-capability, following the precedent already set by `DEMO_SCRIPT.md`'s
-existing step 8b (resource optimization) and the real, recorded (not
-staged) demo GIF now in `README.md`.
+Fresh local setup verified from a real clean clone (`git clone` into a
+scratch directory, not just a read-through): `check-prereqs.sh`,
+`setup.sh`, the fresh venv's own `./scripts/test.sh` (774 passed), and
+`./lab/create-cluster.sh` against the existing cluster (safe -- both
+`kind` and `kubectl apply` are idempotent, confirmed by reading the
+script before relying on that) all worked exactly as documented, with
+every CLI command's `--help` output spot-checked against README's own
+literal examples (`review-recommendation`, `dry-run`, `plan`,
+`schedule-check`, `network-check`, `evaluate`) and found to match.
+
+This pass still caught exactly the kind of drift the roadmap predicted,
+just not where expected -- not a wrong flag, but *coverage* drift: two
+capabilities built in Milestones 7 and 8 (the evaluation harness, the
+operator) existed in code and in their own design docs, but had never
+been added to `README.md`'s Quickstart, its Project layout tree, or
+`DEMO_SCRIPT.md` at all. Fixed: `DEMO_SCRIPT.md` gained new steps 8g
+(evaluation harness) and 8h (operator), both run live against the real
+cluster to confirm every command in them actually works as written
+before committing the doc (not assumed); its stale "There's no AI layer
+yet (Milestone 11, optional)" line -- wrong, since AI summarization has
+in fact shipped and is documented elsewhere in this same file -- was
+corrected. `README.md`'s Quickstart, Project layout, and documentation
+index were all updated to mention both capabilities.
 
 ## Sequencing notes
 

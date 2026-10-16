@@ -1,12 +1,11 @@
 # Demo script
 
-A guided walkthrough for showing KubeSentinel off, matching what's implemented
-through Milestone 18 (observe/diagnose/persist/expose, policy-controlled
-remediation, recovery verification, observability, and the read-only resource
-optimization engine -- see README.md's status line for exactly what's left).
-Takes about 10 minutes for the full walkthrough including remediation; stop
-after step 7 for the original ~5-minute diagnosis-only version, or skip
-straight to step 8b for just the optimization engine.
+A guided walkthrough for showing KubeSentinel off, matching the complete
+platform spec (Capabilities A-F, the chaos & resilience evaluation
+harness, and the Kubernetes operator -- see README.md's status line).
+Takes about 15 minutes for the full walkthrough including remediation;
+stop after step 7 for the original ~5-minute diagnosis-only version, or
+skip straight to step 8b for just the optimization engine.
 
 ## Setup (once)
 
@@ -360,12 +359,84 @@ curl -s -X POST http://127.0.0.1:8000/security/audit -H "Content-Type: applicati
 curl -s "http://127.0.0.1:8000/security/findings?severity=CRITICAL" | python3 -m json.tool
 ```
 
+**8g. Show the chaos & resilience evaluation harness measure a real
+scenario, not an estimate.**
+
+```bash
+.venv/bin/kubesentinel evaluate --scenario failed-mount --json
+```
+
+Point out the three timing fields: `time_to_detection_seconds` and
+`time_to_diagnosis_seconds` read the same, real wall-clock number for
+this scenario (push-based troubleshooting diagnoses inline the instant
+the watcher sees the Event -- there is no separate detect-then-diagnose
+phase in this architecture, and the harness reports that honestly rather
+than inventing a gap to look more interesting); `recovery_time_seconds`
+is `null` (this scenario has no self-healing path -- it's deliberately
+left broken for inspection, the same as 15 of the lab's 16 scenarios).
+Then show a past run and the whole-battery false-positive count:
+
+```bash
+.venv/bin/kubesentinel evaluation-runs
+.venv/bin/kubesentinel evaluation-run <run-id>
+```
+
+Worth noting out loud: this mutates the shared lab namespace (deletes
+then reapplies the scenario for a genuine, verified-absent timing
+baseline) and is deliberately CLI-only, never an HTTP endpoint -- running
+the full 16-scenario battery takes several minutes and is disruptive by
+design, not something routine automation should trigger; see
+CHAOS_RESILIENCE_LAB.md Section 6.
+
+**8h. Show the Kubernetes operator reconcile a real policy CR -- without
+ever deciding what to fix.**
+
+```bash
+kubectl apply -f crds/kubesentinelremediationpolicy.yaml
+cat <<'EOF' | kubectl apply -f -
+apiVersion: kubesentinel.io/v1alpha1
+kind: KubeSentinelRemediationPolicy
+metadata:
+  name: lab-policy
+  namespace: kubesentinel-lab
+spec:
+  mode: CONTROLLED_AUTO
+EOF
+.venv/bin/kubesentinel operator-run
+```
+
+In a second terminal, propose a real action against a real incident
+(e.g. the `failed-rollout-demo` Deployment's own `ROLLBACK_DEPLOYMENT`-
+eligible incident from step 8) and leave it `PENDING_APPROVAL`, then
+watch the operator's own log line when it reconciles. Point out: the
+controller never decided which `ActionType` to propose -- that's the
+`plan` call a human (or this script) already made -- it only
+re-evaluated the already-proposed action against the CR's own declared
+policy, through the exact same `PolicyEngine.evaluate()`/
+`RemediationService.approve()`/`.execute()` every other caller already
+uses. Then check the CR's own status, read the Kubernetes-native way:
+
+```bash
+kubectl get ksrp lab-policy -n kubesentinel-lab -o yaml
+```
+
+Worth noting out loud: no rule in this project's diagnostic engine ever
+sets `auto_remediation_permitted=True` today (a deliberate, conservative,
+already-shipped decision) -- so a real diagnosis-driven incident will
+correctly stay `PENDING_APPROVAL` even under `CONTROLLED_AUTO`, exactly
+like it does for a human using the CLI directly. See
+OPERATOR_DESIGN.md Section 2 for why that's the load-bearing constraint
+behind this whole capability, not a limitation to apologize for.
+
 **9. Be upfront about what this isn't, yet.**
 
 Nothing in the live diagnosis pipeline *automatically* calls `propose()` --
 every remediation above was a deliberate human action (or, in
 `CONTROLLED_AUTO` mode, the policy engine's own explicit decision), never an
-unattended reaction to a diagnosis. The network engine reads live CoreDNS
+unattended reaction to a diagnosis -- and that remains true with the
+operator running too: it only ever re-evaluates and auto-approves an
+already-proposed action, never invents which action to propose. The network
+engine reads live CoreDNS
 health and NetworkPolicy objects, but deliberately never runs an active
 connectivity probe -- that would be this project's first mutation surface
 outside the fully policy-gated `RemediationExecutor`, and was scoped out of
@@ -378,9 +449,17 @@ CAPACITY_PLANNING.md Section 2. The security auditor doesn't do CVE/image
 vulnerability scanning (no maintained vulnerability database this
 project has access to) and doesn't resolve a subject's *effective*
 permissions across every Role it's bound to combined -- it checks direct
-bindings and rules only; see SECURITY_AUDITING.md Section 3/12. There's
-no AI layer yet (Milestone 11, optional). The resource optimization
-engine never applies a
+bindings and rules only; see SECURITY_AUDITING.md Section 3/12. AI
+summarization (`.venv/bin/kubesentinel explain <incident-id>`, step 5
+could optionally show it) is real but deliberately narrow: advisory
+only, adds no evidence, changes no diagnosis, and has no path back into
+any decision -- it only ever explains an *already-computed* finding in
+plain English, the same bounded role an optional local AI layer plays
+everywhere else in this project; see RBAC_AND_THREAT_MODEL.md. The
+chaos & resilience evaluation harness and the operator both stay
+entirely human/CLI-driven too -- neither one ever decides what's broken
+or which action fixes it (see steps 8g/8h above). The resource
+optimization engine never applies a
 recommendation itself -- every number it produces still needs a human (or a
 future, explicitly-built policy-engine path) to act on it; see
 RESOURCE_OPTIMIZATION_DESIGN.md's known limitations for what's deliberately
@@ -394,7 +473,9 @@ it up if asked "so what's missing."
 ## Cleanup
 
 ```bash
-# Ctrl+C the demo.sh server
+# Ctrl+C the demo.sh server, and Ctrl+C the operator-run process from step 8h
+kubectl delete ksrp lab-policy -n kubesentinel-lab --ignore-not-found
+kubectl delete -f crds/kubesentinelremediationpolicy.yaml --ignore-not-found
 ./lab/scripts/cleanup.sh     # removes scenario workloads, keeps the namespace/cluster
 ./lab/delete-cluster.sh      # or tear the whole kind cluster down
 ```

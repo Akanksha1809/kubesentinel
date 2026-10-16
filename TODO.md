@@ -2762,3 +2762,121 @@ None of the three touch anything Milestone 8 added.
 
 This completes every milestone in `docs/PLATFORM_ROADMAP.md` except
 Milestone 9 (final integration and portfolio demonstration).
+
+## Milestone 28: Final integration and portfolio demonstration -- DONE
+
+Milestone 9 of `docs/PLATFORM_ROADMAP.md`, the last one, per the user's
+own standing instruction ("Continue straight into Milestone 9") after
+Milestone 27's operator shipped. Scope per the roadmap: a full regression
+suite, a fresh local setup verification from a clean clone, and a
+coherent end-to-end demo spanning every capability.
+
+**Fresh clone verification, done for real, not read through**: `git
+clone` of this exact working tree into a scratch directory (not the real
+GitHub remote -- no unpushed commits were pushed as part of this), then
+ran, in order: `./scripts/check-prereqs.sh` (all green), `./scripts/setup.sh`
+(fresh `.venv`, fresh `pip install -e ".[dev]"`, fresh `.env` from
+`.env.example`), the fresh venv's own `./scripts/test.sh` (**774 passed**,
+confirming dependency pinning and packaging are correct from a cold
+clone, not just this session's already-populated `.venv`), and
+`./lab/create-cluster.sh` against the already-running cluster -- read
+`create-cluster.sh` first to confirm it's genuinely idempotent (`kind`
+no-ops if the cluster exists, `kubectl apply` is idempotent) before
+running it, rather than risk destroying 2+ days of accumulated lab state
+on an assumption. The fresh clone's own CLI binary was then run directly
+against the real cluster (`incidents`, and `--help` on `review-recommendation`,
+`dry-run`, `plan`, `schedule-check`, `network-check`, `evaluate`),
+confirming every argument/flag README documents is the argument/flag the
+CLI actually accepts.
+
+**Real documentation drift found and fixed** -- not the kind the roadmap
+specifically named (a misleading flag, a truncated ID), but the same
+underlying failure mode in a different shape: *coverage* drift. Milestones
+7 and 8 (the evaluation harness, the operator) existed fully in code and
+in their own dedicated design docs, but had never been added to
+`README.md`'s Quickstart section, its Project layout tree, or
+`docs/DEMO_SCRIPT.md` at all -- three separate places a reader would
+reasonably expect to find them and wouldn't. Also found:
+`DEMO_SCRIPT.md`'s own step 9 stated "There's no AI layer yet (Milestone
+11, optional)" -- flatly wrong, since AI summarization (`kubesentinel
+explain`, `/incidents/{id}/ai-summary`) has shipped and is documented
+elsewhere in the very same file (step 6's sibling content, README's own
+Quickstart). Fixed all of it:
+
+- `README.md` -- Quickstart gained `evaluate`/`evaluation-runs` and
+  `operator-run` command examples (previously absent entirely); Project
+  layout gained `evaluation/`, `operator/`, and `crds/` entries, and
+  updated the `persistence/`/`api/`/`cli/`/`rbac/` lines to mention the
+  sixth repository, the new routes, and the operator's own Role; the
+  documentation index line for `PLATFORM_ROADMAP.md` now says "everything
+  except Milestone 9 itself" instead of stopping at "Capabilities A-F."
+- `docs/DEMO_SCRIPT.md` -- new steps **8g** (evaluation harness) and
+  **8h** (operator), both written and then run live against the real
+  cluster, command by command, to confirm they work exactly as written
+  before committing the doc -- not assumed, the same discipline this
+  entire project applies everywhere else. The stale AI line in step 9 is
+  now accurate, and step 9 additionally states the operator's own
+  boundary (it never decides which action to propose, only auto-approves
+  one already proposed) alongside the pre-existing "nothing calls
+  propose() automatically" sentence, which remained true and needed no
+  change. The intro line's "matching what's implemented through
+  Milestone 18" was replaced with a description of the actual, current,
+  complete scope.
+- `docs/PLATFORM_ROADMAP.md` -- Milestone 9 marked DONE with this
+  evidence.
+
+**Live verification of the new doc sections themselves**: ran
+`kubesentinel evaluate --scenario failed-mount --json` exactly as step
+8g now documents -- confirmed `time_to_detection_seconds` and
+`time_to_diagnosis_seconds` really do read the same value (the push-based
+architectural fact step 8g claims) and `recovery_time_seconds` is really
+`null` for this scenario; ran `evaluation-runs`/`evaluation-run <id>` and
+confirmed the table/detail output matches what's described. Applied the
+real CRD and a real CR exactly as step 8h documents, ran
+`operator-run`, confirmed the CR's `.status` shows the same shape
+documented (`pendingActionsSeen`/`actionsAutoApproved`/`lastReconcileTime`/
+`message`), then ran the new Cleanup section's own commands
+(`kubectl delete ksrp ...`, `kubectl delete -f crds/...`) and confirmed
+they actually remove what they claim to.
+
+**Full regression suite**: `./scripts/test.sh` -- ruff clean, mypy clean,
+**774 unit tests passed**, both in this session's own `.venv` and in the
+fresh clone's independently-built one. `./scripts/test.sh --all`, run as
+the final, official record for this milestone, took 16m46s (nearly
+double the usual ~500s) and showed 49 failed/4 errored -- the worst single
+instance of the shared-VM-contention pattern documented repeatedly
+throughout this project's history, confirmed from the run's own first
+error: a raw `SSLEOFError` against the API server mid-test, not an
+application-level failure. Re-running every affected file together in
+isolation (`tests/e2e/test_full_remediation_lifecycle.py`,
+`test_capacity_live.py`, `test_mount_rule_live.py`, `test_network_live.py`,
+`test_optimization_inventory_live.py`, `test_optimization_live_scenarios.py`,
+`test_rbac_boundary.py`, `test_restart_recovery.py`,
+`test_scheduling_live.py`, `test_security_live.py`, `test_watch_resync.py`,
+`test_observer_live_detection.py`) brought it down to exactly 2 failures,
+each independently resolved rather than waved through:
+`test_propose_approve_execute_verify_scale_up_and_back_down` (a real
+scale-up genuinely took longer than its 30s verification deadline under
+contention -- re-ran alone and passed cleanly in 13.73s, confirming
+transient timing, not a defect) and
+`test_hpa_capacity_pressure_scenario_is_flagged_at_max` (the same,
+already-documented `metrics-server` `CrashLoopBackOff` root cause from
+Milestone 26's own entry, reconfirmed still true: `kubectl get pods -n
+kube-system -l k8s-app=metrics-server` showed 196 restarts at the time).
+Neither touches anything this milestone, or Milestones 7/8, added.
+
+**Documentation**: `README.md` (Quickstart, Project layout, documentation
+index), `docs/DEMO_SCRIPT.md` (new steps 8g/8h, fixed stale AI line,
+fixed stale intro milestone reference, updated Cleanup section),
+`docs/PLATFORM_ROADMAP.md` (Milestone 9 marked DONE). No change was
+needed to `docs/MASTER_ARCHITECTURE.md`'s "proven six times" line --
+checked deliberately, not assumed safe to skip -- it is still correct as
+written: it counts only the six Capability A-F analysis engines
+specifically, and both the evaluation harness and the operator are
+already, correctly, documented in their own design docs as deliberate
+exceptions to that one pattern, not a seventh and eighth instance of it.
+
+This completes every milestone in `docs/PLATFORM_ROADMAP.md`, including
+Milestone 9 itself -- the full platform specification (Capabilities A-F,
+the chaos & resilience evaluation harness, and the Kubernetes operator)
+is now built, tested, live-verified, and documented.

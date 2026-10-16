@@ -381,6 +381,27 @@ no extra setup needed:
 .venv/bin/kubesentinel security-finding <finding-id>
 ```
 
+The chaos & resilience evaluation harness measures any lab scenario
+against the real cluster -- mutates the shared lab namespace (deletes
+then reapplies the scenario touched), so it's CLI-only and deliberately
+not run automatically:
+
+```bash
+.venv/bin/kubesentinel evaluate --scenario failed-mount
+.venv/bin/kubesentinel evaluation-runs
+```
+
+The Kubernetes operator reconciles a `KubeSentinelRemediationPolicy` CR
+declaratively -- it never decides which action fixes an incident (that
+stays entirely CLI/API-driven via `plan`), only auto-approves and
+executes an already-proposed, still-pending action once the CR's own
+policy allows it:
+
+```bash
+kubectl apply -f crds/kubesentinelremediationpolicy.yaml
+.venv/bin/kubesentinel operator-run
+```
+
 AI summarization is off by default (works with no AI at all). To try it:
 [install Ollama](https://ollama.com), `ollama pull qwen2.5-coder:3b` (or any
 model you have), then:
@@ -428,9 +449,18 @@ src/kubesentinel/
   scheduling/    Read-only placement analysis: node inventory, per-constraint evaluators, analyzer
   network/       Read-only connectivity analysis: service/policy inventory, DNS health, analyzer
   security/      Read-only security/config auditing: inventory, 13 native rules, engine, service
-  persistence/   Repository interfaces + SQLite implementations (incidents, optimization, scheduling, network, security)
-  api/           FastAPI app (health/ready/incidents/evidence/actions/metrics/optimization/scheduling/network/security)
-  cli/           Typer CLI mirroring the API for one-shot cluster inspection, remediation, optimization, scheduling, network, and security analysis
+  evaluation/    Chaos & resilience evaluation harness: scenario registry + the harness itself
+                 (drives all six engines above against the real cluster and measures them)
+  operator/      Kubernetes operator: reconciles KubeSentinelRemediationPolicy CRs, never
+                 decides which action to propose -- only auto-approves/executes one already
+                 proposed, through the exact same PolicyEngine/RemediationService calls
+  persistence/   Repository interfaces + SQLite implementations (incidents, optimization,
+                 scheduling, network, security, evaluation)
+  api/           FastAPI app (health/ready/incidents/evidence/actions/metrics/optimization/
+                 scheduling/network/security/evaluation)
+  cli/           Typer CLI mirroring the API for one-shot cluster inspection, remediation,
+                 optimization, scheduling, network, security analysis, the evaluation
+                 harness, and running the operator
   metrics/       Prometheus metric definitions
   policy/        Policy engine: OBSERVE/APPROVAL_REQUIRED/CONTROLLED_AUTO decisions
   remediation/   Remediation executor + service (propose/approve/execute/reject/dry_run)
@@ -438,12 +468,15 @@ src/kubesentinel/
   ai/            Optional AI summarization (local Ollama only, advisory, no path to any decision)
 lab/             kind cluster config, namespace, failure scenario manifests, scripts,
                  optional metrics-server installer
+crds/            The one CustomResourceDefinition the operator reconciles
+                 (KubeSentinelRemediationPolicy)
 rbac/            Least-privilege Role/RoleBinding/ServiceAccount for what's implemented today
                  (observer, remediator, optimizer, scheduling-advisor, network-advisor,
-                 capacity-advisor, and security-advisor Roles -- network-advisor's own one
-                 narrow, documented kube-system exception for CoreDNS/kube-dns health, and
-                 security-advisor's own cluster-scoped ClusterRole for ClusterRole/
-                 ClusterRoleBinding reads -- each independently auditable)
+                 capacity-advisor, security-advisor, and operator Roles -- network-advisor's
+                 own one narrow, documented kube-system exception for CoreDNS/kube-dns
+                 health, security-advisor's own cluster-scoped ClusterRole for ClusterRole/
+                 ClusterRoleBinding reads, and the operator's own Role reusing the existing
+                 remediator Role's mutation grant unchanged -- each independently auditable)
 observability/   Prometheus scrape config + importable Grafana dashboard
 tests/unit/      Deterministic unit tests, no cluster required
 docs/            Architecture, diagnostic rules, RBAC/threat model, failure lab, resource
@@ -453,7 +486,7 @@ docs/            Architecture, diagnostic rules, RBAC/threat model, failure lab,
 ## Documentation
 
 - [MASTER_ARCHITECTURE.md](docs/MASTER_ARCHITECTURE.md) -- the platform-wide shape every analysis engine follows, built or planned
-- [PLATFORM_ROADMAP.md](docs/PLATFORM_ROADMAP.md) -- milestone plan: all six platform-spec capabilities (A-F) now done
+- [PLATFORM_ROADMAP.md](docs/PLATFORM_ROADMAP.md) -- milestone plan: all six platform-spec capabilities (A-F), the evaluation harness, and the operator now done -- everything except Milestone 9 itself
 - [IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md) -- evidence-backed, capability-by-capability status audit
 - [ARCHITECTURE.md](docs/ARCHITECTURE.md) -- component design and data flow for the troubleshooting and resource-optimization engines
 - [RESOURCE_OPTIMIZATION_DESIGN.md](docs/RESOURCE_OPTIMIZATION_DESIGN.md) -- the resource optimization engine's own design, algorithms, and milestone plan
