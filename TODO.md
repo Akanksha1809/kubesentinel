@@ -2289,3 +2289,160 @@ Not something to "fix" here -- noted so a future reader doesn't mistake
 environment noise for a regression. If this recurs, stop the unrelated
 cluster/VM workload first before re-running `--all`, rather than chasing it as
 a KubeSentinel bug.
+
+## Milestone 25: Milestone 1 audit closure -- DONE
+
+Per the user's own explicit instruction ("first tackle those 3 and then
+proceed to next milestone"): the 3 named, optional gaps left open by
+Milestone 20's own repository audit (recorded in
+`docs/PLATFORM_ROADMAP.md`'s Milestone 1 section) after Milestones 21-24
+(scheduling, network, capacity, security) shipped. All bug-fix/hardening
+items against existing scope, not a new capability -- no new design doc,
+per the user's own scoping.
+
+**Item 1 -- `UsageSummary.throttled` scaffolded but never populated**:
+implemented, not removed. `optimization/analyzer.py::_check_throttled()`
+runs the real `container_cpu_cfs_throttled_seconds_total` Prometheus
+`increase(...[5m])` query and returns `True`/`False`/`None` -- never
+coerced to `False` on query failure or metrics-server-only evidence, the
+same "never fabricate absence" rule this project applies everywhere else.
+A confirmed `True` now vetoes a proposed CPU decrease exactly the way a
+recorded OOM kill already vetoes one for memory, and adds a
+`CPU_THROTTLED_CONFIRMED` flag with its own reasoning/risk text; a
+confirmed `False` states that fact explicitly instead of staying silent.
+Verified with 5 new unit tests (`test_analyzer.py::TestCpuThrottling`)
+against a mocked `urllib.request.urlopen`, the same technique the
+existing Prometheus-path tests already use, extended from two queries
+(cpu, memory) to three. Not live-verified against a real Prometheus
+server, deliberately: Prometheus has never been part of this project's
+own lab infrastructure and remains an optional, disabled-by-default
+provider -- the unit-test tier is the correct and sufficient one here,
+consistent with every other Prometheus-dependent path in this codebase.
+
+**Item 2 -- no in-Pod mount-failure diagnostic rule**: implemented.
+`diagnostics/rules/mount.py::FailedMountRule` fires HIGH confidence on
+any Warning Event with `reason == "FailedMount"`, agnostic to the
+underlying cause (unreachable backing store, multi-attach conflict,
+wrong `fsType`, missing ConfigMap/Secret reference, etc.) -- it names the
+symptom, not the specific cause, the same discipline
+`PvcBindingFailureRule` already established for the separate
+binding-failure case. Added to `diagnostics/engine.py::DEFAULT_RULES`
+(positioned after `PvcBindingFailureRule`, before `NodeConditionRule`).
+New lab scenario `scenario-failed-mount` (a missing-ConfigMap volume
+reference -- confirmed live with a throwaway probe Pod, before writing
+the manifest, that this reliably produces a real `FailedMount` Event;
+this lab's own kind-on-local-path setup has no real external storage
+infrastructure to break deterministically, so this is honestly not the
+PVC-with-unreachable-storage case that originally motivated the rule).
+4 new unit tests (`test_mount_rules.py`).
+
+**Two real bugs caught live during this item's own verification, not by
+any unit test** -- confirming, yet again, why this project insists on
+live verification through the real pipeline rather than trusting
+hand-built evidence alone:
+
+1. `incidents/health.py::_BAD_EVENT_REASONS` needed `"FailedMount"` added
+   -- without it, a Pod stuck this way would never open an incident at
+   all (no container waiting/terminated state reflects this failure
+   mode; the Event is the only evidence it produces). Caught by reasoning
+   about `has_failure_signal()`'s role before writing any code, not live
+   -- but recorded here because it was a required companion change, not
+   optional polish.
+2. `observer/service.py::_RELEVANT_EVENT_REASONS` -- a **second**,
+   independent Event-reason allowlist, upstream of and separate from the
+   one above, gating whether the real `EventWatcher` forwards the Event
+   to `IncidentManager.observe()` at all. This one was caught only by
+   live verification: the one-shot `diagnose` CLI command structurally
+   cannot exercise either rule (it never fetches Events, only
+   `pod_evidence()`), so a throwaway demo API server was started against
+   the real `scenario-failed-mount` Pod to exercise the real
+   `ObserverService` end to end. The real `FailedMount` Event fired
+   correctly, but `GET /incidents` showed no Pod-level incident at all --
+   root-caused to this second filter list silently dropping the Event
+   before `_BAD_EVENT_REASONS` was ever consulted. Fixed, with a new
+   regression test (`test_observer_service.py::test_failed_mount_event_is_forwarded`)
+   and reconfirmed live immediately after: the real Pod-level incident
+   now opens and is diagnosed `FAILED_MOUNT` at HIGH confidence end to
+   end, and both `tests/integration/test_mount_rule_live.py` tests pass
+   against the real cluster.
+
+**Item 3 -- no cross-link from a resource-optimization finding back into
+an open incident's own hypothesis list**: implemented, deliberately
+narrow for its first case. `Hypothesis.related_recommendation_ids` (new
+field, default empty list) is populated by the new
+`IncidentManager._enrich_with_recommendations`, called from
+`_apply_diagnosis` right after `DiagnosticEngine.diagnose()` returns --
+never from inside a `DiagnosticRule` itself, since the engine must stay a
+pure function of evidence with zero repository access (this project's own
+"deterministic first" invariant). Only applies to an `OOM_KILLED` top
+hypothesis (the roadmap's own named example) against open `MEMORY`/
+`DATA_QUALITY` recommendations for the same workload, resolved via
+`incident.resource.owner_name or incident.resource.name`.
+`IncidentManager.__init__` gained an optional `optimization_repo`
+parameter -- additive; every existing caller passing only `repo` behaves
+exactly as before (confirmed by a dedicated unit test). `api/app.py`'s
+lifespan was reordered so `state.optimization_repo` is constructed before
+`state.manager`, so the real API server actually wires this up. 6 new
+unit tests (`test_incident_manager.py::TestRecommendationCrossLink`)
+against a real `IncidentManager`, real `Hypothesis`/`Incident` model
+objects, and a real (on-disk SQLite) `SQLiteOptimizationRepository` --
+covering both target categories, the no-match case, the non-OOM
+hypothesis case, the no-`optimization_repo`-wired-up safe-no-op case, and
+the different-workload case.
+
+A full live demonstration against the lab's own `oom-demo` scenario was
+attempted and deliberately not forced through: blocked by two independent,
+pre-existing environmental facts, neither introduced by nor fixable within
+this change. (a) This kind cluster's container runtime reports plain
+`Error`, never `OOMKilled`, for this workload's real kills (confirmed via
+`kubectl get pod ... -o json`, exit_code=137 under reason `Error`), so
+`OOMKilledRule` only ever produces its MEDIUM-confidence *inferred*
+hypothesis here (already documented as an accepted limitation in
+`oomkilled.py`'s own docstring) -- which loses the real incident's top-
+hypothesis ranking to the HIGH-confidence `CrashLoopBackOffRule` hypothesis
+on the same Pod, confirmed live via `GET /incidents/{id}` showing both
+hypotheses present, `crash_loop_backoff` HIGH ranked above `oom_killed`
+MEDIUM. (b) A real `kubesentinel optimize --namespace kubesentinel-lab`
+pass against the live lab produced 3 recommendations, zero of them for
+`oom-demo` -- a perpetually crash-looping Pod never holds a long enough
+live window for metrics-server to return a usage sample, so the optimizer
+has nothing to analyze for that workload at all. Given both, the unit-test
+tier is the correct and sufficient verification here, for the same reason
+given for item 1: there is no live path to exercise that doesn't itself
+depend on fixing unrelated, already-correct, already-documented behavior
+elsewhere in the system.
+
+**Tests**: 15 new unit tests total (5 + 4 + 6) across 3 files, plus 1
+regression test (`test_observer_service.py`) for the live-caught bug in
+item 2 -- 16 new unit tests altogether. 2 new live integration tests
+(`test_mount_rule_live.py`). `./scripts/test.sh`: ruff clean, mypy clean
+(98 source files), **731 unit tests passed** (715 + 16). `./scripts/test.sh
+--all`: collected **800 tests** (731 unit + 69 integration/e2e). A full
+`--all` run hit the same shared-VM-contention pattern documented
+repeatedly throughout this project's history (36 failed, 4 errored --
+RBAC-boundary `kubectl auth can-i` subprocess flakiness, network/capacity/
+optimization live-test flakiness, one e2e remediation-lifecycle timeout;
+both new `test_mount_rule_live.py` tests were themselves caught in this
+same contention wave, despite having passed cleanly in isolation minutes
+earlier); every one of the 40 affected tests passed cleanly (56 passed,
+re-running the full affected files) when re-run immediately afterward
+once `kube-scheduler`/`kube-controller-manager` stopped crash-looping.
+This is at least the tenth confirmation of this exact environmental
+pattern across this project's history, using the identical
+"isolate and re-run" method each time.
+
+**Documentation**: `docs/PLATFORM_ROADMAP.md` (Milestone 1 section
+rewritten, all 3 items marked resolved with the live-caught-bug detail
+for item 2 and the honest blocked-live-path accounting for item 3),
+`docs/IMPLEMENTATION_STATUS.md` (CPU throttling row, PVC/mount row, the
+Capability A/B cross-link row), `docs/RESOURCE_OPTIMIZATION_DESIGN.md`
+(CPU throttling implemented note), `docs/DIAGNOSTIC_RULES.md`
+(`FailedMountRule` section, including the second live-caught bug),
+`docs/FAILURE_LAB.md` (new `scenario-failed-mount` section),
+`docs/TESTING.md` (updated counts, new Milestone 1 closure test section,
+the live-test bug-catch note), and `README.md` (the diagnostic-category
+list now includes in-Pod volume mount failures).
+
+Immediately after, per the user's own standing instruction, proceeds to
+Milestone 7 ("Chaos and resilience lab") per `docs/PLATFORM_ROADMAP.md`'s
+own sequencing.

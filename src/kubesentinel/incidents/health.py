@@ -35,8 +35,12 @@ _BAD_TERMINATION_REASONS = {"OOMKilled"}
 # state reflects it -- a failing readiness probe never restarts the container or sets
 # a waiting reason, it only ever shows up as this Event. ProvisioningFailed/
 # FailedBinding are PVC binding failures (see diagnostics/rules/pvc.py for why PVC
-# `Pending` phase alone is deliberately NOT included here).
-_BAD_EVENT_REASONS = {"Unhealthy", "ProvisioningFailed", "FailedBinding"}
+# `Pending` phase alone is deliberately NOT included here). FailedMount is a Pod
+# stuck unable to mount an already-Bound volume -- a different failure mode from
+# binding (see diagnostics/rules/mount.py); a container that never mounts never
+# reports a waiting/terminated reason either, so without this it would stay
+# invisible to has_failure_signal and never open an incident at all.
+_BAD_EVENT_REASONS = {"Unhealthy", "ProvisioningFailed", "FailedBinding", "FailedMount"}
 _NODE_PRESSURE_CONDITIONS = {"MemoryPressure", "DiskPressure", "PIDPressure"}
 
 

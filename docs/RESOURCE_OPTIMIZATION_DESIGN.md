@@ -311,6 +311,20 @@ model:
   CPU *limits* are treated more conservatively than requests -- throttling
   data (`container_cpu_cfs_throttled_seconds_total`-style, only available via
   Prometheus) raises `risks`, never silently relaxes the recommendation.
+  **Implemented** (previously scaffolded-but-unpopulated, closed as part of
+  Milestone 1's own "stabilize the core" audit, item 1):
+  `analyzer.py::_check_throttled()` runs the real
+  `increase(container_cpu_cfs_throttled_seconds_total{...}[5m])` query
+  whenever Prometheus is configured; a confirmed-throttled result both
+  states the fact explicitly in `reasoning` (distinct from the merely
+  hypothetical "this *could* throttle" phrasing used when no Prometheus
+  signal is available) and vetoes a proposed CPU decrease, the same "real
+  evidence of pressure vetoes a decrease" rule already applied to a
+  recorded OOM kill. Unit-tested against a mocked Prometheus response
+  (the same verification tier every Prometheus-dependent code path in
+  this project uses, since Prometheus itself has never been deployed in
+  this project's own lab -- it remains an optional, disabled-by-default
+  upgrade; see TODO.md).
 - **Memory**: proposed request/limit derived from observed **peak** (or a
   configurable high percentile, e.g. p99) over the window, never the
   average -- the spec is explicit that memory is not CPU, and a transient

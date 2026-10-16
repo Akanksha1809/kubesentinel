@@ -114,6 +114,32 @@ def _summarize_from_samples(pooled: list[RawUsageSample], settings: Settings, no
     )
 
 
+def _check_throttled(
+    provider: PrometheusProvider, namespace: str, pod_pattern: str, container_name: str, start: datetime, now: datetime
+) -> bool | None:
+    """Real CPU-throttling signal, cAdvisor's own `container_cpu_cfs_throttled_
+    seconds_total` counter -- the thing `UsageSummary.throttled` was scaffolded
+    for from the start but never actually populated (Milestone 1's own audit
+    flagged this as a named gap: implement the real query, or remove the
+    field, never leave it silently always-empty). `increase(...)` over each
+    step mirrors the cpu_query's own `rate(...)` shape. Returns `None` (not
+    `False`) on any failure or empty result -- never coerced to "confirmed
+    not throttled," the same honesty this field's own docstring already
+    requires."""
+    query = (
+        f"increase(container_cpu_cfs_throttled_seconds_total{{namespace=\"{namespace}\","
+        f'pod=~"{pod_pattern}",container="{container_name}"}}[5m])'
+    )
+    try:
+        series = provider.query_range(query, start, now, step_seconds=60)
+    except MetricsProviderError as exc:
+        logger.info("Prometheus CPU-throttling query unavailable, leaving throttled unknown: %s", exc)
+        return None
+    if not series:
+        return None
+    return any(value > 0 for _, value in series)
+
+
 def _try_prometheus_usage(
     workload: WorkloadSnapshot, container_name: str, settings: Settings, now: datetime
 ) -> UsageSummary | None:
@@ -151,6 +177,7 @@ def _try_prometheus_usage(
     cpu_values = [value for _, value in cpu_series]
     memory_values = [value for _, value in memory_series]
     actual_window = (cpu_series[-1][0] - cpu_series[0][0]).total_seconds()
+    throttled = _check_throttled(provider, namespace, pod_pattern, container_name, start, now)
 
     return UsageSummary(
         evidence_quality=EvidenceQuality.HISTORICAL,
@@ -161,7 +188,7 @@ def _try_prometheus_usage(
         cpu_peak_millicores=round(max(cpu_values)),
         memory_typical_bytes=round(_percentile(memory_values, 0.5)),
         memory_peak_bytes=round(_percentile(memory_values, settings.optimization_memory_peak_percentile)),
-        throttled=None,
+        throttled=throttled,
     )
 
 
@@ -271,6 +298,15 @@ def _cpu_recommendation(
         )
         oversized = proposed_millicores < current_request * settings.optimization_underutilization_ratio
 
+    # Confirmed throttling (via Prometheus's own cAdvisor counter -- see
+    # _check_throttled) is direct evidence the current request/limit isn't
+    # actually excessive, it's being hit -- the same "real evidence of
+    # pressure vetoes a proposed decrease" discipline the memory function
+    # already applies to a recorded OOM kill.
+    if usage.throttled and oversized and proposed_millicores is not None and proposed_millicores < current_request:
+        oversized = False
+        proposed_millicores = None
+
     if not oversized and not near_limit:
         return None
 
@@ -294,7 +330,24 @@ def _cpu_recommendation(
             f"{round((1 - settings.optimization_near_limit_ratio) * 100)}% of the configured limit "
             f"({format_cpu_millicores(current_limit)})."
         )
-        risks.append("Usage this close to the limit risks CPU throttling under any additional load.")
+        # usage.throttled distinguishes a real, observed fact (Prometheus's
+        # own cAdvisor counter) from the merely hypothetical "this could
+        # throttle" -- None means no Prometheus throttling signal was
+        # available at all (e.g. metrics-server-only evidence), in which
+        # case the risk stays phrased as a possibility, same as before this
+        # field was actually wired up.
+        if usage.throttled is True:
+            flags.append("CPU_THROTTLED_CONFIRMED")
+            reasoning_parts.append(
+                "CPU throttling was directly observed during this window (Prometheus's own "
+                "container_cpu_cfs_throttled_seconds_total counter), not just inferred from proximity "
+                "to the limit."
+            )
+            risks.append("This container has already been throttled -- its own work is being delayed now, not just at risk of it.")
+        elif usage.throttled is False:
+            reasoning_parts.append("No CPU throttling was observed during this window despite the proximity to the limit.")
+        else:
+            risks.append("Usage this close to the limit risks CPU throttling under any additional load.")
 
     return _new_recommendation(
         workload,

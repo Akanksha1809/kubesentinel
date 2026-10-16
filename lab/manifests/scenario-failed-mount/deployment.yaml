@@ -1,0 +1,67 @@
+# Scenario: in-Pod volume mount failure (Milestone 1's own "stabilize the
+# core" audit, item 2 -- diagnostics/rules/mount.py::FailedMountRule).
+#
+# How the failure is created: the container references a `configMap`
+# volume for a ConfigMap that doesn't exist. This deterministically
+# produces a real kubelet `FailedMount` Warning Event with no real storage
+# backend needed -- confirmed live against this project's own kind
+# cluster before writing this manifest, not assumed.
+#
+# This is deliberately NOT the PVC-with-an-unreachable-backing-store case
+# the rule's own module docstring uses as its primary motivating example
+# (an NFS server down, a multi-attach conflict, etc.) -- those need real
+# external storage infrastructure this project's own kind-on-local-path
+# lab doesn't have, and can't be triggered deterministically without it.
+# `FailedMountRule` itself is evidence-source-agnostic: it fires on any
+# `FailedMount` Event regardless of which underlying volume type or cause
+# produced it, so this scenario exercises the *rule*, honestly, even
+# though it isn't the PVC-specific story that originally motivated it.
+#
+# Expected Kubernetes behavior: the Pod stays Pending (the container never
+# starts -- a mount failure blocks the Pod from running at all, unlike a
+# container that starts and then crashes), and the kubelet repeats the
+# Warning Event (reason=FailedMount) on every retry.
+#
+# Expected KubeSentinel diagnosis: FAILED_MOUNT, HIGH confidence, directly
+# from the Event -- never from the Pod staying Pending alone (which, by
+# itself, is also consistent with an ordinary scheduling delay).
+#
+# Automatic remediation: not applicable -- only a human can create the
+# missing ConfigMap or fix the Pod's volume reference.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: failed-mount-demo
+  namespace: kubesentinel-lab
+  labels:
+    app: failed-mount-demo
+    kubesentinel.io/scenario: failed-mount
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: failed-mount-demo
+  template:
+    metadata:
+      labels:
+        app: failed-mount-demo
+    spec:
+      containers:
+        - name: app
+          image: busybox:latest
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c", "sleep infinity"]
+          volumeMounts:
+            - name: cfg
+              mountPath: /etc/cfg
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 50m
+              memory: 32Mi
+      volumes:
+        - name: cfg
+          configMap:
+            name: failed-mount-demo-missing-configmap

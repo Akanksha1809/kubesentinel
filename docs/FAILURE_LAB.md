@@ -13,6 +13,7 @@ ClusterRole/ClusterRoleBinding have no namespace at all); see RBAC_AND_THREAT_MO
 ./lab/scripts/run-scenario.sh crashloop       # apply one scenario
 ./lab/scripts/run-scenario.sh oom
 ./lab/scripts/run-scenario.sh imagepull
+./lab/scripts/run-scenario.sh failed-mount          # Milestone 1 audit item 2
 kubectl apply -f lab/manifests/scenario-transient-recovery/pod.yaml
 ./lab/scripts/run-scenario.sh oversized-resources   # resource optimization engine's
 ./lab/scripts/run-scenario.sh missing-requests      # own scenarios (not failures)
@@ -116,6 +117,39 @@ kubectl apply -f lab/manifests/scenario-transient-recovery/pod.yaml
   StorageClass name.
 - **Verified live**: incident opened and correctly diagnosed via the exact manifest
   file above.
+
+## Scenario: `failed-mount` (in-Pod volume mount failure -- Milestone 1's
+## own "stabilize the core" audit, item 2)
+
+- **Manifest**: `lab/manifests/scenario-failed-mount/deployment.yaml`
+- **How it fails**: the container references a `configMap` volume for a
+  ConfigMap that doesn't exist. Deliberately **not** the PVC-with-
+  unreachable-backing-storage case that originally motivated this rule
+  (an NFS server down, a multi-attach conflict) -- this lab's own
+  kind-on-local-path setup has no real external storage infrastructure to
+  break deterministically. `FailedMountRule` is evidence-source-agnostic
+  (it fires on any `FailedMount` Event regardless of volume type or
+  cause), so this exercises the real rule honestly, even though it isn't
+  the PVC-specific story that originally motivated it.
+- **Expected Kubernetes behavior, confirmed live before writing this
+  manifest**: the Pod stays `Pending` (the container never starts -- a
+  mount failure blocks the Pod from running at all, unlike a container
+  that starts and then crashes), and the kubelet repeats a Warning Event
+  (`reason=FailedMount`, `message="MountVolume.SetUp failed for volume ...:
+  configmap ... not found"`) on every retry.
+- **Expected diagnosis**: `FAILED_MOUNT`, HIGH confidence, directly from
+  the Event -- never from the Pod staying `Pending` alone (equally
+  consistent with an ordinary scheduling delay). Required adding
+  `"FailedMount"` to `incidents/health.py::_BAD_EVENT_REASONS` -- without
+  it, no incident would ever open for this failure mode at all (no
+  container waiting/terminated state ever reflects a mount that never
+  succeeded).
+- **Automatic remediation**: not applicable -- only a human can create the
+  missing ConfigMap or fix the Pod's volume reference.
+- **Verified live**: incident opened and correctly diagnosed as
+  `FAILED_MOUNT` via the exact manifest file above, confirmed via
+  `kubesentinel incidents`/`kubesentinel evidence <id>` against the real
+  cluster.
 
 ## Scenario: `service-selector-mismatch`
 

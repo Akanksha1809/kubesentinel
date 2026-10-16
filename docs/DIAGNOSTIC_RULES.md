@@ -118,6 +118,38 @@ Deployment-kind incidents -- the first rules in this project that don't target a
   `volumeBindingMode: WaitForFirstConsumer`, under which a PVC is *correctly* Pending
   until a Pod references it. Treating that as a failure would fabricate a diagnosis.
 
+### FailedMountRule (`mount.py`) -- added as part of Milestone 1's own "stabilize the core" audit, item 2
+
+A different failure mode from `PvcBindingFailureRule`: a PVC can be genuinely
+`Bound` (binding succeeded) while the kubelet still cannot mount the
+underlying volume on the Node the Pod landed on.
+
+- **Trigger**: a Warning Event with `reason == "FailedMount"` -- HIGH confidence.
+  Evidence-source-agnostic: fires on any `FailedMount` Event regardless of
+  which volume type or underlying cause produced it (an unreachable backing
+  store, a multi-attach conflict, a wrong `fsType`, a missing ConfigMap/Secret
+  reference, etc.) -- this rule names the symptom, not the specific cause.
+- **Added `"FailedMount"` to `incidents/health.py::_BAD_EVENT_REASONS`** --
+  without this, a Pod stuck FailedMount would never open an incident at all:
+  the container never starts, so no waiting/terminated container state ever
+  reflects the problem, and the Event is the *only* evidence this failure
+  mode produces.
+- **Also added `"FailedMount"` to `observer/service.py::_RELEVANT_EVENT_REASONS`**
+  -- a *second*, independent Event-reason allowlist, upstream of the one
+  above: it gates whether the real `EventWatcher` forwards the Event to
+  `IncidentManager.observe()` at all. Missing this was a real bug caught only
+  by live verification through the actual `ObserverService` -- the one-shot
+  `diagnose` CLI never fetches Events, so it could never have surfaced this;
+  without the fix, the Event was silently dropped before `_BAD_EVENT_REASONS`
+  was ever consulted, and no incident opened despite the rule being correct.
+- **Lab scenario** (`scenario-failed-mount`) uses a missing-ConfigMap volume
+  reference, not the PVC-with-unreachable-storage case that originally
+  motivated this rule -- confirmed live that this reliably, deterministically
+  produces a real `FailedMount` Event with no external storage infrastructure
+  needed, which this project's own kind-on-local-path lab doesn't have. See
+  FAILURE_LAB.md for the honest accounting of what this scenario does and
+  doesn't demonstrate.
+
 ### NodeConditionRule (`node.py`)
 
 Node-kind incidents, cluster-scoped (needs `rbac/clusterrole.yaml`).

@@ -53,7 +53,7 @@ logger = logging.getLogger(__name__)
 # lists from filling up with noise that no rule reads. Limited to exactly what
 # ReadinessProbeFailingRule/LivenessProbeFailingRule/PvcBindingFailureRule consume
 # today; extend this set only alongside a rule that actually reads the new reason.
-_RELEVANT_EVENT_REASONS = {"Unhealthy", "ProvisioningFailed", "FailedBinding"}
+_RELEVANT_EVENT_REASONS = {"Unhealthy", "ProvisioningFailed", "FailedBinding", "FailedMount"}
 
 
 class ObserverService:

@@ -19,10 +19,10 @@ from kubesentinel.metrics.registry import (
     incidents_detected_total,
     recovery_duration_seconds,
 )
-from kubesentinel.models.diagnosis import DiagnosisResult, ReasonCode
+from kubesentinel.models.diagnosis import DiagnosisResult, Hypothesis, ReasonCode
 from kubesentinel.models.evidence import Evidence
 from kubesentinel.models.incident import Incident, IncidentStatus, ResourceRef
-from kubesentinel.persistence.interface import IncidentRepository
+from kubesentinel.persistence.interface import IncidentRepository, OptimizationRepository
 
 logger = logging.getLogger(__name__)
 
@@ -42,9 +42,17 @@ RECOVERY_CONFIRMATION_THRESHOLD = 2
 
 
 class IncidentManager:
-    def __init__(self, repo: IncidentRepository, engine: DiagnosticEngine | None = None):
+    def __init__(
+        self,
+        repo: IncidentRepository,
+        engine: DiagnosticEngine | None = None,
+        optimization_repo: OptimizationRepository | None = None,
+    ):
         self._repo = repo
         self._engine = engine or DiagnosticEngine()
+        # Optional, additive -- every existing caller that only passes `repo`
+        # (and possibly `engine`) is unaffected; see _enrich_with_recommendations.
+        self._optimization_repo = optimization_repo
 
     @property
     def engine(self) -> DiagnosticEngine:
@@ -147,15 +155,39 @@ class IncidentManager:
         self._apply_diagnosis(incident, result)
         return incident
 
-    @staticmethod
-    def _apply_diagnosis(incident: Incident, result: DiagnosisResult) -> None:
+    def _apply_diagnosis(self, incident: Incident, result: DiagnosisResult) -> None:
         if result.top_hypothesis:
             incident.category = result.top_hypothesis.reason_code.value
             incident.severity = severity_for(result.top_hypothesis.reason_code)
             incident.status = IncidentStatus.DIAGNOSED
+            self._enrich_with_recommendations(incident, result.top_hypothesis)
         else:
             incident.category = "INCONCLUSIVE"
             incident.status = IncidentStatus.DIAGNOSING
+
+    def _enrich_with_recommendations(self, incident: Incident, hypothesis: Hypothesis) -> None:
+        """Cross-links the top hypothesis back to any already-persisted
+        resource-optimization recommendation for this same workload --
+        Milestone 1's own "stabilize the core" audit, item 3. Deliberately
+        narrow for its first case: only `OOM_KILLED`, the roadmap's own
+        named example ("this container has no memory limit configured, per
+        recommendation <id>"), and only `MEMORY`/`DATA_QUALITY` categories
+        -- the two that can plausibly explain an OOM kill. Never queries
+        anything when no `optimization_repo` was wired up (e.g. in tests
+        that only pass `repo`), the same "absence of the check, not a false
+        negative" shape `NetworkService`/`SchedulingService` already use
+        for their own optional `incident_repo`."""
+        if self._optimization_repo is None or hypothesis.reason_code != ReasonCode.OOM_KILLED:
+            return
+        workload_name = incident.resource.owner_name or incident.resource.name
+        recommendation_ids: list[str] = []
+        for category in ("MEMORY", "DATA_QUALITY"):
+            for recommendation in self._optimization_repo.list_recommendations(
+                namespace=incident.resource.namespace, workload_name=workload_name, category=category
+            ):
+                if recommendation.recommendation_id not in recommendation_ids:
+                    recommendation_ids.append(recommendation.recommendation_id)
+        hypothesis.related_recommendation_ids = recommendation_ids
 
     @staticmethod
     def _resolve(incident: Incident, now: datetime) -> None:

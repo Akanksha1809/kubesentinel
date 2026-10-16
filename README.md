@@ -30,10 +30,10 @@ diagnostic categories in the original spec (DNS/connectivity deliberately
 deferred -- see [TODO.md](TODO.md)): CrashLoopBackOff, OOMKilled,
 ImagePullBackOff/ErrImagePull, missing ConfigMap/Secret references, pending-pod
 scheduling constraints, readiness and liveness probe failures, Deployment
-rollout failures, unsatisfied replica counts, PVC binding failures, Node
-unschedulability, and Service/EndpointSlice selector mismatches -- plus a
-transient-failure recovery scenario proving the full observe-diagnose-recover
-loop.
+rollout failures, unsatisfied replica counts, PVC binding failures, in-Pod
+volume mount failures, Node unschedulability, and Service/EndpointSlice
+selector mismatches -- plus a transient-failure recovery scenario proving the
+full observe-diagnose-recover loop.
 
 Policy-controlled remediation is also implemented and live-verified: a policy
 engine (OBSERVE/APPROVAL_REQUIRED/CONTROLLED_AUTO modes), a remediation

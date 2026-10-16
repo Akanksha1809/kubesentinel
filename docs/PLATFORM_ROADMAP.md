@@ -23,49 +23,85 @@ contention, but already verified passing -- 442 total -- multiple times in
 the immediately preceding session), and produced `IMPLEMENTATION_STATUS.md`,
 `MASTER_ARCHITECTURE.md`, and this document. No code changed.
 
-## Milestone 1: Stabilize the existing core
+## Milestone 1: Stabilize the existing core -- DONE
 
 **Scope, adapted to what the audit actually found**: the spec frames this
 as "ensure the observer, troubleshooting engine, incident model, audit
 layer, and safe remediation workflow work reliably" -- the audit found all
 of that already true, tested, and live-verified (410 unit tests, 32
 integration/e2e tests covering exactly this, RBAC boundary enforcement,
-concurrent-remediation correctness, recovery verification). There is no
-large stabilization backlog to work through here; inventing one would
-contradict the spec's own instruction not to rewrite working components
+concurrent-remediation correctness, recovery verification). There was no
+large stabilization backlog to work through here; inventing one would have
+contradicted the spec's own instruction not to rewrite working components
 without a concrete reason.
 
-What the audit did surface as small, real, named gaps -- optional
-hardening, not blocking, and each genuinely small enough to fit inside
-this milestone without ballooning it:
+The audit's three named, optional gaps were picked up after Milestones
+2-6 shipped (per the user's own explicit request to "tackle those 3" before
+continuing to Milestone 7) -- all three closed, full test suite green
+throughout, no change to any existing passing test's assertion:
 
-1. **`UsageSummary.throttled` is scaffolded but never populated** (always
-   `None`) -- either implement the real
-   `container_cpu_cfs_throttled_seconds_total` Prometheus query and
-   populate it, or remove the field and let the near-limit `risks` text
-   stand on its own without implying a metric that isn't actually read.
-   Leaving a field that looks populated-when-available but is silently
-   always empty is the kind of gap this project's own ethos (`never
-   fabricate, be honest about absence`) argues for resolving one way or
-   the other, not leaving ambiguous.
-2. **No in-Pod mount-failure diagnostic rule** -- `pvc.py` covers binding
-   failures only; a Pod stuck on `FailedMount` after its PVC is already
-   Bound is currently invisible to this engine. Small, scoped addition if
-   picked up (one new rule, one new lab scenario).
+1. **`UsageSummary.throttled` is scaffolded but never populated** --
+   **implemented**, not removed: `analyzer.py::_check_throttled()` runs
+   the real `container_cpu_cfs_throttled_seconds_total` Prometheus query.
+   A confirmed result states the fact explicitly and vetoes a proposed
+   CPU decrease (the same "real pressure vetoes a decrease" rule already
+   applied to a recorded OOM kill); any query failure or metrics-server-
+   only evidence leaves it `None`, never coerced to `False`. Unit-tested
+   against a mocked Prometheus response -- Prometheus itself has never
+   been deployed in this project's own lab, so this stays at the same
+   verification tier as every other Prometheus-dependent path here.
+2. **No in-Pod mount-failure diagnostic rule** -- **implemented**:
+   `diagnostics/rules/mount.py::FailedMountRule`, reading the kubelet's
+   own `FailedMount` Warning Event, plus adding `"FailedMount"` to
+   `incidents/health.py::_BAD_EVENT_REASONS` (without which a Pod stuck
+   this way would never open an incident at all). Live-verified via a new
+   `scenario-failed-mount` lab scenario -- honestly, a missing-ConfigMap
+   volume reference, not the PVC-with-unreachable-storage case that
+   motivated the rule, since this lab's own kind-on-local-path setup has
+   no real external storage infrastructure to break deterministically;
+   confirmed live before writing the manifest that this still produces a
+   real `FailedMount` Event, which the rule itself is agnostic to the
+   cause of. This live pass through the *real* `ObserverService` (not
+   just the one-shot `diagnose` CLI, which never fetches Events at all --
+   a separate, pre-existing, structural limitation, confirmed and left
+   alone) caught a genuine second bug: `observer/service.py`'s own
+   `_RELEVANT_EVENT_REASONS` set -- a second, independent Event-reason
+   filter gating the `EventWatcher` itself, upstream of and separate from
+   `incidents/health.py::_BAD_EVENT_REASONS` -- also needed `"FailedMount"`
+   added, or the real watcher silently dropped the Event before
+   `IncidentManager.observe()` ever saw it. Fixed, regression-tested
+   (`test_observer_service.py::test_failed_mount_event_is_forwarded`), and
+   confirmed live afterward: the real Pod incident now opens and is
+   diagnosed `FAILED_MOUNT` (HIGH confidence) end to end.
 3. **No cross-link from a resource-optimization finding back into an open
-   incident's own hypothesis list** -- today the link is one-directional
-   (`ACTIVE_INCIDENT` on a recommendation). Whether this is worth building
-   (e.g. an OOM incident's hypothesis explicitly citing "this container has
-   no memory limit configured, per recommendation `<id>`") is a genuine
-   product judgment call, not an obvious gap -- noted here for a decision,
-   not pre-decided.
-
-**Acceptance criteria**: full test suite still green after any of the
-above; no change to existing passing tests' assertions (a hardening pass
-that breaks an existing guarantee is not hardening). If none of the three
-items above are picked up, this milestone closes immediately with "audit
-confirmed already stable" as its own result -- a legitimate, honest
-outcome, not a skipped milestone.
+   incident's own hypothesis list** -- **implemented**, deliberately
+   narrow for its first case: `Hypothesis.related_recommendation_ids`,
+   populated by `IncidentManager._enrich_with_recommendations` only for
+   `OOM_KILLED` (the roadmap's own named example) against open `MEMORY`/
+   `DATA_QUALITY` recommendations for the same workload. `IncidentManager`
+   gained an optional `optimization_repo` parameter (additive; every
+   existing caller passing only `repo` is unaffected) -- the diagnostic
+   engine itself stays a pure function of evidence and never queries a
+   repository, matching the project's own "deterministic first" rule.
+   Unit-tested against real `IncidentManager`/`Hypothesis`/`Incident`
+   objects and a real `SQLiteOptimizationRepository` (6 tests). A full
+   live demonstration against the lab's own `oom-demo` scenario was
+   attempted but is blocked by two independent, pre-existing environmental
+   facts, neither introduced by nor fixable within this change: (a) this
+   kind cluster's container runtime reports plain `Error` rather than
+   `OOMKilled` for this workload's kills, so `OOMKilledRule` only ever
+   produces its MEDIUM-confidence *inferred* hypothesis here, which loses
+   the per-incident ranking to the HIGH-confidence `CrashLoopBackOffRule`
+   hypothesis on the same Pod -- a correct, already-documented behavior of
+   `OOMKilledRule` itself (see its own docstring), unrelated to this
+   cross-link; and (b) a real `kubesentinel optimize` pass against the lab
+   produced zero recommendations for `oom-demo` at all, because a
+   perpetually crash-looping Pod never holds a long enough live window for
+   metrics-server to return a usage sample. Given both, the unit-test tier
+   is the correct and sufficient verification here, for the same reason
+   given for item 1 above: there is no live path to exercise that doesn't
+   itself depend on fixing unrelated, already-correct, already-documented
+   behavior elsewhere in the system.
 
 ## Milestone 2: Resource optimization -- DONE
 

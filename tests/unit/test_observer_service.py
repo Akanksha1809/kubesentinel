@@ -110,6 +110,21 @@ def test_pvc_binding_failure_event_is_forwarded():
     manager.observe.assert_called_once()
 
 
+def test_failed_mount_event_is_forwarded():
+    # Regression test for a real bug found live: _BAD_EVENT_REASONS (health.py)
+    # and _RELEVANT_EVENT_REASONS (this module) are two separate filter lists --
+    # adding "FailedMount" to the former without the latter meant the real
+    # EventWatcher silently dropped every live FailedMount Event before it ever
+    # reached IncidentManager.observe(), so FailedMountRule could never fire
+    # outside of hand-built unit-test evidence.
+    service, manager = _service_with_mock_manager()
+    event = make_event(
+        reason="FailedMount", message="MountVolume.SetUp failed", involved_object_kind="Pod"
+    )
+    service._handle_event("MODIFIED", event)
+    manager.observe.assert_called_once()
+
+
 def test_event_for_already_deleted_pvc_does_not_open_a_phantom_incident():
     # Regression test for a bug found live: Events outlive the resource they
     # describe (separate GC/TTL), so a ProvisioningFailed Event for an

@@ -7,9 +7,9 @@
 ./scripts/test.sh --all    # same, plus integration/e2e against a live kind cluster
 ```
 
-As of Milestone 6 (security & configuration auditor): **715 unit tests** (no cluster, no Ollama needed) plus **68
+As of Milestone 1's own audit closure (after Milestones 2-6 shipped): **731 unit tests** (no cluster, no Ollama needed) plus **69
 integration/e2e tests** (`--all`, against the real `kind-kubesentinel` cluster, one
-of them additionally gated on a local Ollama server) -- 783 total, all passing,
+of them additionally gated on a local Ollama server) -- 800 total, all passing,
 `ruff check` clean, `mypy src/kubesentinel` clean. Every
 integration/e2e test skips (not fails) if its precondition (the cluster, the lab
 namespace, a specific scenario/fixture, Ollama) isn't present -- confirmed by
@@ -31,7 +31,10 @@ tests added to `test_optimization_service.py`) and 3 integration tests
 (plus 3 more RBAC boundary tests, covering its one new Role); the
 security & configuration auditor's own tests (Milestone 6 of the
 platform spec) added a further 104 unit tests and 6 integration tests
-(plus 5 more RBAC boundary tests, covering its two new Roles); see below.
+(plus 5 more RBAC boundary tests, covering its two new Roles); closing
+Milestone 1's own three-item audit backlog (CPU throttling, in-Pod mount
+failures, the optimization-to-incident cross-link) added a further 15
+unit tests and 2 integration tests; see below.
 
 This was verified in-session, not assumed -- see the commands actually run, below.
 
@@ -289,6 +292,41 @@ This was verified in-session, not assumed -- see the commands actually run, belo
   (service unavailable), and namespace/rule_id filtering on the findings
   list.
 
+## Milestone 1 audit closure unit test coverage
+
+Three named, optional gaps from the original Milestone 0 audit, picked up
+after Milestones 2-6 shipped:
+
+- **`test_analyzer.py`'s new `TestCpuThrottling` class** (5 tests) --
+  confirmed-`True`, confirmed-`False`, a query failure leaving `throttled`
+  `None` (never coerced to `False`), the `CPU_THROTTLED_CONFIRMED` flag/
+  reasoning on a near-limit finding, and that confirmed throttling vetoes
+  a proposed CPU decrease the same way a recorded OOM kill already vetoes
+  one for memory. All five via the same mocked-`urllib.request.urlopen`
+  technique the existing Prometheus tests already use, extended from two
+  queries (cpu, memory) to three (cpu, memory, throttle).
+- **`test_mount_rules.py`** (4 tests) -- `FailedMountRule` fires on a
+  `FailedMount` Event and not on an unrelated one, that the Event is a
+  real `has_failure_signal` (without which no incident would ever open
+  for this failure mode), and that `supporting_evidence` references the
+  real Event's own id.
+- **`test_observer_service.py::test_failed_mount_event_is_forwarded`**
+  (1 test) -- regression test for a real bug caught by live verification,
+  not by any unit test: `observer/service.py::_RELEVANT_EVENT_REASONS` is a
+  second, independent Event-reason filter, upstream of and separate from
+  `incidents/health.py::_BAD_EVENT_REASONS`, that also needed `"FailedMount"`
+  added -- otherwise the real `EventWatcher` silently dropped the Event
+  before `IncidentManager.observe()` ever ran, so `FailedMountRule` could
+  never fire against a real cluster despite being itself correct.
+- **`test_incident_manager.py`'s new `TestRecommendationCrossLink` class**
+  (6 tests) -- an `OOM_KILLED` hypothesis links to a `MEMORY` recommendation
+  and separately to a `DATA_QUALITY` one, no match leaves the list empty,
+  a different reason code (`CRASH_LOOP_BACKOFF`) is never enriched even
+  with a matching recommendation present, no `optimization_repo` wired up
+  is a safe no-op (every existing caller passing only `repo` must behave
+  exactly as before), and a recommendation for a *different* workload is
+  correctly not linked.
+
 ## Why `kubernetes.client` model objects, not hand-rolled dicts, in tests
 
 `tests/unit/factories.py` builds `V1Pod`/`V1ContainerStatus`/etc. using the real
@@ -422,6 +460,16 @@ met.
   real bug this milestone caught and fixed, see
   `docs/SECURITY_AUDITING.md`); plus the same HTTP-transport-level
   read-only check every other engine's own live tests already establish.
+- **`test_mount_rule_live.py`** (2 tests, Milestone 1 audit closure) --
+  the `failed-mount-demo` scenario's real Pod and real `FailedMount` Event
+  (never hand-built) correctly diagnose as `FAILED_MOUNT` at HIGH
+  confidence through the real `DiagnosticEngine`, and the real Event is
+  confirmed to be a `has_failure_signal` on its own. This exact live pass,
+  run through the real `ObserverService` end to end (a throwaway API
+  server against the lab namespace, not just this file's own hand-built-
+  evidence checks), is what caught the real `_RELEVANT_EVENT_REASONS` bug
+  described above -- the real Pod-level incident did not open at all until
+  that second filter list was fixed.
 - **`test_optimization_inventory_live.py`** / **`test_optimization_live_scenarios.py`**
   (5 tests, Milestones 14/18) -- `build_workload_inventory()` against the
   real lab namespace matches known healthy/unhealthy workloads; the

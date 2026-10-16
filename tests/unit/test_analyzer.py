@@ -208,6 +208,113 @@ class TestMemoryOomHistory:
         assert memory_recs[0].usage.evidence_quality == EvidenceQuality.INSUFFICIENT
 
 
+class TestCpuThrottling:
+    """Milestone 1's own audit flagged `UsageSummary.throttled` as
+    scaffolded but never populated -- these pin the real Prometheus
+    `container_cpu_cfs_throttled_seconds_total` query now wired up in
+    `_check_throttled()`/`_try_prometheus_usage()`."""
+
+    def _prom_body(self, cpu_values, memory_values, throttled_values, start_ts=1700000000, step=60):
+        def _vals(values):
+            return [[start_ts + step * i, str(v)] for i, v in enumerate(values)]
+
+        return {
+            "cpu": {"status": "success", "data": {"result": [{"metric": {}, "values": _vals(cpu_values)}]}},
+            "mem": {"status": "success", "data": {"result": [{"metric": {}, "values": _vals(memory_values)}]}},
+            "throttle": {"status": "success", "data": {"result": [{"metric": {}, "values": _vals(throttled_values)}]}},
+        }
+
+    def _fake_urlopen(self, bodies):
+        call_count = {"n": 0}
+        order = ["cpu", "mem", "throttle"]
+
+        def fake_urlopen(url, timeout=None):
+            call_count["n"] += 1
+            key = order[min(call_count["n"] - 1, len(order) - 1)]
+            return _FakeHttpResponse(bodies[key])
+
+        return fake_urlopen
+
+    def test_confirmed_throttling_is_reported_true(self):
+        workload = _workload(cpu_request=100, cpu_limit=110, memory_request=1024**3)
+        settings = _settings(optimization_prometheus_url="http://localhost:9090")
+        bodies = self._prom_body([100, 105], [1024, 1024], [0, 2.5])  # nonzero throttled seconds
+
+        with patch("urllib.request.urlopen", side_effect=self._fake_urlopen(bodies)):
+            analyze_workload(workload, raw_samples=[], sample_store=InMemorySampleStore(), settings=settings, now=NOW)
+
+        assert workload.containers[0].usage.throttled is True
+
+    def test_no_throttling_confirms_false(self):
+        workload = _workload(cpu_request=1000, memory_request=1024**3)
+        settings = _settings(optimization_prometheus_url="http://localhost:9090")
+        bodies = self._prom_body([10, 10], [1024, 1024], [0, 0])
+
+        with patch("urllib.request.urlopen", side_effect=self._fake_urlopen(bodies)):
+            analyze_workload(workload, raw_samples=[], sample_store=InMemorySampleStore(), settings=settings, now=NOW)
+
+        assert workload.containers[0].usage.throttled is False
+
+    def test_throttling_query_failure_leaves_throttled_unknown_not_false(self):
+        workload = _workload(cpu_request=1000, memory_request=1024**3)
+        settings = _settings(optimization_prometheus_url="http://localhost:9090")
+        bodies = self._prom_body([10, 10], [1024, 1024], [0, 0])
+        order = ["cpu", "mem"]
+
+        def fake_urlopen(url, timeout=None):
+            if not hasattr(fake_urlopen, "n"):
+                fake_urlopen.n = 0
+            fake_urlopen.n += 1
+            if fake_urlopen.n <= 2:
+                return _FakeHttpResponse(bodies[order[fake_urlopen.n - 1]])
+            raise urllib.error.URLError("connection refused")
+
+        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            analyze_workload(workload, raw_samples=[], sample_store=InMemorySampleStore(), settings=settings, now=NOW)
+
+        # Never coerced to False just because the query itself failed --
+        # "unknown" and "confirmed not throttled" must stay distinguishable.
+        assert workload.containers[0].usage.throttled is None
+        assert workload.containers[0].usage.evidence_quality == EvidenceQuality.HISTORICAL
+
+    def test_confirmed_throttling_flags_and_explains_near_limit_case(self):
+        workload = _workload(cpu_request=100, cpu_limit=110, memory_request=1024**3)
+        settings = _settings(optimization_prometheus_url="http://localhost:9090")
+        bodies = self._prom_body([100, 105], [1024, 1024], [0, 3.0])
+
+        with patch("urllib.request.urlopen", side_effect=self._fake_urlopen(bodies)):
+            recommendations = analyze_workload(
+                workload, raw_samples=[], sample_store=InMemorySampleStore(), settings=settings, now=NOW
+            )
+
+        cpu_recs = [r for r in recommendations if r.category == RecommendationCategory.CPU]
+        assert len(cpu_recs) == 1
+        assert "CPU_THROTTLED_CONFIRMED" in cpu_recs[0].safety_flags
+        assert "CPU_PRESSURE" in cpu_recs[0].safety_flags
+
+    def test_confirmed_throttling_vetoes_a_proposed_decrease(self):
+        # Low typical usage would otherwise look oversized -- confirmed
+        # throttling is real evidence the request isn't actually excessive,
+        # the same "real pressure vetoes a decrease" discipline the memory
+        # function already applies to a recorded OOM kill. cpu_limit=11 is
+        # set so the recommendation still exists (via CPU_PRESSURE, near the
+        # limit on peak usage) even after the oversized veto removes
+        # CPU_OVERSIZED -- otherwise there would be nothing left to assert on.
+        workload = _workload(cpu_request=1000, cpu_limit=11, memory_request=1024**3)
+        settings = _settings(optimization_prometheus_url="http://localhost:9090")
+        bodies = self._prom_body([10, 10, 10, 10, 10], [1024] * 5, [0, 0, 0, 0, 5.0])
+
+        with patch("urllib.request.urlopen", side_effect=self._fake_urlopen(bodies)):
+            recommendations = analyze_workload(
+                workload, raw_samples=[], sample_store=InMemorySampleStore(), settings=settings, now=NOW
+            )
+
+        cpu_recs = [r for r in recommendations if r.category == RecommendationCategory.CPU]
+        assert len(cpu_recs) == 1
+        assert "CPU_OVERSIZED" not in cpu_recs[0].safety_flags
+        assert cpu_recs[0].proposed_requests is None
+
+
 class TestDataQuality:
     def test_missing_requests_and_limits_reported_not_silently_dropped(self):
         workload = _workload()  # no requests/limits set at all

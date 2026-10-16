@@ -31,6 +31,7 @@ class ReasonCode(str, Enum):
     SERVICE_SELECTOR_MISMATCH = "SERVICE_SELECTOR_MISMATCH"
     DNS_RESOLUTION_FAILURE = "DNS_RESOLUTION_FAILURE"
     PVC_BINDING_FAILURE = "PVC_BINDING_FAILURE"
+    FAILED_MOUNT = "FAILED_MOUNT"
     NODE_UNSCHEDULABLE = "NODE_UNSCHEDULABLE"
     MISSING_CONFIG_REFERENCE = "MISSING_CONFIG_REFERENCE"
     INCONCLUSIVE = "INCONCLUSIVE"
@@ -49,6 +50,20 @@ class Hypothesis(BaseModel):
     missing_evidence: list[str] = Field(default_factory=list)
     recommended_next_steps: list[str] = Field(default_factory=list)
     auto_remediation_permitted: bool = False
+    # By-ID link to a resource-optimization recommendation for this same
+    # workload, when the diagnostic engine's own hypothesis (currently only
+    # OOM_KILLED) and an already-persisted optimization finding (MEMORY/
+    # DATA_QUALITY) describe the same underlying resource-configuration
+    # problem -- e.g. "this container has no memory limit configured, per
+    # recommendation <id>." Populated by `IncidentManager`, which has
+    # access to both repositories; the diagnostic engine itself stays a
+    # pure function of evidence and never queries a repository (see
+    # Milestone 1's own "stabilize the core" audit, item 3, for why this
+    # was deliberately deferred until now -- a genuine product decision,
+    # not an obvious gap). Never a live object reference, same discipline
+    # `ResourceRecommendation.related_incident_ids` already established in
+    # the opposite direction.
+    related_recommendation_ids: list[str] = Field(default_factory=list)
 
 
 class DiagnosisResult(BaseModel):

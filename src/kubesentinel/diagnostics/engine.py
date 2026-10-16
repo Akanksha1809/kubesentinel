@@ -9,6 +9,7 @@ from kubesentinel.diagnostics.rules.crash_loop import CrashLoopBackOffRule
 from kubesentinel.diagnostics.rules.deployment import RolloutFailedRule, UnsatisfiedReplicasRule
 from kubesentinel.diagnostics.rules.image_pull import ImagePullRule
 from kubesentinel.diagnostics.rules.missing_config import MissingConfigReferenceRule
+from kubesentinel.diagnostics.rules.mount import FailedMountRule
 from kubesentinel.diagnostics.rules.node import NodeConditionRule
 from kubesentinel.diagnostics.rules.oomkilled import OOMKilledRule
 from kubesentinel.diagnostics.rules.probes import LivenessProbeFailingRule, ReadinessProbeFailingRule
@@ -40,6 +41,7 @@ DEFAULT_RULES: list[DiagnosticRule] = [
     RolloutFailedRule(),
     UnsatisfiedReplicasRule(),
     PvcBindingFailureRule(),
+    FailedMountRule(),
     NodeConditionRule(),
     ServiceSelectorMismatchRule(),
 ]

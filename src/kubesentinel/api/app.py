@@ -57,14 +57,19 @@ async def lifespan(app: FastAPI):
     configure_logging(settings.log_level)
     state.settings = settings
     state.repo = SQLiteIncidentRepository(settings.db_path)
-    state.manager = IncidentManager(state.repo)
+    # Constructed before IncidentManager specifically so it can be passed
+    # in -- lets a diagnosed OOM_KILLED incident cross-link back to an
+    # already-persisted MEMORY/DATA_QUALITY optimization recommendation
+    # for the same workload (Milestone 1's own "stabilize the core" audit,
+    # item 3); see IncidentManager._enrich_with_recommendations.
+    state.optimization_repo = SQLiteOptimizationRepository(settings.db_path)
+    state.manager = IncidentManager(state.repo, optimization_repo=state.optimization_repo)
     state.manager.reconcile_metrics()
     state.ai_client = (
         OllamaClient(settings.ai_base_url, settings.ai_model, settings.ai_timeout_seconds)
         if settings.ai_enabled
         else None
     )
-    state.optimization_repo = SQLiteOptimizationRepository(settings.db_path)
     state.scheduling_repo = SQLiteSchedulingRepository(settings.db_path)
     state.network_repo = SQLiteNetworkRepository(settings.db_path)
     state.security_repo = SQLiteSecurityRepository(settings.db_path)
