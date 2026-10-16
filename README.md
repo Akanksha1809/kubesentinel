@@ -239,7 +239,10 @@ docs/            Architecture, diagnostic rules, RBAC/threat model, failure lab,
 
 ## Documentation
 
-- [ARCHITECTURE.md](docs/ARCHITECTURE.md) -- component design and data flow
+- [MASTER_ARCHITECTURE.md](docs/MASTER_ARCHITECTURE.md) -- the platform-wide shape every analysis engine follows, built or planned
+- [PLATFORM_ROADMAP.md](docs/PLATFORM_ROADMAP.md) -- milestone plan for the scheduling/network/capacity/security/operator capabilities ahead
+- [IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md) -- evidence-backed, capability-by-capability status audit
+- [ARCHITECTURE.md](docs/ARCHITECTURE.md) -- component design and data flow for the two capabilities already built
 - [RESOURCE_OPTIMIZATION_DESIGN.md](docs/RESOURCE_OPTIMIZATION_DESIGN.md) -- the resource optimization engine's own design, algorithms, and milestone plan
 - [DIAGNOSTIC_RULES.md](docs/DIAGNOSTIC_RULES.md) -- every rule, its evidence, and its confidence logic
 - [FAILURE_LAB.md](docs/FAILURE_LAB.md) -- each lab scenario: how it fails, what's expected, how to clean up
