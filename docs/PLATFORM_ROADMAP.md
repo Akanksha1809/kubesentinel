@@ -311,24 +311,39 @@ first version took whichever the repository listed first rather than the
 one whose diagnosis actually matched -- fixed to keep polling for an
 exact match until the deadline, reconfirmed live afterward.
 
-## Milestone 8: Kubernetes operator
+## Milestone 8: Kubernetes operator -- DONE
 
-**Scope**: one or more CRDs (`KubeSentinelPolicy` and/or
-`KubeSentinelRemediationPolicy`, per the spec's own suggested names, scoped
-down if their value isn't concrete enough to justify both) plus a thin
-reconciliation controller. Per the spec's own explicit instruction, and
-`MASTER_ARCHITECTURE.md`'s own policy-boundary section: the controller
-calls into the *existing* `PolicyEngine`/service-layer interfaces, never
-reimplements their logic a second time in Go or a second Python process
-duplicating FastAPI's own business logic. Defaults to observation and
-recommendation; any actual remediation triggered through the operator
-still goes through the same approval mechanism everything else does.
+Scoped down to one CRD, `KubeSentinelRemediationPolicy` (see
+`docs/OPERATOR_DESIGN.md` §1 for why a second, more generic
+`KubeSentinelPolicy` had no concrete content left to carry). The
+controller never reimplements `PolicyEngine`'s decision logic, and -- the
+load-bearing constraint, stated explicitly in the design doc before any
+code -- never decides which `ActionType` to propose for an incident
+either; that remains entirely human/CLI/API-driven, exactly as before.
+It only re-evaluates an already-proposed, still-`PENDING_APPROVAL` action
+against the policy a CR currently declares, calling the exact same
+`PolicyEngine.evaluate()`/`RemediationService.approve()`/`.execute()`
+every other caller already uses. Defaults to observation (no CR for a
+namespace means no reconciliation there at all); any actual remediation
+still goes through the same `approve()` call a human would make. No
+`kopf`/`kubebuilder` dependency -- reuses this project's own proven
+list-then-watch loop (`observer/watchers.py`) via a new, seventh,
+dict-returning watcher, confirmed live against a real CRD before writing
+either the mode or any code depending on it.
 
-**Sequenced last among the analysis-engine milestones on purpose**: the
-operator exposes policy over capabilities that need to already exist and
-be stable to be worth exposing this way.
-
-**Design-first**: `docs/OPERATOR_DESIGN.md` before code.
+Live-verified against the real cluster: RBAC confirmed against the real
+constrained ServiceAccount (not admin), a real `crashloop-demo` incident
+correctly left `PENDING_APPROVAL` under `CONTROLLED_AUTO` (its diagnosing
+rule forbids auto-remediation, by design, like every rule in this
+codebase today), and -- after temporarily marking a copy eligible and
+clearing the single-replica safety check -- a genuine auto-approved,
+auto-executed real Deployment restart, with `approved_by:
+kubesentinel-operator` in the audit trail and an honest
+`VERIFICATION_INCONCLUSIVE` outcome (correctly not claiming success for a
+restart that never fixes a deterministic crash). This same live run
+caught and fixed a real bug: the controller's own re-evaluation of a
+pending action initially included that action in its own recent-actions
+cooldown check, self-denying on a 0-second-old cooldown against itself.
 
 ## Milestone 9: Final integration and portfolio demonstration
 

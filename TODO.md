@@ -2584,3 +2584,181 @@ the whole-battery false-positive computation against real model objects),
 Partial -> Implemented), `docs/TESTING.md` (updated counts, new Milestone
 7 test-coverage section), and `README.md` (a new paragraph alongside the
 other five engines, plus the documentation index entry).
+
+## Milestone 27: Kubernetes operator -- DONE
+
+Milestone 8 of `docs/PLATFORM_ROADMAP.md`, per the user's own standing
+instruction ("Continue straight into Milestone 8") after Milestone 26's
+evaluation harness shipped. Design-first:
+`docs/OPERATOR_DESIGN.md` before any code -- this milestone's own
+genuine architectural question, worked through before writing a line:
+whether to grant the operator any new decision-making authority at all.
+Reading `remediation/service.py::RemediationService.propose()` and
+`policy/engine.py`'s own comments confirmed this project has never built
+reusable logic for "which `ActionType` fixes this diagnosis" -- a human
+always supplies it explicitly, and every rule through this milestone
+still sets `hypothesis.auto_remediation_permitted=False` on every
+hypothesis it produces. Building that mapping now, inside "a thin
+reconciliation controller," would have been real, new, nontrivial
+decision logic -- exactly the overreach `MASTER_ARCHITECTURE.md`'s
+policy-boundary section warns against for any new apply path. Scoped the
+controller down instead to something narrower and fully supported by
+code that already exists: re-evaluating an already-proposed, still-
+`PENDING_APPROVAL` action against a CR's declared policy, auto-approving
+only what the existing `PolicyEngine` already allows.
+
+**One CRD, not two**: `KubeSentinelPolicy` had no concrete content left
+to carry once `KubeSentinelRemediationPolicy` existed -- the only policy
+*gate* this project has ever built is `PolicyEngine`, and every other
+capability's findings are explicitly not policy-gated at all
+(`MASTER_ARCHITECTURE.md`'s own "Policy boundary" section). Scoped down
+to one, per the roadmap's own explicit permission to do so.
+
+**No `kopf`/`kubebuilder` dependency**: confirmed live, before writing
+any watcher code, that `CustomObjectsApi` already returns a plain `dict`
+from both its list and watch calls (no typed model exists for any CRD) --
+the exact shape `observer/watchers.py::EndpointSliceWatcher` already
+handles for an unrelated reason. Added a third mode to the shared
+`_ListWatchLoop` (`dict_object_watch`, alongside the existing
+`raw_object_watch` for EndpointSlice's own typed-model bug) and a
+seventh, thin `CustomResourceWatcher` -- reusing this project's own
+proven list-then-watch/backoff/resync loop wholesale rather than bridging
+`kopf`'s asyncio runtime into this project's synchronous, threading-based
+one for exactly one watcher.
+
+**What was added**:
+
+- `crds/kubesentinelremediationpolicy.yaml` -- the CRD, namespaced,
+  group `kubesentinel.io`, version `v1alpha1`, with a `status`
+  subresource. Every `spec` field mirrors an existing `Settings` field
+  1:1 (`mode`/`policy_mode`, `cooldownSeconds`/`action_cooldown_seconds`,
+  etc.) -- a namespace-scoped, declarative way to set values that were
+  previously only global and environment-variable-configured, not a new
+  policy concept.
+- `models/operator.py` -- `RemediationPolicySpec`/`RemediationPolicyRef`,
+  typed parsing for the CR's own dict shape (defensive even though the
+  CRD's own OpenAPI schema already rejects most malformed specs at
+  admission time).
+- `observer/watchers.py` -- `dict_object_watch` mode on `_ListWatchLoop`
+  and the new `CustomResourceWatcher` class, generic over any future
+  namespaced CRD's `group`/`version`/`plural`, not hardcoded to this
+  one.
+- `operator/controller.py::RemediationPolicyController.reconcile()` --
+  for a given CR: build a scoped `Settings` copy from its spec (never a
+  cross-process config push to an already-running API server -- the
+  operator is its own independent reader of the same cluster and
+  database, exactly like a CLI invocation); list this namespace's
+  incidents with a `PENDING_APPROVAL` action; re-read each target
+  Deployment's current `spec.replicas` live (never trust a stale value);
+  re-build a `PolicyRequest` from the action's and incident's own
+  already-recorded fields and call `PolicyEngine.evaluate()` fresh; if
+  now `ALLOWED`, call `RemediationService.approve()` then `.execute()` --
+  the identical two calls a human makes, just performed automatically,
+  auditable as `approved_by="kubesentinel-operator"`; patch the CR's own
+  `.status` (never policy-gated -- it's bookkeeping on the operator's own
+  object, not a remediation action).
+- `operator/service.py::OperatorService` -- wires `CustomResourceWatcher`
+  to the controller, the operator's own equivalent of
+  `observer/service.py::ObserverService`.
+- `cli/main.py` -- `kubesentinel operator-run`, a new blocking command
+  (like `uvicorn` blocks for the API server), not a second executable --
+  keeps "the one CLI" convention.
+- `rbac/operator-role.yaml`/`operator-rolebinding.yaml` -- namespaced,
+  additive to the existing Roles bound to the same `kubesentinel`
+  ServiceAccount, granting only what's new (read/watch the CRD, patch its
+  own status subresource). The actual remediation mutation reuses
+  `remediation-role.yaml` unchanged -- the operator performs the exact
+  same cluster-mutating calls a human-approved action already does, so
+  it needs exactly the same permissions, not a new or broader set.
+
+**A real bug caught by this milestone's own unit tests, before it ever
+reached the live cluster**: re-evaluating an already-persisted pending
+action built its `recent_actions` list via the same
+`list_actions_since()` call `propose()` uses -- but unlike `propose()`
+(which builds that list *before* the new action is ever saved), the
+action under re-evaluation is already sitting in the repository, so it
+appeared in its own `recent_actions` and self-denied on a 0-second-old
+cooldown against itself. `propose()` was never wrong; this was a new
+failure mode specific to re-evaluating something already persisted.
+Fixed in `_maybe_auto_approve` by excluding the action's own `action_id`
+from `recent_actions` before building the `PolicyRequest`, with an inline
+comment explaining why `propose()` itself never needed this.
+
+**Live-verified against the real cluster**: RBAC confirmed against the
+real constrained `kubesentinel` ServiceAccount (not admin) for both the
+CRD and its status subresource (`kubectl auth can-i ... --as=...`) --
+including a brief false alarm from this agent's own `kubectl auth can-i`
+invocation syntax (combining the CRD's API-group suffix with `/status`
+doesn't parse the way `--subresource=status` does), caught and corrected
+before being reported as a gap. A real `crashloop-demo` incident (the
+Deployment-level `UNSATISFIED_REPLICAS` one, not the Pod-level
+`CRASH_LOOP_BACKOFF` sibling -- `RESTART_DEPLOYMENT` only targets
+Deployments) had a real action proposed and left `PENDING_APPROVAL`
+under `APPROVAL_REQUIRED`. Applying a real `KubeSentinelRemediationPolicy`
+CR with `mode: CONTROLLED_AUTO` and running the real `operator-run`
+process against it confirmed the action was correctly left alone (its
+diagnosing rule, `unsatisfied_replicas`, forbids auto-remediation like
+every rule in this codebase today) -- the CR's own `.status` showed
+`pendingActionsSeen: 1, actionsAutoApproved: 0`. Since no rule in this
+project's existing diagnostic engine ever sets
+`auto_remediation_permitted=True` (a deliberate, conservative, already-
+shipped decision, not a gap -- see `policy/engine.py`'s own comment),
+demonstrating genuine auto-approval end to end needed manually marking a
+copy of the same incident's hypothesis eligible and temporarily scaling
+the target Deployment to 2 replicas (restored to 1 immediately
+afterward) to clear the single-replica safety check -- disclosed here
+plainly as a synthetic override of this project's real rule set, not
+something to be mistaken for a rule this project's diagnostics actually
+produce today. With that override in place, the same real operator
+process correctly auto-approved and executed a real Deployment restart:
+`kubectl.kubernetes.io/restartedAt` confirmed updated on the real
+Deployment's pod template, `approved_by: kubesentinel-operator` recorded
+in the incident's own audit trail, and an honest
+`VERIFICATION_INCONCLUSIVE` final status -- a restart never fixes this
+scenario's deterministic crash, so a false "recovered" was never
+reported. The lab was restored to its original state (1 replica, no
+leftover CR) immediately after; the CRD and RBAC remain installed as
+the real, permanent product artifacts this milestone ships.
+
+**Tests**: 19 new unit tests across 3 files --
+`test_operator_models.py` (6), `test_operator_controller.py` (9, where
+the cooldown-self-denial bug above was actually caught),
+`test_custom_resource_watcher.py` (4). `./scripts/test.sh`: ruff clean,
+mypy clean (108 source files), **774 unit tests passed** (755 + 19).
+
+**Documentation**: `docs/OPERATOR_DESIGN.md` (new design doc),
+`docs/PLATFORM_ROADMAP.md` (Milestone 8 marked DONE),
+`docs/IMPLEMENTATION_STATUS.md` (Kubernetes-native Operator and
+Reconciliation Controller: Missing -> Implemented), `docs/TESTING.md`
+(updated counts, new Milestone 8 test-coverage section), and `README.md`
+(a new paragraph alongside the evaluation harness's own, plus the
+documentation index entry).
+
+A full `./scripts/test.sh --all` run afterward showed all 69
+integration/e2e tests SKIPPED rather than run -- investigated rather than
+accepted at face value: the cluster was completely unreachable
+(`HTTPSConnectionPool... Read timed out`) for the entire fixture-setup
+phase, the same shared-VM contention pattern documented repeatedly
+throughout this project's history, this time manifesting as a clean skip
+(by the `live_cluster_clients` fixture's own design) rather than a hard
+failure. Re-running `tests/integration tests/e2e` directly once the
+cluster recovered showed the same familiar 29 failed/4 errored
+contention-class set; re-running those files in isolation again brought
+it down to 3 genuine failures, each independently root-caused rather
+than dismissed: `test_hpa_capacity_pressure_scenario_is_flagged_at_max`
+(the same metrics-server `CrashLoopBackOff` root cause already recorded
+in Milestone 26's own entry), `test_observer_still_detects_after_pod_deleted_and_recreated_with_same_name`
+(skipped, not failed, on its own next retry -- a timing-sensitive live
+precondition not met at that exact instant), and
+`test_inventory_matches_known_lab_workloads` (expected `remediation-test`
+to show 2 ready replicas, found 3, with only 2 real Pods actually
+running -- confirmed live via `kubectl get deployment remediation-test -o
+wide` showing a stale `3/2` status, and `kubectl get pods -n kube-system`
+showing `kube-controller-manager` itself in `CrashLoopBackOff` at that
+exact moment: the one controller that reconciles a Deployment's own
+`.status` subresource wasn't reliably running, leaving stale bookkeeping
+behind -- not a Milestone 8 regression, and not a product bug at all).
+None of the three touch anything Milestone 8 added.
+
+This completes every milestone in `docs/PLATFORM_ROADMAP.md` except
+Milestone 9 (final integration and portfolio demonstration).

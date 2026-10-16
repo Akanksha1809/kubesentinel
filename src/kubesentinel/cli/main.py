@@ -17,6 +17,7 @@ command also has; only the machine-readable path needed to change.
 from __future__ import annotations
 
 import json as json_module
+import time
 
 import typer
 from rich.console import Console
@@ -30,6 +31,8 @@ from kubesentinel.evaluation.harness import EvaluationHarness
 from kubesentinel.evaluation.scenarios import SCENARIOS
 from kubesentinel.logging_config import configure_logging
 from kubesentinel.models.action import ActionType
+from kubesentinel.operator.controller import RemediationPolicyController
+from kubesentinel.operator.service import OperatorService
 from kubesentinel.observer.client import build_clients
 from kubesentinel.observer.inspector import pod_evidence
 from kubesentinel.optimization.service import (
@@ -947,6 +950,38 @@ def show_evaluation_run(
         if run.false_positive_rate is not None
         else "False positives: 0/0 (no open findings)"
     )
+
+
+@app.command("operator-run")
+def operator_run() -> None:
+    """Runs the Kubernetes operator: watches KubeSentinelRemediationPolicy
+    CRs (see crds/kubesentinelremediationpolicy.yaml) and reconciles each
+    one against the existing PolicyEngine/RemediationService -- never
+    deciding which ActionType to propose, only auto-approving and
+    executing an already-proposed, still-PENDING_APPROVAL action once the
+    CR's own declared policy allows it. See docs/OPERATOR_DESIGN.md.
+    Blocks until interrupted (Ctrl-C) or terminated, the same as the API
+    server does."""
+    settings = get_settings()
+    configure_logging(settings.log_level)
+    clients = build_clients(settings)
+    incident_repo = SQLiteIncidentRepository(settings.db_path)
+    controller = RemediationPolicyController(settings, clients, incident_repo)
+    operator_service = OperatorService(clients, settings, controller)
+    operator_service.start()
+    console.print(
+        "[green]Operator started[/green] -- watching KubeSentinelRemediationPolicy "
+        f"CRs in {settings.watch_namespace_list or ['all namespaces']}. Ctrl-C to stop."
+    )
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        operator_service.stop()
+        incident_repo.close()
+        console.print("Operator stopped.")
 
 
 def _state_label(cs) -> str:

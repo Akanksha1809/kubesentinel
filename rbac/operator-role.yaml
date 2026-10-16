@@ -1,0 +1,21 @@
+# Milestone 8's operator. Kept in a SEPARATE Role from kubesentinel-observer
+# (role.yaml, read-only) and kubesentinel-remediator (remediation-role.yaml,
+# Deployment mutation) -- same "independently auditable blast radius"
+# precedent every prior capability's own Role follows. The actual
+# remediation mutation this controller performs (restart/rollback/scale a
+# Deployment, via the exact same RemediationExecutor a human-approved action
+# already goes through) reuses remediation-role.yaml unchanged -- this Role
+# grants only what's new: reading the CRD this controller watches, and
+# patching its own status subresource. See docs/OPERATOR_DESIGN.md §8.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kubesentinel-operator
+  namespace: kubesentinel-lab
+rules:
+  - apiGroups: ["kubesentinel.io"]
+    resources: ["kubesentinelremediationpolicies"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["kubesentinel.io"]
+    resources: ["kubesentinelremediationpolicies/status"]
+    verbs: ["get", "patch", "update"]

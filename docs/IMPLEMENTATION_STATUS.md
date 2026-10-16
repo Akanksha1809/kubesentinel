@@ -448,10 +448,50 @@ own precedent, not the spec's literal path text.
 
 ## Kubernetes-native Operator and Reconciliation Controller
 
-**Missing.** No CRDs, no controller process, no `kubebuilder`/`kopf`/similar
-dependency anywhere in `pyproject.toml`. Explicitly scoped by the spec as a
-later, independently-testable milestone, after the core analysis engines
-exist for it to expose as policy -- correctly sequenced last.
+**Implemented** (Milestone 8 of `docs/PLATFORM_ROADMAP.md`). One CRD,
+`KubeSentinelRemediationPolicy` (`crds/kubesentinelremediationpolicy.yaml`,
+namespaced, group `kubesentinel.io`), reconciled by a thin controller
+(a new `operator/` package: `operator/controller.py::RemediationPolicyController`,
+run via the new `kubesentinel operator-run` CLI command, blocking like
+the API server does). No `kopf`/`kubebuilder` dependency: the watch is a seventh,
+thin `CustomResourceWatcher` alongside the six existing watchers in
+`observer/watchers.py`, reusing the exact same proven list-then-watch
+loop -- a deliberate decision, not an oversight, since one already
+existed in this codebase that already handles dict-returning resources
+(`EndpointSliceWatcher`'s own precedent). See `docs/OPERATOR_DESIGN.md`
+for the full design, in particular §2's load-bearing constraint: the
+controller never decides which `ActionType` to propose for an incident
+(that remains entirely human/CLI/API-driven via `plan`, exactly as
+before) -- it only re-evaluates an already-proposed, still-
+`PENDING_APPROVAL` action against the policy the CR currently declares,
+calling the *exact* same `PolicyEngine.evaluate()`/
+`RemediationService.approve()`/`.execute()` every other caller already
+uses. "Any actual remediation triggered through the operator still goes
+through the same approval mechanism everything else does" (the spec's
+own words) is satisfied literally: the controller calls `approve()`, it
+does not skip it.
+
+Live-verified against the real cluster, catching one real bug along the
+way: the controller's own re-evaluation of an already-persisted pending
+action initially included that very action in its own `recent_actions`
+cooldown check, denying it against a 0-second-old "cooldown" triggered by
+itself -- `propose()` never hits this (it builds `recent_actions` before
+the new action is ever saved), but re-evaluating an action *after* it's
+already persisted needed an explicit self-exclusion. Fixed
+(`operator/controller.py::_maybe_auto_approve`), caught by this
+milestone's own unit tests before it ever reached the live cluster. Live
+run against a real `crashloop-demo` incident confirmed: under
+`CONTROLLED_AUTO`, a pending action whose diagnosing rule forbids
+auto-remediation (true of every rule in this codebase today, by design)
+is correctly left `PENDING_APPROVAL`; after manually marking a copy
+auto-remediation-eligible and temporarily scaling the target to 2
+replicas (restored afterward) to clear the single-replica safety check,
+the operator correctly auto-approved and executed a real Deployment
+restart (`kubectl.kubernetes.io/restartedAt` annotation confirmed
+updated on the real Deployment), with `approved_by: kubesentinel-operator`
+recorded in the incident's own audit trail and an honest
+`VERIFICATION_INCONCLUSIVE` outcome (a restart never fixes this
+scenario's deterministic crash -- correctly not reported as success).
 
 ## Controlled Chaos & Resilience Lab
 

@@ -22,7 +22,7 @@ anything), and the resource optimization engine producing a real
 samples. Recorded with [asciinema](https://asciinema.org) + [agg](https://github.com/asciinema/agg) --
 every line is genuine command output, not staged.
 
-## Status: Milestones 1-11 (troubleshooting) + 12-19 (resource optimization) + scheduling advisor + network troubleshooting engine + capacity planning advisor + security auditor complete -- the full platform spec (Capabilities A-F) -- plus a chaos & resilience evaluation harness measuring all six engines against the real cluster
+## Status: Milestones 1-11 (troubleshooting) + 12-19 (resource optimization) + scheduling advisor + network troubleshooting engine + capacity planning advisor + security auditor complete -- the full platform spec (Capabilities A-F) -- plus a chaos & resilience evaluation harness and a Kubernetes operator exposing remediation policy declaratively
 
 The full **observe -> diagnose -> persist -> expose** pipeline is implemented,
 tested, and verified end-to-end against a real kind cluster for 13 of the 14
@@ -149,6 +149,18 @@ registered scenario. `kubesentinel evaluate` -- CLI-only, deliberately
 never an HTTP endpoint, since a run mutates the shared lab namespace and
 can take minutes. See [CHAOS_RESILIENCE_LAB.md](docs/CHAOS_RESILIENCE_LAB.md)
 for the design.
+
+A **Kubernetes operator** exposes remediation policy declaratively: one
+CRD, `KubeSentinelRemediationPolicy` (`crds/kubesentinelremediationpolicy.yaml`),
+reconciled by a thin controller (`kubesentinel operator-run`) that never
+decides which remediation action to propose for an incident -- that stays
+entirely human/CLI/API-driven, exactly as before -- and only re-evaluates
+an already-proposed, still-pending action against the policy mode
+(`OBSERVE`/`APPROVAL_REQUIRED`/`CONTROLLED_AUTO`) a CR currently declares
+for its own namespace, auto-approving and executing through the exact
+same `PolicyEngine`/`RemediationService` calls a human would otherwise
+make by hand. No CRD for a namespace means no reconciliation there at
+all. See [OPERATOR_DESIGN.md](docs/OPERATOR_DESIGN.md) for the design.
 
 Every stage above is exported as Prometheus metrics with bounded-cardinality
 labels (category/action_type/reason/component, never incident IDs or pod
@@ -450,6 +462,7 @@ docs/            Architecture, diagnostic rules, RBAC/threat model, failure lab,
 - [CAPACITY_PLANNING.md](docs/CAPACITY_PLANNING.md) -- the capacity planning & autoscaling advisor's own design: HPA status, scale headroom, what's a pattern match vs. a diagnosis
 - [SECURITY_AUDITING.md](docs/SECURITY_AUDITING.md) -- the security & configuration auditor's own design: the 13-rule catalog, the build-vs-integrate decision, what's deliberately deferred
 - [CHAOS_RESILIENCE_LAB.md](docs/CHAOS_RESILIENCE_LAB.md) -- the evaluation harness's own design: ground truth, push-vs-pull timing, recovery/false-positive scope
+- [OPERATOR_DESIGN.md](docs/OPERATOR_DESIGN.md) -- the Kubernetes operator's own design: why one CRD, what the controller deliberately never decides, reconciliation step by step
 - [DIAGNOSTIC_RULES.md](docs/DIAGNOSTIC_RULES.md) -- every rule, its evidence, and its confidence logic
 - [FAILURE_LAB.md](docs/FAILURE_LAB.md) -- each lab scenario: how it fails, what's expected, how to clean up
 - [RBAC_AND_THREAT_MODEL.md](docs/RBAC_AND_THREAT_MODEL.md) -- least privilege, trust boundaries

@@ -7,10 +7,10 @@
 ./scripts/test.sh --all    # same, plus integration/e2e against a live kind cluster
 ```
 
-As of Milestone 7's own evaluation harness (after Milestone 1's audit
-closure shipped): **755 unit tests** (no cluster, no Ollama needed) plus **69
+As of Milestone 8's own Kubernetes operator (after Milestone 7's
+evaluation harness shipped): **774 unit tests** (no cluster, no Ollama needed) plus **69
 integration/e2e tests** (`--all`, against the real `kind-kubesentinel` cluster, one
-of them additionally gated on a local Ollama server) -- 824 total, all passing,
+of them additionally gated on a local Ollama server) -- 843 total, all passing,
 `ruff check` clean, `mypy src/kubesentinel` clean. Every
 integration/e2e test skips (not fails) if its precondition (the cluster, the lab
 namespace, a specific scenario/fixture, Ollama) isn't present -- confirmed by
@@ -380,6 +380,59 @@ level `UNSATISFIED_REPLICAS` one and the real Pod-level `FAILED_MOUNT`
 one) -- it took whichever the repository listed first, reporting a false
 `WRONG_CATEGORY`. Fixed to keep polling for an exact match against
 `expected` until the deadline; reconfirmed live immediately after.
+
+## Milestone 8 operator unit test coverage
+
+19 new unit tests across 3 files, none of them against a real cluster
+(the real `CustomObjectsApi`/`AppsV1Api` surface is mocked throughout,
+the same split `test_remediation_service.py` already established for
+testing the policy->executor->verifier chain without one):
+
+- **`test_operator_models.py`** (6 tests) -- `RemediationPolicySpec.from_cr`
+  parses every camelCase CRD field with the right defaults, and rejects a
+  missing or invalid `mode`; `RemediationPolicyRef.from_cr` extracts
+  identity fields and defaults a missing `generation` to 0.
+- **`test_operator_controller.py`** (9 tests) -- `OBSERVE`/
+  `APPROVAL_REQUIRED` never auto-approve a pending action;
+  `CONTROLLED_AUTO` approves and executes one that's eligible, and leaves
+  alone one that isn't (LOW severity, or `SCALE_DEPLOYMENT`'s own
+  always-requires-approval rule); only incidents in the CR's own
+  namespace are touched; an invalid spec patches status with an error
+  message rather than raising; a CR with nothing pending is a safe no-op;
+  the CR's status is patched with accurate pending/auto-approved counts.
+  One of these tests caught a real bug before it ever reached a cluster:
+  re-evaluating an already-persisted pending action included that same
+  action in its own cooldown check, self-denying on a 0-second-old
+  "cooldown" against itself -- `propose()` never hits this (it builds
+  `recent_actions` before the new action exists), but re-evaluating one
+  that's already saved needed an explicit self-exclusion, added to
+  `operator/controller.py::_maybe_auto_approve`.
+- **`test_custom_resource_watcher.py`** (4 tests) -- the new
+  `dict_object_watch` mode `_ListWatchLoop` gained extracts `items`/
+  `resourceVersion` correctly from a plain dict (confirmed live against a
+  real CRD before writing this mode at all, not assumed -- see
+  docs/OPERATOR_DESIGN.md §6), and `CustomResourceWatcher` calls
+  `list_namespaced_custom_object` with the right group/version/plural.
+
+**Live**: RBAC confirmed against the real constrained ServiceAccount
+(not admin) for both the new CRD and its status subresource. A real
+`crashloop-demo` Pod-level incident's own Deployment-level sibling
+(category `UNSATISFIED_REPLICAS`) had an action proposed against it and
+left `PENDING_APPROVAL`; under a real `KubeSentinelRemediationPolicy` CR
+with `mode: CONTROLLED_AUTO`, the real `kubesentinel operator-run`
+process correctly left it alone (its diagnosing rule forbids
+auto-remediation, true of every rule in this codebase by design) --
+confirmed via the CR's own `.status` (`pendingActionsSeen: 1,
+actionsAutoApproved: 0`). After manually marking a copy of the same
+incident's hypothesis auto-remediation-eligible and temporarily scaling
+the target Deployment to 2 replicas (restored to 1 immediately after) to
+clear the single-replica safety check, the same operator process
+correctly auto-approved and executed a *real* Deployment restart --
+`kubectl.kubernetes.io/restartedAt` confirmed updated on the real
+Deployment, `approved_by: kubesentinel-operator` recorded in the
+incident's own audit trail, and an honest `VERIFICATION_INCONCLUSIVE`
+final status (a restart never fixes this scenario's deterministic crash,
+so a false "recovered" was never reported).
 
 ## Why `kubernetes.client` model objects, not hand-rolled dicts, in tests
 

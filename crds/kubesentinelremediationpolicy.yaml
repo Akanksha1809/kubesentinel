@@ -1,0 +1,85 @@
+# The one CRD for Milestone 8's operator -- see docs/OPERATOR_DESIGN.md.
+# Every spec field mirrors an existing Settings field 1:1 (policy_mode,
+# action_cooldown_seconds, max_actions_per_incident, max_actions_per_window,
+# action_window_seconds, action_allowed_resource_names) -- this is a
+# namespace-scoped, declarative way to set values that were previously only
+# global and environment-variable-configured, not a new policy concept.
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: kubesentinelremediationpolicies.kubesentinel.io
+spec:
+  group: kubesentinel.io
+  scope: Namespaced
+  names:
+    kind: KubeSentinelRemediationPolicy
+    plural: kubesentinelremediationpolicies
+    singular: kubesentinelremediationpolicy
+    shortNames: ["ksrp"]
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Mode
+          type: string
+          jsonPath: .spec.mode
+        - name: Auto-Approved
+          type: integer
+          jsonPath: .status.actionsAutoApproved
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required: ["mode"]
+              properties:
+                mode:
+                  type: string
+                  enum: ["OBSERVE", "APPROVAL_REQUIRED", "CONTROLLED_AUTO"]
+                  description: >-
+                    Mirrors PolicyMode (config.py). OBSERVE never approves
+                    anything; APPROVAL_REQUIRED means every action still
+                    needs an explicit human approve() call; CONTROLLED_AUTO
+                    lets the controller auto-approve+execute a pending
+                    action once PolicyEngine.evaluate() allows it.
+                cooldownSeconds:
+                  type: integer
+                  minimum: 0
+                  description: Mirrors action_cooldown_seconds.
+                maxActionsPerIncident:
+                  type: integer
+                  minimum: 1
+                  description: Mirrors max_actions_per_incident.
+                maxActionsPerWindow:
+                  type: integer
+                  minimum: 1
+                  description: Mirrors max_actions_per_window.
+                windowSeconds:
+                  type: integer
+                  minimum: 1
+                  description: Mirrors action_window_seconds.
+                allowedResourceNames:
+                  type: array
+                  items:
+                    type: string
+                  description: Mirrors action_allowed_resource_names (empty = no restriction beyond namespace).
+            status:
+              type: object
+              properties:
+                observedGeneration:
+                  type: integer
+                lastReconcileTime:
+                  type: string
+                pendingActionsSeen:
+                  type: integer
+                actionsAutoApproved:
+                  type: integer
+                message:
+                  type: string

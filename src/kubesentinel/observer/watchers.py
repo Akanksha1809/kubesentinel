@@ -67,6 +67,7 @@ class _ListWatchLoop:
         resync_interval_seconds: int,
         component: str,
         raw_object_watch: bool = False,
+        dict_object_watch: bool = False,
     ):
         self._list_namespaced = list_namespaced
         self._list_all_namespaces = list_all_namespaces
@@ -75,6 +76,18 @@ class _ListWatchLoop:
         self._resync_interval = resync_interval_seconds
         self._component = component
         self._raw_object_watch = raw_object_watch
+        # `CustomObjectsApi` (any CRD -- no generated client has a typed model
+        # for one) already returns a plain `dict` from both its list and watch
+        # calls, with no `_preload_content=False`/`json.loads` dance needed at
+        # all -- confirmed live against a real CRD before writing this, not
+        # assumed: `list_namespaced_custom_object()` returns `{"items": [...],
+        # "metadata": {"resourceVersion": ...}}` directly, and
+        # `watch.Watch()` (the plain, non-`raw_object_watch` constructor)
+        # already yields `event["object"]` as a dict too. This is therefore a
+        # third, distinct mode from `raw_object_watch` above (which exists to
+        # work around a *typed*-model deserialization bug for EndpointSlice),
+        # not a variant of it.
+        self._dict_object_watch = dict_object_watch
 
     def _list(self, **kwargs: Any) -> tuple[list[Any], str | None]:
         if self._namespaces:
@@ -88,6 +101,9 @@ class _ListWatchLoop:
         return self._list_one(self._list_all_namespaces, **kwargs)
 
     def _list_one(self, list_fn: Callable[..., Any], **kwargs: Any) -> tuple[list[Any], str | None]:
+        if self._dict_object_watch:
+            resp = list_fn(**kwargs)
+            return resp.get("items", []), resp.get("metadata", {}).get("resourceVersion")
         if not self._raw_object_watch:
             resp = list_fn(**kwargs)
             return resp.items, resp.metadata.resource_version
@@ -277,6 +293,50 @@ class DeploymentWatcher:
             on_event=on_deployment_event,
             resync_interval_seconds=resync_interval_seconds,
             component="deployment_watcher",
+        )
+
+    def run(self, stop_event: threading.Event) -> None:
+        self._loop.run(stop_event)
+
+
+class CustomResourceWatcher:
+    """Watches instances of one namespaced CRD across the configured
+    namespaces -- added for Milestone 8's operator
+    (`KubeSentinelRemediationPolicy`), but generic over `group`/`version`/
+    `plural` for any future namespaced CRD. Delivers plain `dict` objects,
+    never a typed model -- `CustomObjectsApi` has none for any CRD; see
+    `_ListWatchLoop.__init__`'s own comment on `dict_object_watch` for why
+    this needed a third mode, not a reuse of `raw_object_watch`.
+
+    Cluster-scoped CRDs are out of scope here (this project's only CRD is
+    namespaced, matching `KubeSentinelRemediationPolicy`'s "one CR per
+    namespace a human opts in" design -- see docs/OPERATOR_DESIGN.md §4);
+    a cluster-scoped variant would need `list_cluster_custom_object` wired
+    the way `NodeWatcher` wires its own cluster-scoped list function above.
+    """
+
+    def __init__(
+        self,
+        custom_objects_api: client.CustomObjectsApi,
+        group: str,
+        version: str,
+        plural: str,
+        namespaces: list[str],
+        on_event: Callable[[EventType, dict], None],
+        resync_interval_seconds: int = 300,
+    ):
+        self._loop = _ListWatchLoop(
+            list_namespaced=lambda namespace, **kw: custom_objects_api.list_namespaced_custom_object(
+                group=group, version=version, namespace=namespace, plural=plural, **kw
+            ),
+            list_all_namespaces=lambda **kw: custom_objects_api.list_cluster_custom_object(
+                group=group, version=version, plural=plural, **kw
+            ),
+            namespaces=namespaces,
+            on_event=on_event,
+            resync_interval_seconds=resync_interval_seconds,
+            component="custom_resource_watcher",
+            dict_object_watch=True,
         )
 
     def run(self, stop_event: threading.Event) -> None:
