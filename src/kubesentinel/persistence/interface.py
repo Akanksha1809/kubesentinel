@@ -13,6 +13,7 @@ from datetime import datetime
 from kubesentinel.models.action import RemediationAction
 from kubesentinel.models.incident import Incident
 from kubesentinel.models.optimization import AnalysisRunSummary, ResourceRecommendation, WorkloadSnapshot
+from kubesentinel.models.scheduling import SchedulingFinding
 
 
 class IncidentRepository(ABC):
@@ -98,3 +99,26 @@ class OptimizationRepository(ABC):
 
     @abstractmethod
     def get_latest_analysis_run(self) -> AnalysisRunSummary | None: ...
+
+
+class SchedulingRepository(ABC):
+    """Persistence for the scheduling & placement advisor -- a sibling of
+    `OptimizationRepository`, not merged into it: `SchedulingFinding` has
+    no concept of `review()`/approval the way a recommendation does (this
+    engine never proposes anything to accept or reject, only explains).
+    Implementations may share the same underlying SQLite file as the other
+    two repositories; this interface makes no assumption either way.
+    """
+
+    @abstractmethod
+    def get_finding(self, finding_id: str) -> SchedulingFinding | None: ...
+
+    @abstractmethod
+    def save_finding(self, finding: SchedulingFinding) -> None:
+        """Upsert by `finding_id`."""
+        ...
+
+    @abstractmethod
+    def list_findings(
+        self, *, namespace: str | None = None, schedulable: bool | None = None
+    ) -> builtins.list[SchedulingFinding]: ...

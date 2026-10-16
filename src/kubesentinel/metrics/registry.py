@@ -109,3 +109,11 @@ optimization_metrics_data_available = Gauge(
     "last-query-succeeded signal.",
     ["provider"],
 )
+
+scheduling_analysis_total = Counter(
+    "kubesentinel_scheduling_analysis_total",
+    "Scheduling advisor analysis runs, by result: schedulable (at least one "
+    "node fit), unschedulable (no node fit), or failed (the run itself "
+    "raised, e.g. the Pod or cluster was unreachable).",
+    ["result"],
+)

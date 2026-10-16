@@ -7,9 +7,9 @@
 ./scripts/test.sh --all    # same, plus integration/e2e against a live kind cluster
 ```
 
-As of Milestone 18: **410 unit tests** (no cluster, no Ollama needed) plus **32
+As of Milestone 3 (scheduling advisor): **502 unit tests** (no cluster, no Ollama needed) plus **39
 integration/e2e tests** (`--all`, against the real `kind-kubesentinel` cluster, one
-of them additionally gated on a local Ollama server) -- 442 total, all passing,
+of them additionally gated on a local Ollama server) -- 541 total, all passing,
 `ruff check` clean, `mypy src/kubesentinel` clean. Every
 integration/e2e test skips (not fails) if its precondition (the cluster, the lab
 namespace, a specific scenario/fixture, Ollama) isn't present -- confirmed by
@@ -18,8 +18,10 @@ zero errors. The combined suite was re-run four consecutive times with no failur
 after fixing a flaky test found along the way (TODO.md's Milestone 9 entry has the
 root cause -- a race in the test itself, not the product). The resource
 optimization engine's own tests (Milestones 13-18) added 176 of the 410 unit
-tests and 5 of the 32 integration/e2e tests (plus 4 of the existing RBAC
-boundary suite's tests, specific to its own Role); see below.
+tests and 5 of the 32 integration/e2e tests (plus 4 of the RBAC boundary
+suite's tests, specific to its own Role); the scheduling advisor's own
+tests (Milestone 3 of the platform spec) added a further 92 unit tests and
+4 integration/e2e tests (plus 3 more RBAC boundary tests); see below.
 
 This was verified in-session, not assumed -- see the commands actually run, below.
 
@@ -96,6 +98,54 @@ This was verified in-session, not assumed -- see the commands actually run, belo
   error-mapping table -- see TODO.md's Milestone 18 entry), and the
   token-gated review endpoint's 401 boundary.
 
+## Scheduling advisor unit test coverage (Milestone 3 of the platform spec)
+
+- **`test_scheduling_constraints.py`** (32 tests) -- every constraint
+  function exhaustively: resource-fit arithmetic at and past the boundary,
+  every taint effect (`NoSchedule`/`PreferNoSchedule`/`NoExecute`) crossed
+  with every toleration operator (`Equal`/`Exists`), a soft
+  `PreferNoSchedule` taint never masking a real blocking one alongside it,
+  node-selector exact matching, all 6 real `NodeSelectorRequirement`
+  operators (`In`/`NotIn`/`Exists`/`DoesNotExist`/`Gt`/`Lt`), multiple
+  required-affinity terms OR'd vs. multiple expressions within one term
+  AND'd, and namespace-quota exceeded/not-exceeded.
+- **`test_scheduling_node_inventory.py`** (10 tests) -- requests summed
+  only from Pods actually bound to a given Node, Pods on a *different* node
+  or in a terminal phase (`Succeeded`/`Failed`) correctly excluded from that
+  sum (the scheduler's own accounting), taints/labels/unschedulable/ready
+  extraction, and that each Node gets its own independent total when
+  multiple Nodes exist.
+- **`test_scheduling_analyzer.py`** (19 tests) -- determinism (same input
+  -> identical output, including per-constraint reasoning text), a cordoned
+  or not-Ready Node never schedulable regardless of whether resources would
+  otherwise fit, "schedulable if *any* node fits," the namespace-quota
+  check's inclusion in `evaluated_constraints` only when explicitly
+  requested, detection of every unevaluated constraint type (preferred node
+  affinity, pod affinity, pod anti-affinity, topology spread) without
+  attempting to evaluate any of them, and the hypothetical-spec path:
+  deserializing a raw dict into a typed `V1PodSpec` and analyzing it
+  identically to a real Pod's spec, including a namespace quota correctly
+  blocking a hypothetical even when every Node would otherwise fit it.
+- **`test_scheduling_repo.py`** (7 tests) -- SQLite save/get roundtrip,
+  upsert-not-duplicate, namespace/schedulable filtering.
+- **`test_scheduling_service.py`** (15 tests) -- a missing Pod raises
+  `PodNotFoundError` (404-mapped), the namespace-quota check is *never*
+  invoked for a real Pod and *always* invoked for a hypothetical spec
+  (asserted via `assert_not_called()`/`assert_called_once()`, not just
+  reading the output), the real `PodScheduled` condition's message is
+  carried through, the `kubesentinel_scheduling_analysis_total` metric's
+  three labels (schedulable/unschedulable/failed) using the same
+  reset-then-assert pattern as the optimization engine's own metrics tests,
+  and `related_incident_ids` linking (the no-repo-wired-up no-op, a match
+  on the Pod's own UID, no match, and that the link survives persistence --
+  added after a live check caught this field going unpopulated; see
+  TODO.md's Milestone 21 entry).
+- **`test_scheduling_api.py`** (9 tests) -- every route's happy path, 404
+  (missing Pod/finding), 422 (malformed hypothetical spec -- deliberately
+  distinct from 503, since a bad client input and an unreachable cluster
+  are different failure classes; see `scheduling/service.py::InvalidPodSpecError`),
+  503 (service unavailable), and namespace filtering on the findings list.
+
 ## Why `kubernetes.client` model objects, not hand-rolled dicts, in tests
 
 `tests/unit/factories.py` builds `V1Pod`/`V1ContainerStatus`/etc. using the real
@@ -145,22 +195,32 @@ shared live-cluster fixtures, every one of which skips (never fails) if its
 precondition (a reachable cluster, the lab namespace, a specific scenario) isn't
 met.
 
-- **`test_rbac_boundary.py`** (20 tests) -- authenticates as the real
+- **`test_rbac_boundary.py`** (23 tests) -- authenticates as the real
   `kubesentinel` ServiceAccount (a token minted live with `kubectl create
   token`, not fabricated) and confirms both what it can do (read Pods/Events/
-  Deployments/Nodes/StatefulSets/DaemonSets/Jobs/pod-metrics in the lab
-  namespace, update/patch Deployments, patch the scale subresource) and what
-  it cannot (read Secrets anywhere, read Pods outside the lab namespace,
-  delete Deployments/Pods/Nodes, mutate PVCs/Services, patch StatefulSets/
-  DaemonSets/Jobs/ReplicaSets) -- using both a real authenticated API call
-  and `kubectl auth can-i --as=...` (the same technique used to manually
-  confirm this boundary in Milestone 4). The `metrics.k8s.io` pods check is
-  deliberately *not* asserted via `can-i` -- found live (Milestone 18) that
-  `can-i` answers `no` for this aggregated API even when the Role genuinely
-  grants it, so that one check goes through a real authenticated request
-  instead (treating a `503` -- metrics-server itself down -- as
-  inconclusive, not a failure, since that's an availability question, not
-  an RBAC one).
+  Deployments/Nodes/StatefulSets/DaemonSets/Jobs/ResourceQuotas/pod-metrics
+  in the lab namespace, update/patch Deployments, patch the scale
+  subresource) and what it cannot (read Secrets anywhere, read Pods outside
+  the lab namespace, delete Deployments/Pods/Nodes, mutate PVCs/Services,
+  patch StatefulSets/DaemonSets/Jobs/ReplicaSets/ResourceQuotas) -- using
+  both a real authenticated API call and `kubectl auth can-i --as=...` (the
+  same technique used to manually confirm this boundary in Milestone 4).
+  The `metrics.k8s.io` pods check is deliberately *not* asserted via
+  `can-i` -- found live (Milestone 18) that `can-i` answers `no` for this
+  aggregated API even when the Role genuinely grants it, so that one check
+  goes through a real authenticated request instead (treating a `503` --
+  metrics-server itself down -- as inconclusive, not a failure, since
+  that's an availability question, not an RBAC one).
+- **`test_scheduling_live.py`** (4 tests, Milestone 3 of the platform spec)
+  -- the `pending-resources`/`invalid-node-selector` scenarios' real Pods
+  analyzed against the real cluster's actual Node allocatable/requested
+  numbers (never mocked), confirming the engine's own independent
+  constraint math isolates exactly which constraint blocked placement
+  (`RESOURCE_FIT` for the former, `NODE_SELECTOR` alone -- with
+  `RESOURCE_FIT` passing -- for the latter), that owner-reference
+  resolution correctly names the owning Deployment, and the same
+  HTTP-transport-level read-only check the optimization engine's own live
+  tests already established.
 - **`test_optimization_inventory_live.py`** / **`test_optimization_live_scenarios.py`**
   (5 tests, Milestones 14/18) -- `build_workload_inventory()` against the
   real lab namespace matches known healthy/unhealthy workloads; the

@@ -1,0 +1,123 @@
+"""Builds the Node-side state the scheduling advisor needs: allocatable
+capacity, already-requested resources (the scheduler's own accounting
+unit -- the sum of every bound Pod's own requests, never live usage),
+taints, and labels.
+
+Read-only: only ever `list_node`/`list_pod_for_all_namespaces`. No watch
+loop -- like `optimization/inventory.py`, this takes a one-shot snapshot
+per analysis call, not a continuously-maintained cache.
+"""
+
+from __future__ import annotations
+
+import logging
+
+from kubesentinel.models.optimization import ResourceQuantity
+from kubesentinel.models.scheduling import NodeSnapshot, NodeTaint
+from kubesentinel.observer.client import ClusterClients
+from kubesentinel.optimization.quantities import (
+    QuantityParseError,
+    parse_cpu_to_millicores,
+    parse_memory_to_bytes,
+)
+
+logger = logging.getLogger(__name__)
+
+#: Pods in these phases no longer hold resources on their Node -- the real
+#: scheduler's own accounting excludes them from "already requested" the
+#: same way. A Pending Pod with `node_name` unset was never counted in the
+#: first place (it isn't bound to any Node yet).
+_TERMINAL_PHASES = {"Succeeded", "Failed"}
+
+
+def parse_quantity_dict(raw: dict, *, context: str) -> ResourceQuantity:
+    cpu_millicores = None
+    memory_bytes = None
+    if raw.get("cpu"):
+        try:
+            cpu_millicores = parse_cpu_to_millicores(raw["cpu"])
+        except QuantityParseError:
+            logger.warning("unparseable cpu quantity %r in %s", raw["cpu"], context)
+    if raw.get("memory"):
+        try:
+            memory_bytes = parse_memory_to_bytes(raw["memory"])
+        except QuantityParseError:
+            logger.warning("unparseable memory quantity %r in %s", raw["memory"], context)
+    return ResourceQuantity(cpu_millicores=cpu_millicores, memory_bytes=memory_bytes)
+
+
+def _pod_requested(pod) -> ResourceQuantity:
+    """Sums every container's own `requests` -- init containers are
+    deliberately not included (the real scheduler takes the *max* of
+    init-container and regular-container requests per resource, not a
+    sum; approximated here as regular-container-only, a documented
+    simplification, not an oversight)."""
+    cpu_total = 0
+    memory_total = 0
+    any_cpu = False
+    any_memory = False
+    for container in pod.spec.containers or []:
+        resources = container.resources
+        if resources is None or resources.requests is None:
+            continue
+        parsed = parse_quantity_dict(resources.requests, context=f"{pod.metadata.name}/{container.name}")
+        if parsed.cpu_millicores is not None:
+            cpu_total += parsed.cpu_millicores
+            any_cpu = True
+        if parsed.memory_bytes is not None:
+            memory_total += parsed.memory_bytes
+            any_memory = True
+    return ResourceQuantity(
+        cpu_millicores=cpu_total if any_cpu else None,
+        memory_bytes=memory_total if any_memory else None,
+    )
+
+
+def _node_ready(node) -> bool:
+    for condition in node.status.conditions or []:
+        if condition.type == "Ready":
+            return condition.status == "True"
+    return False
+
+
+def build_node_inventory(clients: ClusterClients) -> list[NodeSnapshot]:
+    nodes = clients.core.list_node().items
+    all_pods = clients.core.list_pod_for_all_namespaces().items
+
+    requested_by_node: dict[str, list] = {n.metadata.name: [] for n in nodes}
+    for pod in all_pods:
+        node_name = pod.spec.node_name
+        if not node_name or node_name not in requested_by_node:
+            continue
+        if pod.status and pod.status.phase in _TERMINAL_PHASES:
+            continue
+        requested_by_node[node_name].append(pod)
+
+    snapshots: list[NodeSnapshot] = []
+    for node in nodes:
+        allocatable_raw = node.status.allocatable or {}
+        allocatable = parse_quantity_dict(allocatable_raw, context=f"node/{node.metadata.name} allocatable")
+
+        cpu_requested = 0
+        memory_requested = 0
+        for pod in requested_by_node[node.metadata.name]:
+            pod_req = _pod_requested(pod)
+            cpu_requested += pod_req.cpu_millicores or 0
+            memory_requested += pod_req.memory_bytes or 0
+
+        taints = [
+            NodeTaint(key=t.key, value=t.value, effect=t.effect) for t in (node.spec.taints or [])
+        ]
+
+        snapshots.append(
+            NodeSnapshot(
+                name=node.metadata.name,
+                allocatable=allocatable,
+                requested=ResourceQuantity(cpu_millicores=cpu_requested, memory_bytes=memory_requested),
+                unschedulable=bool(node.spec.unschedulable),
+                taints=taints,
+                labels=dict(node.metadata.labels or {}),
+                ready=_node_ready(node),
+            )
+        )
+    return snapshots

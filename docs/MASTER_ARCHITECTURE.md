@@ -2,18 +2,19 @@
 
 The platform-wide view: what's built, what's planned, and the one
 architectural pattern every analysis engine in this project follows,
-proven twice already (troubleshooting, then resource optimization) and
-intended to be followed a third, fourth, fifth, and sixth time
-(scheduling, network, capacity, security) rather than reinvented per
+proven three times now (troubleshooting, then resource optimization, then
+the scheduling advisor) and intended to be followed a fourth, fifth, and
+sixth time (network, capacity, security) rather than reinvented per
 capability.
 
-This document does not re-explain either already-built pipeline in detail
--- `ARCHITECTURE.md` already does that, in depth, for the troubleshooting
-pipeline and the resource optimization pipeline, including their own
-"why this shape" reasoning and what's deliberately not built in each. This
-document is the layer above it: how every *future* capability should slot
-into the same shape, and why that shape, not a fresh one per capability, is
-the right call for this project specifically.
+This document does not re-explain any already-built pipeline in detail --
+`ARCHITECTURE.md` covers the troubleshooting and resource-optimization
+pipelines in depth, including their own "why this shape" reasoning and
+what's deliberately not built in each; `docs/SCHEDULING_ANALYSIS.md`
+covers the scheduling advisor the same way. This document is the layer
+above all of them: how every capability should slot into the same shape,
+and why that shape, not a fresh one per capability, is the right call for
+this project specifically.
 
 See `docs/IMPLEMENTATION_STATUS.md` for the detailed, evidence-backed
 status of every capability named below, and `docs/PLATFORM_ROADMAP.md` for
@@ -56,15 +57,18 @@ Every analysis engine in this project, built or planned, is:
    false` plus a `warning` string is this project's established shape for
    that, not a silent fallback to zero or "healthy."
 
-This is not a aspirational list -- it is what `optimization/` already does,
-verified against `diagnostics/`'s own original shape. Two data points is
-not a law of nature, but it's the only evidence this project has, and both
-times the shape held up through live verification without needing to bend.
-Where a future capability has a genuine reason to deviate (Capability C's
-read-only placement *simulation*, for instance, is a kind of computation
-none of the existing engines do), that reason should be written down
-explicitly in that capability's own design doc, not silently absorbed into
-"the pattern" retroactively.
+This is not an aspirational list -- it is what `optimization/` and
+`scheduling/` both already do, verified against `diagnostics/`'s own
+original shape. Three data points is still not a law of nature, but the
+pattern has now held up through live verification three times without
+needing to bend, including once (`scheduling/`) with a genuine reason to
+extend it: a read-only placement *simulation* is a kind of computation
+none of the first two engines do (deserializing a hypothetical, not-yet-
+real Pod spec into a typed object and analyzing it exactly like a real
+one), and that extension was written down explicitly in
+`docs/SCHEDULING_ANALYSIS.md` rather than silently absorbed into "the
+pattern" retroactively -- which is exactly the discipline this paragraph
+asks every future capability to follow too.
 
 ## Client surface: what exists, what each future capability needs
 
@@ -78,7 +82,7 @@ applies going forward:
 
 | Capability | New client needed | Status |
 |---|---|---|
-| C: Scheduling | none -- `core.list_node()` already exists on the existing `core` client | not yet called anywhere |
+| C: Scheduling | none -- `core.list_node()` already existed on the existing `core` client | **done** -- `scheduling/node_inventory.py` calls it; confirms the prediction that no new client was needed here |
 | D: Network | `NetworkingV1Api` (NetworkPolicy, Ingress) | not constructed |
 | E: Capacity | `AutoscalingV2Api` (HPA) | not constructed |
 | F: Security | `RbacAuthorizationV1Api` (Roles/Bindings), `PolicyV1Api` (PodDisruptionBudget, if used) | not constructed |
@@ -109,11 +113,20 @@ separate types for different domains... do not create one enormous generic
 model") matches what this project already does by construction, not by
 restraint.
 
+**Built**: a Scheduling finding referencing the Pending-pod incident it
+explains -- `SchedulingService._open_incident_ids_for()`, the same dual-UID
+(Pod's own UID, owning workload's UID), deduped, no-repo-wired-up-is-a-
+safe-no-op lookup `OptimizationService` already does. Caught live during
+this milestone's own verification, worth naming as a reminder: the field
+was declared on `SchedulingFinding` from the design doc onward but not
+actually wired up until a live check against the real cluster showed it
+staying empty -- the exact kind of scaffolded-but-unpopulated gap this
+project's own Milestone 0 audit flagged for `UsageSummary.throttled` in
+the *other* engine. Caught here before it shipped the same way, not after.
+
 Plausible future links, not yet built, named here so they're a deliberate
 decision later rather than an accidental omission now:
 
-- A Scheduling finding referencing the Pending-pod incident it explains
-  (mirrors the resource-optimization link exactly).
 - A Security finding referencing the workload it's about (no incident
   link needed -- security findings aren't about failures).
 - A Capacity recommendation referencing the resource-optimization

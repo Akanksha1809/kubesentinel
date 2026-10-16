@@ -37,6 +37,7 @@ from kubesentinel.optimization.service import (
 )
 from kubesentinel.models.optimization import RecommendationStatus
 from kubesentinel.persistence.optimization_repo import SQLiteOptimizationRepository
+from kubesentinel.persistence.scheduling_repo import SQLiteSchedulingRepository
 from kubesentinel.persistence.sqlite_repo import SQLiteIncidentRepository
 from kubesentinel.policy.engine import PolicyEngine
 from kubesentinel.remediation.executor import RemediationExecutor
@@ -45,6 +46,7 @@ from kubesentinel.remediation.service import (
     InvalidActionStateError,
     RemediationService,
 )
+from kubesentinel.scheduling.service import FindingNotFoundError, PodNotFoundError, SchedulingService
 from kubesentinel.verification.verifier import RecoveryVerifier
 
 app = typer.Typer(help="KubeSentinel: Kubernetes troubleshooting and controlled self-healing.")
@@ -516,6 +518,110 @@ def review_recommendation(
         print(json_module.dumps(recommendation.model_dump(mode="json"), indent=2))
         return
     console.print(f"status: [bold]{recommendation.status.value}[/bold]")
+
+
+def _build_scheduling_service(settings: Settings) -> tuple[SchedulingService, SQLiteSchedulingRepository]:
+    clients = build_clients(settings)
+    repo = SQLiteSchedulingRepository(settings.db_path)
+    incident_repo = SQLiteIncidentRepository(settings.db_path)
+    return SchedulingService(clients, repo, incident_repo=incident_repo), repo
+
+
+@app.command("schedule-check")
+def schedule_check(
+    namespace: str = typer.Argument(..., help="Namespace of the Pod"),
+    pod_name: str = typer.Argument(..., help="Pod to analyze"),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """Explain why a real, already-existing Pod is (or isn't) schedulable.
+    Read-only: inspects Nodes/Pods and persists the finding locally --
+    never modifies anything in the cluster."""
+    settings = get_settings()
+    configure_logging(settings.log_level)
+    service, _repo = _build_scheduling_service(settings)
+    try:
+        finding = service.analyze_pod(namespace, pod_name)
+    except PodNotFoundError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from exc
+
+    if json_output:
+        print(json_module.dumps(finding.model_dump(mode="json"), indent=2))
+        return
+
+    status = "[green]schedulable[/green]" if finding.any_node_schedulable else "[red]unschedulable[/red]"
+    console.print(f"{finding.namespace}/{pod_name}: {status}")
+    console.print(f"  {finding.reasoning}")
+    if finding.related_incident_ids:
+        console.print(f"  Related incident(s): {', '.join(finding.related_incident_ids)}")
+    for node_result in finding.node_results:
+        verdict = "OK" if node_result.schedulable else "BLOCKED"
+        console.print(f"  node {node_result.node_name}: {verdict}")
+        for cr in node_result.constraint_results:
+            if not cr.satisfied:
+                console.print(f"    - {cr.constraint_type.value}: {cr.reasoning}")
+
+
+@app.command("scheduling-findings")
+def list_scheduling_findings(
+    namespace: str = typer.Option(None, help="Filter by namespace"),
+    schedulable: bool = typer.Option(None, help="Filter by schedulable/unschedulable"),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """List persisted scheduling findings from past analyses."""
+    settings = get_settings()
+    service, _repo = _build_scheduling_service(settings)
+    findings = service.list_findings(namespace=namespace, schedulable=schedulable)
+
+    if json_output:
+        print(json_module.dumps([f.model_dump(mode="json") for f in findings], indent=2))
+        return
+
+    table = Table(title="Scheduling Findings")
+    for col in ("ID", "Namespace", "Pod", "Workload", "Schedulable"):
+        table.add_column(col)
+    for f in findings:
+        table.add_row(
+            f.finding_id[:8],
+            f.namespace,
+            f.pod_name or "(hypothetical)",
+            f.workload_name or "",
+            "yes" if f.any_node_schedulable else "no",
+        )
+    console.print(table)
+
+
+@app.command("scheduling-finding")
+def show_scheduling_finding(
+    finding_id: str = typer.Argument(..., help="Finding to show"),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """Show one scheduling finding in full, including every node's own
+    constraint-by-constraint result."""
+    settings = get_settings()
+    service, _repo = _build_scheduling_service(settings)
+    try:
+        finding = service.get_finding(finding_id)
+    except FindingNotFoundError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from exc
+
+    if json_output:
+        print(json_module.dumps(finding.model_dump(mode="json"), indent=2))
+        return
+
+    console.print(f"[bold]{finding.namespace}/{finding.pod_name or '(hypothetical)'}[/bold]")
+    console.print(f"  {finding.reasoning}")
+    if finding.scheduler_message:
+        console.print(f"  Scheduler message: {finding.scheduler_message}")
+    if finding.related_incident_ids:
+        console.print(f"  Related incident(s): {', '.join(finding.related_incident_ids)}")
+    for node_result in finding.node_results:
+        verdict = "[green]OK[/green]" if node_result.schedulable else "[red]BLOCKED[/red]"
+        console.print(f"  node {node_result.node_name}: {verdict}")
+        for cr in node_result.constraint_results:
+            mark = "[green]pass[/green]" if cr.satisfied else "[red]fail[/red]"
+            console.print(f"    {cr.constraint_type.value} [{mark}]: {cr.reasoning}")
 
 
 def _state_label(cs) -> str:

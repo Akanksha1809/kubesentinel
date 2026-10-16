@@ -1,0 +1,56 @@
+# Scenario: impossible nodeSelector (scheduling advisor)
+#
+# How the failure is created: the Pod requests a label
+# (`disktype: nonexistent-ssd-type`) no Node in this cluster has -- a real,
+# common misconfiguration (a typo'd or stale node label selector), not a
+# resource-sizing problem. The container itself would run fine if ever
+# scheduled; it never will be.
+#
+# Expected Kubernetes behavior: the scheduler can never place the Pod.
+# status.conditions[PodScheduled] stays status=False, reason=Unschedulable,
+# with a message naming the node-selector mismatch (e.g. "didn't match Pod's
+# node affinity/selector").
+#
+# Expected troubleshooting-engine diagnosis: PENDING_SCHEDULING_CONSTRAINT
+# (not PENDING_INSUFFICIENT_RESOURCES -- a different reason code, since this
+# is a selector mismatch, not a capacity shortfall), classified from the
+# scheduler's own message text.
+#
+# Expected scheduling-advisor finding: the NODE_SELECTOR constraint fails
+# specifically (`kubesentinel schedule-check kubesentinel-lab
+# invalid-node-selector-demo-<suffix>` names exactly which label didn't
+# match), while RESOURCE_FIT/TAINT_TOLERATION/REQUIRED_NODE_AFFINITY all
+# pass -- demonstrating the advisor distinguishes *which* constraint
+# blocked placement, not just that scheduling failed.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: invalid-node-selector-demo
+  namespace: kubesentinel-lab
+  labels:
+    app: invalid-node-selector-demo
+    kubesentinel.io/scenario: invalid-node-selector
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: invalid-node-selector-demo
+  template:
+    metadata:
+      labels:
+        app: invalid-node-selector-demo
+    spec:
+      nodeSelector:
+        disktype: nonexistent-ssd-type
+      containers:
+        - name: app
+          image: busybox:latest
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c", "sleep infinity"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 50m
+              memory: 32Mi

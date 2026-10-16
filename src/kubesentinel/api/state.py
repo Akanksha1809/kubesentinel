@@ -15,8 +15,10 @@ from kubesentinel.incidents.manager import IncidentManager
 from kubesentinel.observer.service import ObserverService
 from kubesentinel.optimization.service import OptimizationService
 from kubesentinel.persistence.optimization_repo import SQLiteOptimizationRepository
+from kubesentinel.persistence.scheduling_repo import SQLiteSchedulingRepository
 from kubesentinel.persistence.sqlite_repo import SQLiteIncidentRepository
 from kubesentinel.remediation.service import RemediationService
+from kubesentinel.scheduling.service import SchedulingService
 
 
 class AppState:
@@ -28,6 +30,8 @@ class AppState:
     ai_client: OllamaClient | None = None
     optimization_repo: SQLiteOptimizationRepository
     optimization: OptimizationService | None = None
+    scheduling_repo: SQLiteSchedulingRepository
+    scheduling: SchedulingService | None = None
 
 
 state = AppState()

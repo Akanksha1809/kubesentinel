@@ -22,7 +22,7 @@ anything), and the resource optimization engine producing a real
 samples. Recorded with [asciinema](https://asciinema.org) + [agg](https://github.com/asciinema/agg) --
 every line is genuine command output, not staged.
 
-## Status: Milestones 1-11 (troubleshooting) + 12-19 (resource optimization) complete
+## Status: Milestones 1-11 (troubleshooting) + 12-19 (resource optimization) + scheduling advisor complete
 
 The full **observe -> diagnose -> persist -> expose** pipeline is implemented,
 tested, and verified end-to-end against a real kind cluster for 13 of the 14
@@ -65,6 +65,19 @@ GET requests. See [RESOURCE_OPTIMIZATION_DESIGN.md](docs/RESOURCE_OPTIMIZATION_D
 for the full design and TODO.md's Milestones 12-19 for the build and
 live-verification history.
 
+A third, read-only engine -- the **scheduling & placement advisor** --
+follows the same shared-infrastructure pattern again: given a real Pending
+Pod or a hypothetical spec, it independently reconstructs *why* a Node does
+or doesn't fit, one constraint at a time (real Node allocatable-vs-requested
+arithmetic, real taint/toleration matching, real node-selector/required-
+node-affinity evaluation, real namespace-ResourceQuota checking for a
+hypothetical spec), rather than only classifying the scheduler's own
+message text the way the troubleshooting engine's `PendingSchedulingRule`
+already does. It's explicit about what it *doesn't* evaluate too -- pod
+affinity/anti-affinity and topology spread constraints are detected and
+named, never guessed at. See
+[SCHEDULING_ANALYSIS.md](docs/SCHEDULING_ANALYSIS.md) for the design.
+
 Every stage above is exported as Prometheus metrics with bounded-cardinality
 labels (category/action_type/reason/component, never incident IDs or pod
 names) at `GET /metrics`. [observability/](observability/) has a scrape config
@@ -75,14 +88,17 @@ was caught; see TODO.md's Known limitation #18.
 
 All 9 lab failure scenarios (every diagnostic category this project implements,
 one dedicated manifest each) plus 2 resource-optimization scenarios
-(oversized requests, missing requests entirely) are built and live-verified
+(oversized requests, missing requests entirely) plus 1 scheduling-advisor
+scenario (an impossible nodeSelector) are built and live-verified
 -- see [FAILURE_LAB.md](docs/FAILURE_LAB.md). The test suite now includes
 integration and e2e tests that exercise the real cluster directly (RBAC
 boundary enforcement, watch resync, UID-based dedup across a delete/recreate,
 restart recovery, concurrent remediation requests, the full propose/approve/
-execute/verify lifecycle against a real Deployment, and the optimization
-engine's own read-only guarantee and real-usage-data right-sizing) --
-`./scripts/test.sh --all` runs all 442 tests (410 unit + 32 integration/e2e);
+execute/verify lifecycle against a real Deployment, the optimization
+engine's own read-only guarantee and real-usage-data right-sizing, and the
+scheduling advisor's own independent constraint math reaching the same
+conclusion the real scheduler already did) --
+`./scripts/test.sh --all` runs all 541 tests (502 unit + 39 integration/e2e);
 see [TESTING.md](docs/TESTING.md).
 
 Optional AI summarization (`kubesentinel explain <incident-id>`, or
@@ -122,6 +138,20 @@ Deployment, StatefulSet/DaemonSet/Job)                                     right
                                                       Safety checks (flags unhealthy/system/
                                                       conservative workloads + ACTIVE_INCIDENT,
                                                       never silently drops a row)
+                                                            |
+                                                            v
+                                            SQLite persistence  <-->  FastAPI + CLI + /metrics
+```
+
+A third pipeline, same shared infrastructure again, no new watch loop:
+
+```
+Node inventory (allocatable,          -->  Per-constraint evaluators    -->  Finding: per-node,
+taints, labels) + a real or               (resource fit, taints,            per-constraint
+hypothetical Pod spec                     node selector, required          pass/fail with real
+                                           affinity, namespace quota)       arithmetic in the
+                                                                            reasoning -- plus what
+                                                                            wasn't evaluated
                                                             |
                                                             v
                                             SQLite persistence  <-->  FastAPI + CLI + /metrics
@@ -176,6 +206,15 @@ first (`./lab/install-metrics-server.sh`, optional, kind-specific):
 .venv/bin/kubesentinel review-recommendation <recommendation-id> APPROVED --reviewed-by "<your name>"
 ```
 
+The scheduling advisor explains a real Pending Pod, or simulates a
+hypothetical spec that doesn't exist yet -- also no extra setup needed:
+
+```bash
+.venv/bin/kubesentinel schedule-check kubesentinel-lab <pod-name>
+.venv/bin/kubesentinel scheduling-findings
+.venv/bin/kubesentinel scheduling-finding <finding-id>
+```
+
 AI summarization is off by default (works with no AI at all). To try it:
 [install Ollama](https://ollama.com), `ollama pull qwen2.5-coder:3b` (or any
 model you have), then:
@@ -219,9 +258,10 @@ src/kubesentinel/
   diagnostics/   Deterministic rule-based diagnostic engine + individual rules
   incidents/     Incident lifecycle: dedup by resource UID, health classification, severity
   optimization/  Read-only resource right-sizing: inventory, metrics providers, analyzer, safety
-  persistence/   Repository interfaces + SQLite implementations (incidents, optimization)
-  api/           FastAPI app (health/ready/incidents/evidence/actions/metrics/optimization)
-  cli/           Typer CLI mirroring the API for one-shot cluster inspection, remediation, and optimization
+  scheduling/    Read-only placement analysis: node inventory, per-constraint evaluators, analyzer
+  persistence/   Repository interfaces + SQLite implementations (incidents, optimization, scheduling)
+  api/           FastAPI app (health/ready/incidents/evidence/actions/metrics/optimization/scheduling)
+  cli/           Typer CLI mirroring the API for one-shot cluster inspection, remediation, optimization, and scheduling analysis
   metrics/       Prometheus metric definitions
   policy/        Policy engine: OBSERVE/APPROVAL_REQUIRED/CONTROLLED_AUTO decisions
   remediation/   Remediation executor + service (propose/approve/execute/reject/dry_run)
@@ -230,7 +270,8 @@ src/kubesentinel/
 lab/             kind cluster config, namespace, failure scenario manifests, scripts,
                  optional metrics-server installer
 rbac/            Least-privilege Role/RoleBinding/ServiceAccount for what's implemented today
-                 (observer, remediator, and optimizer Roles, each independently auditable)
+                 (observer, remediator, optimizer, and scheduling-advisor Roles, each
+                 independently auditable)
 observability/   Prometheus scrape config + importable Grafana dashboard
 tests/unit/      Deterministic unit tests, no cluster required
 docs/            Architecture, diagnostic rules, RBAC/threat model, failure lab, resource
@@ -240,10 +281,11 @@ docs/            Architecture, diagnostic rules, RBAC/threat model, failure lab,
 ## Documentation
 
 - [MASTER_ARCHITECTURE.md](docs/MASTER_ARCHITECTURE.md) -- the platform-wide shape every analysis engine follows, built or planned
-- [PLATFORM_ROADMAP.md](docs/PLATFORM_ROADMAP.md) -- milestone plan for the scheduling/network/capacity/security/operator capabilities ahead
+- [PLATFORM_ROADMAP.md](docs/PLATFORM_ROADMAP.md) -- milestone plan: scheduling advisor done, network/capacity/security/operator ahead
 - [IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md) -- evidence-backed, capability-by-capability status audit
-- [ARCHITECTURE.md](docs/ARCHITECTURE.md) -- component design and data flow for the two capabilities already built
+- [ARCHITECTURE.md](docs/ARCHITECTURE.md) -- component design and data flow for the troubleshooting and resource-optimization engines
 - [RESOURCE_OPTIMIZATION_DESIGN.md](docs/RESOURCE_OPTIMIZATION_DESIGN.md) -- the resource optimization engine's own design, algorithms, and milestone plan
+- [SCHEDULING_ANALYSIS.md](docs/SCHEDULING_ANALYSIS.md) -- the scheduling advisor's own design: what's evaluated for real vs. only detected
 - [DIAGNOSTIC_RULES.md](docs/DIAGNOSTIC_RULES.md) -- every rule, its evidence, and its confidence logic
 - [FAILURE_LAB.md](docs/FAILURE_LAB.md) -- each lab scenario: how it fails, what's expected, how to clean up
 - [RBAC_AND_THREAT_MODEL.md](docs/RBAC_AND_THREAT_MODEL.md) -- least privilege, trust boundaries

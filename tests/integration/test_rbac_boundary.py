@@ -168,3 +168,21 @@ def test_cannot_patch_statefulsets_daemonsets_jobs_or_replicasets():
 
 def test_cannot_list_statefulsets_outside_lab_namespace():
     assert kubectl_can_i("list", "statefulsets", namespace="kube-system") is False
+
+
+# --- Scheduling advisor Role (rbac/scheduling-role.yaml): read-only, lab namespace only ---
+
+
+def test_can_list_resourcequotas_in_lab_namespace(kubesentinel_sa_clients):
+    core, _, _, _ = kubesentinel_sa_clients
+    assert core.list_namespaced_resource_quota(namespace=LAB_NAMESPACE, limit=1) is not None
+
+
+def test_cannot_patch_resourcequotas():
+    # Read-only Role: scheduling/analyzer.py only ever reads ResourceQuota
+    # status to check a hypothetical spec against it, never mutates one.
+    assert kubectl_can_i("patch", "resourcequotas", namespace=LAB_NAMESPACE) is False
+
+
+def test_cannot_list_resourcequotas_outside_lab_namespace():
+    assert kubectl_can_i("list", "resourcequotas", namespace="kube-system") is False

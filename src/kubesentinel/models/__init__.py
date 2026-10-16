@@ -28,6 +28,14 @@ from kubesentinel.models.optimization import (
     WorkloadKind,
     WorkloadSnapshot,
 )
+from kubesentinel.models.scheduling import (
+    ConstraintResult,
+    ConstraintType,
+    NodeFitResult,
+    NodeSnapshot,
+    NodeTaint,
+    SchedulingFinding,
+)
 
 __all__ = [
     "ActionStatus",
@@ -58,4 +66,10 @@ __all__ = [
     "UsageSummary",
     "WorkloadKind",
     "WorkloadSnapshot",
+    "ConstraintResult",
+    "ConstraintType",
+    "NodeFitResult",
+    "NodeSnapshot",
+    "NodeTaint",
+    "SchedulingFinding",
 ]

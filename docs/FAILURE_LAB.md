@@ -13,6 +13,7 @@ kubectl apply -f lab/manifests/scenario-transient-recovery/pod.yaml
 ./lab/scripts/run-scenario.sh oversized-resources   # resource optimization engine's
 ./lab/scripts/run-scenario.sh missing-requests      # own scenarios (not failures)
 ./lab/install-metrics-server.sh                     # optional, for CPU/memory recommendations
+./lab/scripts/run-scenario.sh invalid-node-selector # scheduling advisor's own scenario
 ./lab/scripts/cleanup.sh                      # removes all scenario Deployments/Pods
 ./lab/delete-cluster.sh                       # destroys the kind cluster entirely
 ```
@@ -261,6 +262,37 @@ kubectl apply -f lab/manifests/scenario-transient-recovery/pod.yaml
 - **Verified live**: produced `DATA_QUALITY` from the very first
   `analyze()` call (`sample_count=1`), and was correctly superseded
   (marked `EXPIRED`) by each subsequent call's fresh row.
+
+## Scenario: `invalid-node-selector` (scheduling advisor)
+
+- **Manifest**: `lab/manifests/scenario-invalid-node-selector/deployment.yaml`
+- **How it's set up**: `nodeSelector: {disktype: nonexistent-ssd-type}`, a
+  label no Node in this cluster has -- a real, common misconfiguration (a
+  typo'd or stale selector), not a resource-sizing problem. The container
+  itself (`sleep infinity`) would run fine if ever scheduled; it never will
+  be.
+- **Expected Kubernetes behavior**: `status.conditions[PodScheduled]` stays
+  `status=False, reason=Unschedulable`, with a message naming the selector
+  mismatch (e.g. "didn't match Pod's node affinity/selector").
+- **Expected troubleshooting-engine diagnosis**:
+  `PENDING_SCHEDULING_CONSTRAINT` -- a different reason code from
+  `pending-resources`'s `PENDING_INSUFFICIENT_RESOURCES`, since this is a
+  selector mismatch, not a capacity shortfall.
+- **Expected scheduling-advisor finding**: `kubesentinel schedule-check
+  kubesentinel-lab <pod-name>` names the `NODE_SELECTOR` constraint
+  specifically as the blocker (`disktype='nonexistent-ssd-type' (node has
+  None)`), while `RESOURCE_FIT`/`TAINT_TOLERATION`/`REQUIRED_NODE_AFFINITY`
+  all pass -- the point of this scenario existing separately from
+  `pending-resources` is to demonstrate the advisor distinguishes *which*
+  constraint blocked placement, not just that scheduling failed.
+- **No automatic action**: this engine never patches a Pod's scheduling
+  constraints; see docs/SCHEDULING_ANALYSIS.md Section 6.
+- **Verified live**: `RESOURCE_FIT` correctly passed (real node allocatable
+  4000m CPU / ~5.1Gi memory, ~2150m/~950Mi already requested by other lab
+  Pods at analysis time -- genuine cluster numbers, not mocked) while
+  `NODE_SELECTOR` correctly failed, confirmed both via the CLI and a live
+  integration test (`tests/integration/test_scheduling_live.py`) that also
+  confirmed zero non-GET HTTP calls during the full analysis pass.
 
 ## Image caching
 

@@ -93,9 +93,31 @@ has existed since Milestone 13 but has no caller anywhere in this codebase
 yet -- granting RBAC ahead of the code that uses it is exactly what this
 project's RBAC principle (above) exists to avoid.
 
-This entire boundary -- all three Roles, both directions (what's granted and
+```yaml
+# rbac/scheduling-role.yaml (current, in full) -- a fourth, separate Role,
+# for the scheduling & placement advisor (Milestone 3 of the platform spec)
+rules:
+  - apiGroups: [""]
+    resources: ["resourcequotas"]
+    verbs: ["get", "list"]
+```
+
+The smallest Role this project has added yet, for a reason worth stating:
+Nodes are already granted by `clusterrole.yaml` (Capability A's
+`NodeConditionRule`), Pods/Deployments by `role.yaml`, ReplicaSets by
+`remediation-role.yaml` (reused here for the same owner-reference
+resolution `optimization/ownership.py` already does) -- the scheduling
+advisor's own package needs *zero* new grants for any of that. The one
+genuinely new permission is `resourcequotas`, used only for the
+namespace-quota check in a *hypothetical*-spec simulation (`POST
+/scheduling/simulate`) -- never checked for a real, already-existing Pod,
+since a real Pod already passed admission and quota can't explain why it's
+Pending. `get`/`list` only, same "one-shot snapshot, never a watch" reason
+as `optimization-role.yaml`.
+
+This entire boundary -- all four Roles, both directions (what's granted and
 what isn't) -- is now covered by `tests/integration/test_rbac_boundary.py`:
-20 automated checks, authenticated as the real `kubesentinel`
+23 automated checks, authenticated as the real `kubesentinel`
 ServiceAccount's own minted token plus `kubectl auth can-i --as=...`, run
 against the live cluster every time `./scripts/test.sh --all` does. This is
 the repeatable version of what Milestone 4's one-off manual verification
@@ -158,6 +180,14 @@ explicit justification in this document, not a silent addition to an existing Ro
   resources -- a future apply path (not built) would need to be added
   explicitly, through the *existing* `PolicyEngine`/`RemediationExecutor`
   lifecycle, not a parallel one.
+- **The scheduling advisor (`scheduling/`) is read-only by construction,
+  the same way.** `node_inventory.py`/`constraints.py`/`analyzer.py` never
+  call a write method either -- a live integration test confirms only
+  `GET` during a full `analyze_pod()` pass, the same check the
+  optimization engine already has. Even the *simulation* endpoint (`POST
+  /scheduling/simulate`) never creates the hypothetical Pod it analyzes --
+  the raw spec is deserialized into a typed object and evaluated in
+  memory, nothing is ever sent to the API server as a creation request.
 - **AI (`ai/summarizer.py`) has no Kubernetes credentials, no database access, and
   no path to the policy/remediation engines at all.** `summarize_incident()` takes
   an already-built `Incident` object and an `AiClient`; it never touches

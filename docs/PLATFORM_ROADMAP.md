@@ -81,9 +81,17 @@ Prometheus metrics, RBAC, live kind-lab scenarios, and documentation).
 audited status -- including the one real scaffolded-but-unpopulated gap
 (CPU throttling) named under Milestone 1 above.
 
-## Milestone 3: Scheduling advisor
+## Milestone 3: Scheduling advisor -- DONE
 
-**Scope**: a new `scheduling/` package. Reuses
+See `docs/SCHEDULING_ANALYSIS.md` for the design and TODO.md's own entry
+for the full build-and-verification history. `docs/IMPLEMENTATION_STATUS.md`'s
+Capability C section is the authoritative, audited status. Topology spread
+constraints, pod affinity/anti-affinity, and PriorityClass/preemption
+simulation were scoped out of this milestone, as planned below, and remain
+`unevaluated_constraints` a finding reports rather than guesses at.
+
+**Original scope** (for reference; superseded by what's actually built,
+above): a new `scheduling/` package. Reuses
 `diagnostics/rules/scheduling.py::classify_unschedulable_message()` as the
 coarse first pass (already proven, already reused once by the optimization
 engine), then adds the independent constraint reconstruction that message
@@ -236,11 +244,20 @@ staged) demo GIF now in `README.md`.
 
 Per the spec's own final instruction ("begin with whichever prerequisite
 is genuinely incomplete"): Milestone 1 is already substantially satisfied
-by the audit, so the next milestone with genuinely new work is Milestone 3
-(scheduling advisor) -- chosen over 4/5/6 because it has the most existing
-code to build on (`scheduling.py`'s message classification, already reused
-once) and the clearest, most self-contained scope. Milestones 4, 5, and 6
-have no hard dependency on each other or on 3, beyond all four sharing the
-`MASTER_ARCHITECTURE.md` pattern -- their relative order past Milestone 3
-is a scheduling convenience, not a technical requirement, and can be
-revisited.
+by the audit, and Milestone 3 (scheduling advisor) is now done -- chosen
+first over 4/5/6 because it had the most existing code to build on
+(`scheduling.py`'s message classification, already reused once) and the
+clearest, most self-contained scope. That reasoning held: the whole
+milestone shipped in one pass with no scope renegotiation needed mid-build.
+
+Milestones 4, 5, and 6 still have no hard dependency on each other or on 3,
+beyond all four sharing the `MASTER_ARCHITECTURE.md` pattern (now proven
+against a third capability, not just a second -- see
+`IMPLEMENTATION_STATUS.md`'s "Shared observation, storage, and API"
+section) -- their relative order is a scheduling convenience, not a
+technical requirement, and can be revisited. Capability D (network) is a
+reasonable next pick: it's the one most directly promised by Capability A's
+own long-reserved, long-unused `DNS_RESOLUTION_FAILURE` reason code, and it
+has a real environment constraint (kindnet not enforcing NetworkPolicy)
+already on record to design around rather than discover mid-build, the same
+way Milestone 3's single-node constraint was known going in.

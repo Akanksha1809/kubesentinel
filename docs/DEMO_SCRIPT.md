@@ -222,6 +222,40 @@ There is no apply/execute step after this -- a review is a decision record
 only; see RESOURCE_OPTIMIZATION_DESIGN.md §6 for why that's deliberate, not
 an oversight.
 
+**8c. Show the scheduling advisor explain -- not just classify -- a real
+Pending Pod.**
+
+```bash
+./lab/scripts/run-scenario.sh invalid-node-selector
+kubectl -n kubesentinel-lab get pods -l app=invalid-node-selector-demo
+```
+
+Find the real Pod name, then:
+
+```bash
+.venv/bin/kubesentinel schedule-check kubesentinel-lab <pod-name>
+```
+
+Point out the per-constraint breakdown: `RESOURCE_FIT` and
+`TAINT_TOLERATION` both pass (real arithmetic against the real Node's
+allocatable capacity, not a guess), while `NODE_SELECTOR` fails, naming the
+exact label that didn't match. Contrast this with the earlier
+`pending-resources-demo` scenario (step 3) -- running the same command
+against that Pod instead shows `RESOURCE_FIT` as the blocker, with
+`NODE_SELECTOR` passing. The point: the troubleshooting engine's own
+`PendingSchedulingRule` already tells you a Pod is unschedulable and
+roughly why (from the scheduler's own message text); this engine
+independently re-derives *which specific constraint*, with its own
+arithmetic, not just a classification of what the scheduler already said.
+
+Then show the read-only simulation path -- no Pod is ever created:
+
+```bash
+curl -s -X POST http://127.0.0.1:8000/scheduling/simulate -H "Content-Type: application/json" \
+  -d '{"namespace":"kubesentinel-lab","pod_spec":{"containers":[{"name":"app","resources":{"requests":{"cpu":"100m","memory":"64Mi"}}}]}}' \
+  | python3 -m json.tool
+```
+
 **9. Be upfront about what this isn't, yet.**
 
 Nothing in the live diagnosis pipeline *automatically* calls `propose()` --
@@ -234,7 +268,10 @@ recommendation itself -- every number it produces still needs a human (or a
 future, explicitly-built policy-engine path) to act on it; see
 RESOURCE_OPTIMIZATION_DESIGN.md's known limitations for what's deliberately
 not built there (cluster-level overcommitment analysis, an apply/execute
-path). `TODO.md` lists exactly what's next and what's known-incomplete; pull
+path). The scheduling advisor never evaluates pod affinity/anti-affinity or
+topology spread constraints -- it says so explicitly in every finding that
+has one, rather than guessing; see SCHEDULING_ANALYSIS.md Section 2.
+`TODO.md` lists exactly what's next and what's known-incomplete; pull
 it up if asked "so what's missing."
 
 ## Cleanup

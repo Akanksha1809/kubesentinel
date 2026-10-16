@@ -110,37 +110,72 @@ engine's own Milestone 2 but has no caller); any apply/execute path (see
 
 ## Capability C: Kubernetes Scheduling & Placement Advisor
 
-**Missing.** No `scheduling/` (or similarly named) analysis module exists.
-What exists today and is directly reusable:
+**Implemented** (Milestone 3 of `docs/PLATFORM_ROADMAP.md`;
+`docs/SCHEDULING_ANALYSIS.md` is the design). A new `scheduling/` package:
+`node_inventory.py` (Node allocatable/requested/taints/labels, built the
+same one-shot-snapshot way `optimization/inventory.py` is), `constraints.py`
+(pure per-constraint functions), `analyzer.py` (orchestrates every
+constraint against every Node for a real or hypothetical Pod spec),
+`service.py` (the one module with side effects, mirroring
+`OptimizationService` exactly).
 
-- `diagnostics/rules/scheduling.py::classify_unschedulable_message()` --
-  text classification of the scheduler's own message. A real foundation
-  (already reused once, by Capability B, via import), but it is pattern
-  matching on a string, not independent constraint evaluation. It cannot
-  explain *which specific node* failed *which specific constraint*, only
-  classify the scheduler's own summary into a coarse bucket.
-- `optimization/inventory.py`'s workload inventory (owner-reference
-  resolution, resource requests/limits per container) -- reusable for the
-  "would this Pod's requests fit anywhere" half of a feasibility check, but
-  it never lists Nodes at all today (no `clients.core.list_node()` call
-  anywhere in `optimization/`).
-- `ClusterClients` has no gap here for the data this needs (`core.list_node`
-  already exists on `CoreV1Api`) -- but nothing in this codebase reads
-  `Node.status.allocatable`, `Node.spec.taints`, Pod
-  `affinity`/`nodeSelector`/`tolerations`, topology spread constraints, or
-  `PriorityClass`/preemption evidence anywhere.
+| Spec item | Status | Evidence |
+|---|---|---|
+| Node allocatable CPU/memory | Implemented | `RESOURCE_FIT`, reproducing the scheduler's own accounting (allocatable minus every *other* bound Pod's own requests) |
+| Node selectors | Implemented | `NODE_SELECTOR`, exact label-equality |
+| Node affinity (required) | Implemented | `REQUIRED_NODE_AFFINITY`, all 6 real operators (`In`/`NotIn`/`Exists`/`DoesNotExist`/`Gt`/`Lt`), terms OR'd, expressions within a term AND'd |
+| Node affinity (preferred) | Detected, not evaluated | a soft scoring preference -- reported in `unevaluated_constraints`, never treated as blocking |
+| Pod affinity / anti-affinity | Detected, not evaluated | needs every other Pod's labels across every candidate node -- out of v1 scope, named explicitly in every finding that has one |
+| Taints and tolerations | Implemented | `TAINT_TOLERATION` -- real effect/operator/value matching; `PreferNoSchedule` reported as soft, never blocking, matching real scheduler semantics |
+| Topology spread constraints | Detected, not evaluated | same reasoning as pod affinity |
+| PVC binding / volume topology | **Not built** | not in this milestone's scope; the troubleshooting engine's own `PvcBindingFailureRule` already covers binding-failure diagnosis separately |
+| Unschedulable Node conditions | Implemented | `NodeSnapshot.ready`/`unschedulable` -- a cordoned or not-Ready Node is never schedulable, before any constraint is even checked |
+| Pod priority / preemption | **Not built** | explicitly out of v1 scope (real preemption victim-selection is well beyond "explain and simulate") |
+| Namespace quotas | Implemented, hypothetical-spec only | `NAMESPACE_QUOTA` -- deliberately **not** checked for a real, already-existing Pod (it already passed admission, so quota can't explain its Pending state); only meaningful for `POST /scheduling/simulate`'s hypothetical path, and the code enforces that distinction rather than checking it unconditionally |
+| Admission constraints generally | Partial | only ResourceQuota; no LimitRange, no custom admission webhook awareness |
+| Explain blocking constraints | Implemented | per-node, per-constraint `ConstraintResult` with real arithmetic/labels in `reasoning`, not a generic message |
+| Hard vs. soft constraints distinguished | Implemented | `PreferNoSchedule`/preferred node affinity never set `satisfied=False`; the finding's `unevaluated_constraints` list is itself the hard/soft-equivalent "evaluated vs. detected" distinction for the constraints this engine doesn't score |
+| Observed vs. inferred evidence separated | Implemented | a real Pod's `scheduler_message` (the scheduler's own words) is carried alongside this engine's own independent math -- never conflated, both shown |
+| Read-only placement simulation | Implemented | `POST /scheduling/simulate`, a raw Pod spec dict deserialized into a typed `V1PodSpec` via the Kubernetes client's own deserializer, analyzed with zero mutation |
+| No replacement scheduler | Honored | no scoring/ranking logic anywhere -- pass/fail per constraint only, explicitly not a reimplementation of `kube-scheduler`'s own plugins |
 
-**Environment constraint worth stating now, before this is built**: the lab
-kind cluster (`lab/kind-config.yaml`) is deliberately single-node (a
-documented choice, to avoid the extra memory cost of a second node on a
-laptop). Any placement *simulation* demo ("Pod would/wouldn't fit here")
-will be able to show real allocatable-vs-requested math against the one
-node, and real taint/affinity rule evaluation, but cannot demonstrate a
-genuinely multi-node trade-off (e.g. "fits on node B but not node A") on
-this project's own default lab setup. A multi-node `kind-config.yaml`
-variant may be worth adding specifically for this capability's own demo
-scenario -- not required for the analysis logic itself, which doesn't care
-how many nodes exist.
+**A real, checked-not-assumed approximation, named here**: resource-fit math
+sums only regular containers' requests, not init containers (the real
+scheduler takes the *max* of init vs. regular container requests per
+resource, not a sum) -- documented in `node_inventory.py::_pod_requested`'s
+own docstring, not silently wrong.
+
+**A real gap caught live during this milestone's own verification, by this
+audit's own standard**: `SchedulingFinding.related_incident_ids` was
+declared in the design doc and the model from the start, but
+`SchedulingService` had no `incident_repo` parameter at all until a live
+check against the real cluster showed the field staying empty on every
+finding -- the exact "scaffolded but never populated" shape this document
+flagged for `UsageSummary.throttled` in the optimization engine. Fixed
+within the same milestone, before it shipped: `SchedulingService._open_incident_ids_for()`
+now does the same dual-UID lookup `OptimizationService` already does, and a
+live check against a real `pending-resources-demo` Pod with a genuinely
+open incident confirmed the link now appears.
+
+**Environment constraint, confirmed still true**: the lab kind cluster
+remains single-node. The analyzer itself loops over N nodes correctly
+(confirmed by `test_multiple_nodes_schedulable_if_any_one_fits`, a unit
+test with two synthetic nodes), but the live demo can only ever show one
+node's own pass/fail, never a genuine multi-node trade-off. Not addressed
+in this milestone -- still a legitimate future addition if a multi-node
+demo becomes valuable.
+
+**Live-verified against the real cluster**: the existing
+`pending-resources-demo` scenario correctly blocks on `RESOURCE_FIT` alone;
+a new `invalid-node-selector-demo` scenario (added this milestone, see
+FAILURE_LAB.md) correctly blocks on `NODE_SELECTOR` alone, with
+`RESOURCE_FIT` passing -- confirming the engine distinguishes *which*
+constraint blocked placement, not just that scheduling failed. Both
+confirmed via real node allocatable/requested numbers read live (4000m CPU,
+~5.1Gi memory allocatable; ~2150m/~950Mi already requested by other lab
+Pods at analysis time), not mocked. A live integration test
+(`tests/integration/test_scheduling_live.py`) patches the HTTP transport
+itself and confirms a full `analyze_pod()` pass issues only `GET`.
 
 ## Capability D: Kubernetes Network Troubleshooting Engine
 
@@ -225,16 +260,15 @@ AI output has no path back to any decision (confirmed above).
 
 ## Shared observation, storage, and API
 
-**Implemented, and already proven to scale to a second analysis engine** --
-Capability B reused `ClusterClients`, `SQLiteOptimizationRepository` (a
-sibling to `SQLiteIncidentRepository` behind the same
-`persistence/interface.py` pattern), the same FastAPI app
-(`api/optimization_routes.py` as a separate `APIRouter`, not a second app),
-and the same CLI (`cli/main.py`) without duplicating any of the
-observer/watch infrastructure. This is the concrete precedent C/D/E/F
-should each follow: a new `<capability>/` package, a new sibling repository
-class, a new `APIRouter`, new CLI commands -- never a second watcher, a
-second database file, or a second web app.
+**Implemented, and now proven to scale to a third analysis engine, not just
+a second** -- Capability C (`scheduling/`) followed the exact same pattern
+Capability B established: a new `SQLiteSchedulingRepository` sibling behind
+`persistence/interface.py`, a new `APIRouter` (`api/scheduling_routes.py`),
+new CLI commands, zero new watch loops, zero new database files, zero new
+web apps. Two data points generalizing to a third without needing to bend
+the pattern is a stronger signal than two alone -- `MASTER_ARCHITECTURE.md`'s
+own "the one pattern, stated once" section was written after only two
+engines existed; it held up unchanged for the third.
 
 API path convention: this repository has never used an `/api/v1` prefix
 (`/incidents`, `/optimization/...`, `/metrics` are all flat). The spec's
@@ -251,9 +285,10 @@ exist for it to expose as policy -- correctly sequenced last.
 
 ## Controlled Chaos & Resilience Lab
 
-**Partial.** The *scenario* half is strong and already live-verified: 11
+**Partial.** The *scenario* half is strong and already live-verified: 12
 lab scenario directories under `lab/manifests/` (9 original troubleshooting
-scenarios + 2 resource-optimization scenarios), each with setup
+scenarios + 2 resource-optimization scenarios + 1 scheduling-advisor
+scenario), each with setup
 instructions, expected symptoms, expected diagnosis, and cleanup --
 documented per-scenario in FAILURE_LAB.md. `lab/scripts/run-scenario.sh`
 and `lab/scripts/cleanup.sh` are generic, scenario-agnostic appliers, and
@@ -271,12 +306,12 @@ reproduce or compare against.
 
 ## Observability
 
-**Implemented for Capabilities A and B**, following one consistent,
-bounded-cardinality labeling discipline across both (`category`,
-`action_type`, `reason`, `component`, `status`, `provider` -- never an
-incident ID, recommendation ID, or Pod name as a label; confirmed by
-reading every `Counter`/`Gauge`/`Histogram` definition in
-`metrics/registry.py`). `observability/prometheus.yml` +
+**Implemented for Capabilities A, B, and C**, following one consistent,
+bounded-cardinality labeling discipline across all three (`category`,
+`action_type`, `reason`, `component`, `status`, `provider`, `result` --
+never an incident ID, recommendation ID, finding ID, or Pod name as a
+label; confirmed by reading every `Counter`/`Gauge`/`Histogram` definition
+in `metrics/registry.py`). `observability/prometheus.yml` +
 `grafana-dashboard.json` exist and are verified against real `/metrics`
 output. No per-module "degraded / unknown / not applicable" distinction
 exists as a first-class concept yet (today a missing metrics provider is

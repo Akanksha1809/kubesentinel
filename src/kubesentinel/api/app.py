@@ -21,7 +21,7 @@ from pydantic import BaseModel, Field
 
 from kubesentinel.ai.client import AiClientError, OllamaClient
 from kubesentinel.ai.summarizer import summarize_incident
-from kubesentinel.api import optimization_routes
+from kubesentinel.api import optimization_routes, scheduling_routes
 from kubesentinel.api.state import require_api_token, state
 from kubesentinel.config import get_settings
 from kubesentinel.incidents.manager import IncidentManager
@@ -32,6 +32,7 @@ from kubesentinel.observer.client import build_clients
 from kubesentinel.observer.service import ObserverService
 from kubesentinel.optimization.service import OptimizationService
 from kubesentinel.persistence.optimization_repo import SQLiteOptimizationRepository
+from kubesentinel.persistence.scheduling_repo import SQLiteSchedulingRepository
 from kubesentinel.persistence.sqlite_repo import SQLiteIncidentRepository
 from kubesentinel.policy.engine import PolicyEngine
 from kubesentinel.remediation.executor import RemediationExecutor
@@ -40,6 +41,7 @@ from kubesentinel.remediation.service import (
     InvalidActionStateError,
     RemediationService,
 )
+from kubesentinel.scheduling.service import SchedulingService
 from kubesentinel.verification.verifier import RecoveryVerifier
 
 logger = logging.getLogger(__name__)
@@ -59,6 +61,7 @@ async def lifespan(app: FastAPI):
         else None
     )
     state.optimization_repo = SQLiteOptimizationRepository(settings.db_path)
+    state.scheduling_repo = SQLiteSchedulingRepository(settings.db_path)
 
     try:
         clients = build_clients(settings)
@@ -72,11 +75,13 @@ async def lifespan(app: FastAPI):
         )
         state.remediation = RemediationService(PolicyEngine(settings), executor, verifier, state.repo, settings)
         state.optimization = OptimizationService(clients, state.optimization_repo, settings, incident_repo=state.repo)
+        state.scheduling = SchedulingService(clients, state.scheduling_repo, incident_repo=state.repo)
     except Exception:  # noqa: BLE001 - API must still serve read endpoints without a cluster
         logger.exception("could not start observer; no kubeconfig/in-cluster config available")
         state.observer = None
         state.remediation = None
         state.optimization = None
+        state.scheduling = None
 
     yield
 
@@ -84,10 +89,12 @@ async def lifespan(app: FastAPI):
         state.observer.stop()
     state.repo.close()
     state.optimization_repo.close()
+    state.scheduling_repo.close()
 
 
 app = FastAPI(title="KubeSentinel", version="0.1.0", lifespan=lifespan)
 app.include_router(optimization_routes.router)
+app.include_router(scheduling_routes.router)
 
 
 def _require_remediation_service() -> RemediationService:

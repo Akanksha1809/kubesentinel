@@ -1238,6 +1238,181 @@ verification, and now documentation -- all 8 steps done, each with its own
 live-verification evidence recorded above (Milestones 12-19 in this file's
 own numbering).
 
+## Milestone 20: Platform spec Milestone 0 -- repository audit -- DONE
+
+A new, broader platform specification arrived asking KubeSentinel to grow
+into a multi-capability reliability/optimization platform: scheduling
+advisor, network troubleshooting, capacity planning, security auditing, an
+operator, and a chaos-lab evaluation harness, on top of the troubleshooting
+engine and resource optimization engine already built. Per the spec's own
+explicit instruction ("Start with Milestone 0 only"), this milestone was
+audit-only -- no code changed.
+
+Ran the baseline test suite (410 unit tests passed, ruff/mypy clean;
+`--all` affected by this session's now-extensively-documented shared-VM
+contention, cited against the already-verified 442-test baseline rather
+than re-chased), inspected every existing package against the spec's own
+capability list (sections 2-12), and produced three new docs:
+`docs/IMPLEMENTATION_STATUS.md` (a capability-by-capability matrix, every
+"Implemented" claim naming the file(s) that back it), `docs/MASTER_ARCHITECTURE.md`
+(the one shared pattern every analysis engine should follow, stated once),
+and `docs/PLATFORM_ROADMAP.md` (the spec's own Milestone 0-9 numbering,
+adapted to this repo's actual structure) -- cross-referencing, not
+duplicating, the existing ARCHITECTURE.md/TODO.md/RESOURCE_OPTIMIZATION_DESIGN.md.
+
+**Real findings from the audit, not just a status restatement**:
+- `UsageSummary.throttled` (resource optimization engine) is scaffolded but
+  never populated -- always `None`. A real, previously-undocumented gap.
+- The lab's kind cluster is single-node and uses kindnet, which doesn't
+  enforce NetworkPolicy -- two environment constraints that will shape
+  Capability C (scheduling) and Capability D (network) respectively, found
+  and documented *before* either was built, not discovered mid-build.
+
+See `docs/IMPLEMENTATION_STATUS.md` for the full, evidence-backed audit.
+
+## Milestone 21: Scheduling & Placement Advisor -- DONE
+
+Per `docs/PLATFORM_ROADMAP.md`'s own sequencing (Milestone 3 of the
+platform spec; Milestone 1's "stabilize the core" had nothing genuinely
+incomplete to fix, confirmed by the Milestone 20 audit). Design-first, per
+this project's own established precedent: `docs/SCHEDULING_ANALYSIS.md`
+before any code, covering exactly which constraints would be evaluated for
+real vs. only detected-and-reported, before implementation began.
+
+Added:
+
+- `scheduling/node_inventory.py` -- builds Node allocatable capacity and
+  *requested* resources (the scheduler's own accounting unit: the sum of
+  every other bound Pod's own requests, not live usage) in one list-only
+  pass, the same "one-shot snapshot, no watch loop" shape
+  `optimization/inventory.py` already established.
+- `scheduling/constraints.py` -- five pure, independently-tested constraint
+  functions: `RESOURCE_FIT` (reproduces the scheduler's own
+  allocatable-minus-requested arithmetic), `TAINT_TOLERATION` (real
+  effect/operator/value matching, `PreferNoSchedule` correctly treated as
+  soft and never blocking), `NODE_SELECTOR` (exact label equality),
+  `REQUIRED_NODE_AFFINITY` (all 6 real `NodeSelectorRequirement` operators,
+  terms OR'd, expressions within a term AND'd), `NAMESPACE_QUOTA` (real
+  ResourceQuota arithmetic). Four more constraint types (preferred node
+  affinity, pod affinity, pod anti-affinity, topology spread) are
+  *detected* and named in every finding that has one, never silently
+  ignored and never guessed at -- the exact "explain and simulate, don't
+  reimplement the scheduler" boundary the spec asked for, made structural
+  (`EVALUATED_CONSTRAINT_TYPES` vs. everything else) rather than just
+  described in prose.
+- `scheduling/analyzer.py` -- orchestrates every evaluated constraint
+  against every Node for a real Pod *or* a hypothetical spec. A
+  hypothetical spec (a raw JSON dict) is deserialized into a real, typed
+  `V1PodSpec` via the Kubernetes client's own deserializer
+  (`ApiClient().__deserialize`) before analysis, so every constraint
+  function reads real and hypothetical Pods through exactly the same
+  attribute-based code, no second path. A real, deliberate design decision
+  made during implementation, not anticipated in the design doc: the
+  namespace-quota check only ever runs for a hypothetical spec, never a
+  real already-existing Pod -- a real Pod already passed admission, so
+  quota can't explain why it's Pending; checking it again would be
+  meaningless, and the code enforces that distinction (`check_quota: bool`,
+  never inferred from "quotas is non-empty") rather than leaving it to the
+  caller to get right.
+- `scheduling/service.py` -- `SchedulingService`, the one module with side
+  effects, mirroring `OptimizationService` exactly: `analyze_pod()` (a real
+  Pod, resolves the owning workload via `optimization/ownership.py::resolve_pod_owner`,
+  reused by import), `analyze_hypothetical()`, `get_finding()`/`list_findings()`.
+  Wraps each analyze path in a try/except recording
+  `kubesentinel_scheduling_analysis_total{result}` (schedulable/
+  unschedulable/failed), the same pattern `OptimizationService.analyze()`
+  already established.
+- `models/scheduling.py`, `persistence/scheduling_repo.py`
+  (`SQLiteSchedulingRepository`, a third sibling behind
+  `persistence/interface.py`), `api/scheduling_routes.py` (`POST
+  /scheduling/analyze`, `POST /scheduling/simulate`, `GET
+  /scheduling/findings[/{id}]`), and 5 new CLI commands
+  (`schedule-check`, `scheduling-findings`, `scheduling-finding`) -- all
+  following the exact pattern `MASTER_ARCHITECTURE.md` describes, now
+  proven against a third capability, not just a second.
+- `rbac/scheduling-role.yaml` -- the smallest Role this project has added
+  yet: `resourcequotas` (get/list) is the only genuinely new grant: Nodes,
+  Pods/Deployments, and ReplicaSets were already granted to the same
+  ServiceAccount by three *other* existing Roles, reused rather than
+  re-granted.
+- A new lab scenario, `scenario-invalid-node-selector` (an impossible
+  `nodeSelector`), chosen specifically because no existing scenario
+  exercises a non-resource scheduling constraint --
+  `pending-resources-demo` already covered the resource-shortfall case.
+
+**A real gap found and fixed within this same milestone, by this
+project's own Milestone 20 audit standard**: `SchedulingFinding.related_incident_ids`
+was declared in the design doc and the model from the start (mirroring
+`ResourceRecommendation`'s own incident link), but `SchedulingService` had
+no `incident_repo` parameter at all -- the field would have stayed `[]` on
+every finding, the exact "scaffolded but never populated" shape Milestone
+20's audit flagged for `UsageSummary.throttled` in the *other* engine.
+Caught by live-checking the field against a real Pod with a genuinely open
+incident rather than trusting the design doc's own description of what the
+model *should* do. Fixed by adding `SchedulingService._open_incident_ids_for()`
+-- the exact same dual-UID (Pod's own UID, owning workload's UID), deduped,
+no-repo-wired-up-is-a-safe-no-op lookup `OptimizationService` already
+established -- and wiring `incident_repo=state.repo`/a fresh
+`SQLiteIncidentRepository` into the API and CLI construction paths, the
+same way the optimization engine's own `_build_optimization_service()`
+already does. Re-verified live immediately after: `schedule-check` against
+the real `pending-resources-demo` Pod now correctly shows
+`Related incident(s): ea2cc5a6-...`, matching the real open incident on its
+owning Deployment. 4 new unit tests
+(`TestIncidentLinking` in `test_scheduling_service.py`) cover the no-repo
+no-op case, a match on the Pod's own UID, no match, and persistence.
+
+**Live-verified against the real cluster**, not just unit-tested: both
+`pending-resources-demo` (existing) and the new `invalid-node-selector-demo`
+Pods analyzed with real Node numbers (4000m CPU / ~5.1Gi memory
+allocatable, ~2150m/~950Mi already requested by other lab Pods at analysis
+time) -- the advisor correctly isolated `RESOURCE_FIT` as the sole blocker
+for the former and `NODE_SELECTOR` as the sole blocker for the latter
+(`RESOURCE_FIT` passing), confirming it distinguishes *which* constraint
+blocked placement, not just that scheduling failed. Owner-reference
+resolution correctly named the owning Deployment for both. The HTTP
+`/scheduling/simulate` endpoint confirmed live: a fitting hypothetical
+spec returns `schedulable: true`; an impossible one (100 cores) correctly
+returns `false`; a malformed spec (`"containers": "not-a-list"`) correctly
+returns `422`, distinct from a `503` cluster-unreachable failure (`service.py::InvalidPodSpecError`
+is a separate exception type specifically so the API layer can tell these
+apart, mirroring the optimization engine's own 422-vs-503 distinction from
+Milestone 18). The new RBAC Role verified against the real
+`kubesentinel` ServiceAccount, not just admin: `resourcequotas` list went
+from `no` to `yes` after applying it.
+
+**Tests**: 92 new unit tests (`test_scheduling_constraints.py`: 32,
+`test_scheduling_node_inventory.py`: 10, `test_scheduling_analyzer.py`: 19,
+`test_scheduling_repo.py`: 7, `test_scheduling_service.py`: 15 -- 11 plus
+the 4 `TestIncidentLinking` tests added for the gap above,
+`test_scheduling_api.py`: 9) plus 4 new live integration tests
+(`test_scheduling_live.py`) plus 3 new RBAC boundary tests. `make_node`
+(the shared test factory) extended additively with `allocatable`/
+`taints`/`labels` -- every pre-existing caller unaffected, confirmed by
+re-running the full pre-existing node-related test set before adding
+anything new. `./scripts/test.sh`: ruff clean, mypy clean (74 source
+files), **502 unit tests passed** (410 + 92). `./scripts/test.sh --all`:
+collected **541 tests** (502 unit + 39 integration/e2e). A single
+uninterrupted `--all` run hit the same shared-VM-contention pattern
+documented repeatedly throughout this project's history (13 failed/2
+errored, all contention-class failures -- the exact same test names that
+have failed this way before, none of them touching anything this milestone
+changed); every one of those exact tests passed cleanly (28 passed, 2
+skipped for unrelated preconditions, 0 failed) when re-run together in
+isolation immediately afterward. This is the sixth confirmation of this
+exact environmental pattern across this project's history, using the
+identical "isolate and re-run" method each time.
+
+**Documentation**: README.md, ARCHITECTURE.md (left untouched by design --
+`docs/SCHEDULING_ANALYSIS.md` is Capability C's own design doc, the same
+way RESOURCE_OPTIMIZATION_DESIGN.md is Capability B's, rather than growing
+ARCHITECTURE.md into a fourth pipeline diagram it doesn't need),
+IMPLEMENTATION_STATUS.md, PLATFORM_ROADMAP.md, TESTING.md,
+RBAC_AND_THREAT_MODEL.md, FAILURE_LAB.md, and DEMO_SCRIPT.md (a new step
+8c, every command in it actually run against the real cluster while
+writing it, matching this project's own "validate all documented
+commands" discipline).
+
 ## Known limitations (found during Milestone 1's own live verification, not theoretical)
 
 1. **Pod-UID dedup doesn't survive a Deployment rollout.** A Deployment template

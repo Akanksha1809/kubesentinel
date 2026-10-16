@@ -39,6 +39,7 @@ from kubernetes.client import (
     V1ReplicaSetSpec,
     V1Service,
     V1ServiceSpec,
+    V1Taint,
 )
 
 
@@ -118,13 +119,19 @@ def make_node(
     uid: str = "node-uid-1234",
     unschedulable: bool = False,
     conditions: list[V1NodeCondition] | None = None,
+    allocatable: dict[str, str] | None = None,
+    taints: list[V1Taint] | None = None,
+    labels: dict[str, str] | None = None,
 ) -> V1Node:
+    """`allocatable`/`taints`/`labels` default to empty -- added for the
+    scheduling advisor's own tests (docs/SCHEDULING_ANALYSIS.md); every
+    pre-existing caller that only cares about Node readiness is unaffected."""
     if conditions is None:
         conditions = [node_condition("Ready", "True")]
     return V1Node(
-        metadata=V1ObjectMeta(name=name, uid=uid, resource_version="100"),
-        spec=V1NodeSpec(unschedulable=unschedulable),
-        status=V1NodeStatus(conditions=conditions),
+        metadata=V1ObjectMeta(name=name, uid=uid, resource_version="100", labels=labels or {}),
+        spec=V1NodeSpec(unschedulable=unschedulable, taints=taints or []),
+        status=V1NodeStatus(conditions=conditions, allocatable=allocatable or {}),
     )
 
 

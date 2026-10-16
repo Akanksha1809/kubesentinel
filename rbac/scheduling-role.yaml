@@ -1,0 +1,29 @@
+# Read-only Role for the scheduling & placement advisor
+# (docs/SCHEDULING_ANALYSIS.md, Milestone 3 of docs/PLATFORM_ROADMAP.md).
+# Kept SEPARATE from kubesentinel-observer/kubesentinel-remediator/
+# kubesentinel-optimizer for the same independent-auditability reason those
+# three already are.
+#
+# Deliberately the SMALLEST new Role this project has added yet: Nodes
+# (get/list/watch) are already granted by rbac/clusterrole.yaml, added for
+# Capability A's NodeConditionRule; Pods/Deployments are already granted by
+# rbac/role.yaml; ReplicaSets (get/list) are already granted by
+# rbac/remediation-role.yaml -- this engine's own owner-reference
+# resolution reuses that grant rather than needing a duplicate one. The
+# only genuinely new permission is ResourceQuota, for the namespace-quota
+# check in a hypothetical-spec simulation (see
+# scheduling/analyzer.py::analyze_pod_scheduling's own docstring for why
+# that check only applies to a hypothetical spec, never a real Pod).
+#
+# "get"/"list" only, never "watch" -- this engine takes a one-shot
+# inventory snapshot per analysis call, the same as the optimization
+# engine, and for the same reason (see rbac/optimization-role.yaml).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kubesentinel-scheduling-advisor
+  namespace: kubesentinel-lab
+rules:
+  - apiGroups: [""]
+    resources: ["resourcequotas"]
+    verbs: ["get", "list"]
