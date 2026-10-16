@@ -1,0 +1,65 @@
+# Scenario: HPA capped at max, still over target, cluster headroom check
+# (Milestone 5 -- capacity planning & autoscaling advisor)
+#
+# The container runs a tight busy-loop (`while true; do :; done`), which
+# pegs CPU near its configured limit (1700m) almost immediately -- paired
+# with hpa.yaml's deliberately tiny target (1%) and minReplicas==
+# maxReplicas==1, "already at max and still over target" is true the
+# moment metrics-server reports its first sample. A genuinely idle
+# container (confirmed live: `sleep infinity` reports 0% even against
+# this absurdly low 1% target -- metrics-server rounds real usage below
+# roughly 1m CPU down to 0) would not reliably exceed even a 1% target, so
+# this is the smallest real load this scenario could get away with, not
+# an arbitrary choice.
+#
+# The CPU *request* (1700m) is deliberately large relative to this lab's
+# single kind Node (4 CPU allocatable) -- large enough that, combined with
+# this project's other steady-state lab scenarios' own requests (~2.1
+# CPU at the time this scenario was built), there is no room left for a
+# second 1700m replica. This makes the capacity engine's own
+# SCALING_WOULD_BE_UNSCHEDULABLE check fire in this project's own lab
+# environment as built -- but, unlike the HPA_AT_MAX condition above, this
+# specific sub-finding is honestly environment-dependent: cleaning up
+# every other lab scenario first would free enough headroom that the
+# check could instead report room is available. See
+# docs/CAPACITY_PLANNING.md §10/§11 and FAILURE_LAB.md for this scenario's
+# own verified-live result.
+#
+# Maintainer note, hit live while building this: because the request is
+# this large relative to the Node, a `kubectl apply` that changes this
+# template on an *already-running* copy of this Deployment can deadlock
+# a rolling update -- the new Pod can't schedule until the old one is
+# gone, but the old one isn't replaced until the new one is Ready. If
+# this file needs editing later, prefer `kubectl delete deployment
+# hpa-capacity-pressure-demo -n kubesentinel-lab` before re-applying,
+# rather than debugging a stuck rollout.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hpa-capacity-pressure-demo
+  namespace: kubesentinel-lab
+  labels:
+    app: hpa-capacity-pressure-demo
+    kubesentinel.io/scenario: hpa-capacity-pressure
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: hpa-capacity-pressure-demo
+  template:
+    metadata:
+      labels:
+        app: hpa-capacity-pressure-demo
+    spec:
+      containers:
+        - name: app
+          image: busybox:latest
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c", "while true; do :; done"]
+          resources:
+            requests:
+              cpu: 1700m
+              memory: 64Mi
+            limits:
+              cpu: 1700m
+              memory: 128Mi

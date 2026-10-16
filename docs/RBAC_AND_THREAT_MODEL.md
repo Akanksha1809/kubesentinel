@@ -165,9 +165,28 @@ This is the same category of deliberate, documented exception as
 something outside the lab namespace, granted as narrowly as the API
 allows and called out explicitly, never folded silently into a wider Role.
 
-This entire boundary -- all five Roles plus the kube-system exception,
+```yaml
+# rbac/capacity-role.yaml (current, in full) -- a sixth, separate Role,
+# for the capacity planning & autoscaling advisor (Milestone 5 of the
+# platform spec)
+rules:
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list"]
+```
+
+The smallest Role this project has added since `scheduling-role.yaml`,
+for the identical reason: Nodes (reused via
+`scheduling/node_inventory.py` for this engine's own scale-headroom
+check) are already granted by `clusterrole.yaml`; Pods/Deployments/
+StatefulSets/DaemonSets/Jobs are already granted by `role.yaml`/
+`optimization-role.yaml`. The only genuinely new permission is
+`horizontalpodautoscalers`, read-only, scoped to the lab namespace like
+every other Role.
+
+This entire boundary -- all six Roles plus the kube-system exception,
 both directions (what's granted and what isn't) -- is now covered by
-`tests/integration/test_rbac_boundary.py`: 30 automated checks,
+`tests/integration/test_rbac_boundary.py`: 33 automated checks,
 authenticated as the real `kubesentinel` ServiceAccount's own minted token
 plus `kubectl auth can-i --as=...`, run against the live cluster every
 time `./scripts/test.sh --all` does. This is the repeatable version of
@@ -186,7 +205,10 @@ correctly reports `no` even though the Role *does* grant `get` on
 `coredns` specifically -- not a bug, but a reminder that a
 `resourceNames`-scoped rule must be checked with `kubectl`'s own
 `TYPE/NAME` syntax (`deployments.apps/coredns`), which `kubectl_can_i()`
-now supports via an optional `resource_name` parameter.
+now supports via an optional `resource_name` parameter. The capacity
+advisor's own `horizontalpodautoscalers.autoscaling` checks needed no
+such workaround -- confirmed live that plain `can-i` answers correctly
+for this ordinary, non-aggregated API group.
 
 ## What will be added, and when
 

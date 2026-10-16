@@ -26,6 +26,7 @@ from kubesentinel.models.optimization import (
 )
 from kubesentinel.observer.client import ClusterClients
 from kubesentinel.optimization.analyzer import analyze_workload
+from kubesentinel.optimization.capacity import analyze_capacity, attach_hpa_snapshots, build_hpa_inventory
 from kubesentinel.optimization.inventory import build_workload_inventory
 from kubesentinel.optimization.metrics_providers import (
     InMemorySampleStore,
@@ -33,7 +34,9 @@ from kubesentinel.optimization.metrics_providers import (
     MetricsProviderError,
     RawUsageSample,
 )
+from kubesentinel.optimization.safety import apply_safety_checks
 from kubesentinel.persistence.interface import IncidentRepository, OptimizationRepository
+from kubesentinel.scheduling.node_inventory import build_node_inventory
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +94,21 @@ class OptimizationService:
 
             raw_samples, metrics_available, warning = self._collect_raw_samples(namespaces)
 
+            hpas = build_hpa_inventory(self._clients, namespaces=namespaces)
+            attach_hpa_snapshots(workloads, hpas)
+            # Real Node allocatable-vs-requested totals, reused from the
+            # scheduling advisor (see docs/CAPACITY_PLANNING.md §1) for the
+            # one scale-headroom check analyze_capacity() needs. Never
+            # fails the whole analyze() pass if this one read fails (e.g. a
+            # transient Node-list error) -- the headroom check simply
+            # degrades to "unknown" rather than taking down every other
+            # finding this pass would otherwise produce.
+            try:
+                node_snapshots = build_node_inventory(self._clients)
+            except Exception as exc:  # noqa: BLE001 - degrade, never abort the whole analyze() pass for this
+                logger.info("node inventory unavailable for this analyze() pass's capacity headroom check: %s", exc)
+                node_snapshots = []
+
             all_recommendations: list[ResourceRecommendation] = []
             for workload in workloads:
                 related_incident_ids = self._open_incident_ids_for(workload)
@@ -104,6 +122,11 @@ class OptimizationService:
                         related_incident_ids=related_incident_ids,
                     )
                 )
+                capacity_recommendation = analyze_capacity(workload, raw_samples, node_snapshots, self._settings, now=now)
+                if capacity_recommendation is not None:
+                    all_recommendations.extend(
+                        apply_safety_checks(workload, [capacity_recommendation], self._settings, related_incident_ids)
+                    )
 
             self._persist(workloads, all_recommendations)
         except Exception:

@@ -419,7 +419,7 @@ def optimize(
 def list_recommendations(
     namespace: str = typer.Option(None, help="Filter by namespace"),
     workload: str = typer.Option(None, help="Filter by workload name"),
-    category: str = typer.Option(None, help="Filter by category: CPU, MEMORY, SCHEDULING, DATA_QUALITY"),
+    category: str = typer.Option(None, help="Filter by category: CPU, MEMORY, SCHEDULING, DATA_QUALITY, CAPACITY"),
     status: str = typer.Option(None, help="Filter by status: NEW, REVIEWED, APPROVED, REJECTED, EXPIRED"),
     json_output: bool = typer.Option(False, "--json"),
 ) -> None:

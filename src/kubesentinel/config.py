@@ -152,6 +152,34 @@ class Settings(BaseSettings):
     def optimization_excluded_namespace_list(self) -> list[str]:
         return [n.strip() for n in self.optimization_excluded_namespaces.split(",") if n.strip()]
 
+    # Capacity planning & autoscaling advisor (read-only; extends the
+    # optimization engine above rather than a separate package -- see
+    # docs/CAPACITY_PLANNING.md). Deliberately conservative defaults, same
+    # discipline as the optimization_* thresholds above.
+    #
+    # A trend needs at least this many pooled samples, and the >=/<=
+    # change ratio between the sampled window's first and second half, to
+    # be called INCREASING/DECREASING rather than STABLE/INSUFFICIENT.
+    capacity_trend_min_samples: int = 4
+    capacity_trend_change_ratio: float = 0.2
+    # A memory trend needs a window at least this long before the
+    # leak-shaped pattern fires -- longer than optimization_min_window_
+    # seconds_for_history, since a short window's "increasing" half-mean
+    # comparison is far more likely to just be normal warm-up/traffic noise.
+    capacity_leak_min_window_seconds: float = 900.0
+    # The single-threaded-bottleneck pattern: a replica's CPU usage inside
+    # this band (ceiling +/- band) is read as "plateaued near one core."
+    capacity_single_core_ceiling_millicores: int = 1000
+    capacity_single_core_band_millicores: int = 150
+    # The pattern only fires once at least this many replicas independently
+    # show the plateau (one replica alone proves nothing about *the code*
+    # being single-threaded -- it could just be that pod's own real load).
+    capacity_min_replicas_for_bottleneck_check: int = 2
+    # ...and only when the configured CPU limit allows meaningfully more
+    # than one core -- a container limited to ~1 core plateauing at ~1 core
+    # is just "hit its limit," not evidence of a single-threaded ceiling.
+    capacity_min_limit_ratio_for_bottleneck_check: float = 1.5
+
     @property
     def watch_namespace_list(self) -> list[str]:
         return [n.strip() for n in self.watch_namespaces.split(",") if n.strip()]

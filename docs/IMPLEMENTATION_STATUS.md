@@ -249,12 +249,78 @@ itself and confirms a full `analyze_pod()` pass issues only `GET`.
 
 ## Capability E: Capacity Planning & Autoscaling Advisor
 
-**Missing.** No `AutoscalingV2Api` client on `ClusterClients` (no HPA
-access today). The spec's own instruction to "extend the resource
-optimization engine rather than creating a duplicate metrics collector" is
-directly actionable: `optimization/metrics_providers.py` and
-`InMemorySampleStore` are the natural, already-built place to source the
-usage history this capability needs: no second collector should be built.
+**Implemented** (Milestone 5 of `docs/PLATFORM_ROADMAP.md`;
+`docs/CAPACITY_PLANNING.md` is the design). Additive work inside
+`optimization/` -- a new `capacity.py` submodule, not a new top-level
+package -- reusing `metrics_providers.py`/`InMemorySampleStore`/
+`inventory.py`'s `WorkloadSnapshot`/`safety.py::apply_safety_checks`/
+`OptimizationService.analyze()` end to end, exactly as the spec's own
+"extend, don't duplicate the metrics collector" instruction asked.
+`AutoscalingV2Api` added to `ClusterClients` (new, additive).
+
+| Spec item | Status | Evidence |
+|---|---|---|
+| HPA status/targets | Implemented | `build_hpa_inventory()`/`_hpa_to_snapshot()`: real current/desired replicas, min/max bounds, every configured metric's current value vs. target, and the real `ScalingLimited` condition read verbatim -- matched to a `WorkloadSnapshot` by scale-target kind+name (an HPA has no UID reference to its target) |
+| Missing requests make autoscaling math meaningless | Implemented | `_missing_requests_for_autoscaling()`: an HPA `Resource`/`Utilization` metric with no corresponding container request is flagged `MISSING_REQUESTS_FOR_AUTOSCALING_MATH`, deterministically from the HPA spec and the container's own requests |
+| Additional replicas that would themselves be unschedulable | Implemented, coarse by design | `compute_scale_headroom()`: a cluster-wide, single-resource-at-a-time, greedy first-fit against real Node allocatable-minus-requested totals (reused from `scheduling/node_inventory.py`) -- only run for the specific "HPA at max and still over target" condition, never a full per-constraint simulation (that's `POST /scheduling/simulate`'s own job) |
+| Basic usage trend | Implemented, explicitly labeled | `compute_trend()`: a two-half-mean comparison over the already-pooled sample window -- every finding's own reasoning states this is "a trend observed over the sampled window, not a forecast" |
+| Memory leaks | Implemented as a pattern match, never a diagnosis | memory trend `INCREASING` over a long-enough window while CPU is not also increasing -> `POSSIBLE_MEMORY_LEAK_PATTERN`, reasoning explicitly states a leak is one explanation, not the only one, and that more replicas would delay, not fix, a per-replica leak |
+| Single-threaded bottlenecks | Implemented as a narrow pattern match | `detect_bottleneck_pattern()`: at least `capacity_min_replicas_for_bottleneck_check` replicas independently plateauing in a band around one CPU core, with a configured limit allowing meaningfully more -> `POSSIBLE_SINGLE_THREADED_BOTTLENECK`. Computed from this call's own fresh per-Pod samples, not the cross-replica pooled bag `analyzer.py` uses for CPU/MEMORY sizing (pooling would hide exactly the per-replica signal this check needs) |
+| External dependency as the real bottleneck | **Not detectable**, stated honestly | this project collects container CPU/memory usage only -- no request latency, no tracing, no dependency graph. Every finding says so explicitly when neither pattern above fires but an HPA still isn't meeting target, rather than silently assuming the cause is internal |
+| "Prediction" labeled as extrapolation, not ML/forecasting | Honored | `TrendDirection` is a plain two-half-mean comparison, no statistical model of any kind; every finding's reasoning says so in the same sentence |
+| No apply/write path | Honored | no code anywhere in this project patches an HPA's `minReplicas`/`maxReplicas` or a workload's replica count -- the same "advisory only" shape as every other optimization-engine category |
+
+**A design decision worth naming**: capacity findings are produced at most
+one per workload (never one per container, unlike `CPU`/`MEMORY`) --
+replica count is a workload-level/Pod-level concern, using
+`workload.containers[0]` as the representative container for the row,
+the same precedent `analyzer.py::_scheduling_recommendation` already set
+for its own workload-level finding.
+
+**Zero new persistence, API routes, or CLI commands were needed** to ship
+this capability -- confirmed by reading `persistence/optimization_repo.py`
+(a `WorkloadSnapshot`/`ResourceRecommendation` is JSON-blob-serialized as
+a whole; a new optional field and a new enum value needed no schema
+migration) and `api/optimization_routes.py` (`category` is already a
+typed `RecommendationCategory` Enum query param, so `?category=CAPACITY`
+works, 422-on-invalid included, the moment the enum gains the value; and
+`GET /optimization/workloads` already returns full `WorkloadSnapshot`
+dicts, so the new `hpa` field appears there automatically). The CLI's
+`--category` help string was the one line actually touched.
+
+**Live-verified against the real cluster**: a new
+`scenario-hpa-capacity-pressure` lab scenario (a real
+`HorizontalPodAutoscaler` pinned at `minReplicas=maxReplicas=1` with a
+deliberately tiny 1% CPU-utilization target, paired with a CPU-bound
+busy-loop container) correctly produced a `CAPACITY` finding with
+`HPA_AT_MAX` live, reading the real HPA's current utilization (~54-58%)
+against its real 1% target and its real `ScalingLimited`/`TooManyReplicas`
+condition. In this project's own lab environment as built (this
+scenario's own ~1700m CPU request against the lab's other steady-state
+scenarios' combined usage leaving the single kind Node at ~96% allocated),
+`SCALING_WOULD_BE_UNSCHEDULABLE` also fired, confirmed via the real
+Node's own allocatable-vs-requested numbers (3860m/4000m requested at
+analysis time) -- this specific sub-finding is honestly documented as
+environment-dependent (see `docs/CAPACITY_PLANNING.md` §11 and the
+scenario manifests' own comments), not claimed as deterministic in every
+environment. Confirmed via `kubesentinel optimize`/`kubesentinel
+recommendations --category CAPACITY`/`kubesentinel recommendation <id>`,
+a real HTTP server's `POST /optimization/analyze` and
+`GET /optimization/recommendations?category=CAPACITY`, and
+`GET /optimization/workloads` exposing the live `HpaSnapshot` with no
+route changes. A live integration test
+(`tests/integration/test_capacity_live.py`) patches the HTTP transport
+itself and confirms a full `analyze()` pass issues only `GET`.
+
+**A build-time correction, caught before shipping, not after**: the first
+version of the lab scenario used an idle (`sleep infinity`) container,
+reasoned to trivially exceed a 1% CPU target. Live-checking showed this
+was wrong -- metrics-server rounds real usage below roughly 1m CPU down
+to 0%, so an idle container reported `cpu: 0%/1%`, never triggering
+`HPA_AT_MAX`'s "still over target" condition. Fixed by giving the
+container a real (if synthetic) CPU-bound workload instead -- the kind of
+gap this project's own "verify live, don't assume" discipline is meant to
+catch.
 
 ## Capability F: Kubernetes Security & Configuration Auditor
 

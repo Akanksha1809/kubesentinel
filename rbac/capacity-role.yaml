@@ -1,0 +1,31 @@
+# Read-only Role for the capacity planning & autoscaling advisor
+# (docs/CAPACITY_PLANNING.md, Milestone 5 of docs/PLATFORM_ROADMAP.md).
+# Kept SEPARATE from every other Role in this project for the same
+# independent-auditability reason they already are from each other.
+#
+# Deliberately the smallest new Role this project has added yet, matching
+# rbac/scheduling-role.yaml's own precedent: Nodes are already granted by
+# rbac/clusterrole.yaml (reused via scheduling/node_inventory.py for this
+# engine's own scale-headroom check); Pods/Deployments/StatefulSets/
+# DaemonSets/Jobs are already granted by rbac/role.yaml/
+# rbac/optimization-role.yaml. The only genuinely new permission is
+# HorizontalPodAutoscaler, which nothing in this project read before this
+# milestone.
+#
+# "get"/"list" only, never "watch" -- this engine takes a one-shot HPA
+# inventory snapshot per analyze() call, the same as every other
+# optimization-engine capability, and for the same reason (see
+# rbac/optimization-role.yaml).
+#
+# Deliberately excludes: any write verb. No code anywhere in this project
+# patches an HPA's minReplicas/maxReplicas or a workload's replica count --
+# see docs/CAPACITY_PLANNING.md §6.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kubesentinel-capacity-advisor
+  namespace: kubesentinel-lab
+rules:
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list"]

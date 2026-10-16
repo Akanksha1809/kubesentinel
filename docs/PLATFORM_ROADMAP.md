@@ -156,26 +156,41 @@ NetworkPolicy-related finding this milestone produces is explicit that it
 is static analysis of the policy object (`POLICY_MAY_RESTRICT`, never a
 stronger claim), never a claim about actually-observed blocked traffic.
 
-## Milestone 5: Capacity planning and autoscaling advisor
+## Milestone 5: Capacity planning and autoscaling advisor -- DONE
 
-**Scope**: extends `optimization/`, per the spec's own explicit
-instruction not to build a second metrics collector -- this is additive
-work inside the existing package (or a thin new submodule that imports
-from it), not a new top-level `capacity/` package the way C/D/F are.
-`AutoscalingV2Api` added to `ClusterClients` (new, additive) to read
-`HorizontalPodAutoscaler` status/targets. Builds replica-capacity
-reasoning (when more replicas help vs. when they don't: memory leaks,
-single-threaded bottlenecks, missing requests making autoscaling math
-meaningless, additional replicas that would themselves be unschedulable,
-an external dependency as the real bottleneck) on top of the usage history
-`optimization/metrics_providers.py` already collects.
+See `docs/CAPACITY_PLANNING.md` for the design and TODO.md's own entry
+for the full build-and-verification history. True to the spec's own
+explicit instruction not to build a second metrics collector, this
+shipped as additive work inside `optimization/` -- a new `capacity.py`
+submodule, not a new top-level `capacity/` package -- reusing the
+existing `WorkloadSnapshot`/`InMemorySampleStore`/`MetricsApiProvider`/
+`apply_safety_checks`/`OptimizationService.analyze()` pipeline end to
+end. `AutoscalingV2Api` added to `ClusterClients` (new, additive) to read
+real `HorizontalPodAutoscaler` status/targets, matched to a
+`WorkloadSnapshot` by scale-target kind+name. Real Node allocatable-vs-
+requested totals are reused from `scheduling/node_inventory.py` (the
+opposite import direction from Milestone 4) for the one new
+cluster-headroom check.
 
-**Explicitly bounded**: basic trend analysis over existing data is in
-scope; anything described as "prediction" must be clearly labeled as
-extrapolation, not statistical forecasting or ML, matching the spec's own
-instruction not to oversell simple math.
+Each of the spec's five "when more replicas help vs. when they don't"
+cases was addressed honestly, not uniformly built: HPA status, missing
+requests for Utilization-based autoscaling math, and a coarse
+scale-headroom check are evaluated for real against live cluster state;
+memory-leak and single-threaded-bottleneck signals are reported as
+*pattern matches* over the existing sample window, explicitly labeled as
+such rather than a diagnosis; an external dependency as the real
+bottleneck is named as a hard limitation this project has no evidence
+source for at all (no latency/tracing data), never silently assumed
+covered. No apply/write path exists for any of this -- consistent with
+the rest of the optimization engine.
 
-**Design-first**: `docs/CAPACITY_PLANNING.md` before code.
+**Zero new persistence, API routes, or CLI commands were needed** --
+`RecommendationCategory.CAPACITY` and `WorkloadSnapshot.hpa` are both
+purely additive fields/enum values on structures that are already
+JSON-blob-persisted and already exposed generically by
+`GET /optimization/recommendations?category=...` and
+`GET /optimization/workloads`, confirmed by reading the persistence
+layer before assuming a migration was needed.
 
 ## Milestone 6: Security and configuration auditor
 

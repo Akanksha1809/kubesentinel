@@ -2,10 +2,10 @@
 
 The platform-wide view: what's built, what's planned, and the one
 architectural pattern every analysis engine in this project follows,
-proven four times now (troubleshooting, then resource optimization, then
-the scheduling advisor, then the network troubleshooting engine) and
-intended to be followed a fifth and sixth time (capacity, security) rather
-than reinvented per capability.
+proven five times now (troubleshooting, then resource optimization, then
+the scheduling advisor, then the network troubleshooting engine, then
+capacity planning) and intended to be followed a sixth time (security)
+rather than reinvented per capability.
 
 This document does not re-explain any already-built pipeline in detail --
 `ARCHITECTURE.md` covers the troubleshooting and resource-optimization
@@ -27,7 +27,14 @@ Every analysis engine in this project, built or planned, is:
 1. **Its own package** under `src/kubesentinel/<capability>/`, with its own
    `models/<capability>.py` (or fields added to a shared model only where
    the two domains genuinely share structure -- `IMPLEMENTATION_STATUS.md`
-   names where that line is).
+   names where that line is) -- **unless the platform spec itself
+   explicitly asks for extension over duplication**, as it did for
+   capacity planning (a `capacity.py` submodule inside `optimization/`,
+   fields added to `models/optimization.py`, not a new package/model file
+   at all). That exception is itself the rule working correctly, not a
+   violation of it: reuse over duplication is point 3 below, and the spec
+   overriding point 1 in one specific, named case is a decision this
+   project followed rather than overrode on its own judgment.
 2. **Read-mostly against the cluster.** Every engine lists/gets Kubernetes
    objects; only the troubleshooting engine's `RemediationExecutor` is
    currently permitted to mutate anything, and that permission is narrow,
@@ -59,18 +66,24 @@ Every analysis engine in this project, built or planned, is:
 
 This is not an aspirational list -- it is what `optimization/`,
 `scheduling/`, and `network/` all already do, verified against
-`diagnostics/`'s own original shape. Four data points is still not a law
-of nature, but the pattern has now held up through live verification four
-times without needing to bend, including twice with a genuine reason to
-extend it: a read-only placement *simulation* (`scheduling/`, deserializing
-a hypothetical, not-yet-real Pod spec into a typed object and analyzing it
-exactly like a real one) and a deliberate, documented scope boundary
-(`network/`, where the spec's own active connectivity probe was reasoned
-out of this milestone entirely rather than built -- this project's first
-analysis engine to defer part of its own spec on a safety basis, not
-pick-and-choose expediency). Both extensions were written down explicitly
-in their own design docs (`docs/SCHEDULING_ANALYSIS.md`,
-`docs/NETWORK_DIAGNOSTICS.md`) rather than silently absorbed into "the
+`diagnostics/`'s own original shape. Five data points is still not a law
+of nature, but the pattern has now held up through live verification five
+times without needing to bend, including three times with a genuine
+reason to extend it: a read-only placement *simulation* (`scheduling/`,
+deserializing a hypothetical, not-yet-real Pod spec into a typed object
+and analyzing it exactly like a real one); a deliberate, documented scope
+boundary (`network/`, where the spec's own active connectivity probe was
+reasoned out of this milestone entirely rather than built -- this
+project's first analysis engine to defer part of its own spec on a
+safety basis, not pick-and-choose expediency); and a deliberate
+*non*-package (capacity planning, where the spec's own "extend, don't
+duplicate the metrics collector" instruction was followed literally --
+zero new persistence, zero new API routes, zero new CLI commands,
+because the structures it extends were already generic enough to carry
+a new enum value and an optional field with no further code). All three
+extensions were written down explicitly in their own design docs
+(`docs/SCHEDULING_ANALYSIS.md`, `docs/NETWORK_DIAGNOSTICS.md`,
+`docs/CAPACITY_PLANNING.md`) rather than silently absorbed into "the
 pattern" retroactively -- which is exactly the discipline this paragraph
 asks every future capability to follow too.
 
@@ -78,18 +91,19 @@ asks every future capability to follow too.
 
 `observer/client.py::ClusterClients` today bundles `core` (`CoreV1Api`),
 `apps` (`AppsV1Api`), `discovery` (`DiscoveryV1Api`), `custom_objects`
-(`CustomObjectsApi`, for `metrics.k8s.io`), `batch` (`BatchV1Api`), and
-`networking` (`NetworkingV1Api`) -- each added additively, in the
-milestone that first needed it, never ahead of time (`custom_objects`/
-`batch` were added specifically for the optimization engine;
-`networking` for the network troubleshooting engine; nothing before each
-needed them). The same rule applies going forward:
+(`CustomObjectsApi`, for `metrics.k8s.io`), `batch` (`BatchV1Api`),
+`networking` (`NetworkingV1Api`), and `autoscaling` (`AutoscalingV2Api`)
+-- each added additively, in the milestone that first needed it, never
+ahead of time (`custom_objects`/`batch` were added specifically for the
+optimization engine; `networking` for the network troubleshooting
+engine; `autoscaling` for capacity planning; nothing before each needed
+them). The same rule applies going forward:
 
 | Capability | New client needed | Status |
 |---|---|---|
 | C: Scheduling | none -- `core.list_node()` already existed on the existing `core` client | **done** -- `scheduling/node_inventory.py` calls it; confirms the prediction that no new client was needed here |
 | D: Network | `NetworkingV1Api` (NetworkPolicy; no Ingress -- confirmed live that zero Ingress/Gateway resources or CRDs exist on this cluster) | **done** -- `network/policy_inventory.py` calls it |
-| E: Capacity | `AutoscalingV2Api` (HPA) | not constructed |
+| E: Capacity | `AutoscalingV2Api` (HPA) | **done** -- `optimization/capacity.py` calls it |
 | F: Security | `RbacAuthorizationV1Api` (Roles/Bindings), `PolicyV1Api` (PodDisruptionBudget, if used) | not constructed |
 
 Each addition follows the existing pattern exactly: extend the

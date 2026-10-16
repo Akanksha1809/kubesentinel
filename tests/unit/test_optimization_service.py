@@ -5,7 +5,17 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
-from kubernetes.client import V1Container, V1PodCondition, V1PodSpec, V1ResourceRequirements
+from kubernetes.client import (
+    V1Container,
+    V1ObjectMeta,
+    V1PodCondition,
+    V1PodSpec,
+    V1ResourceRequirements,
+    V2CrossVersionObjectReference,
+    V2HorizontalPodAutoscaler,
+    V2HorizontalPodAutoscalerSpec,
+    V2HorizontalPodAutoscalerStatus,
+)
 from kubernetes.client.rest import ApiException
 
 from kubesentinel.config import Settings
@@ -75,6 +85,21 @@ def _settings(**overrides) -> Settings:
     defaults = dict(optimization_recommendation_ttl_seconds=3600.0)
     defaults.update(overrides)
     return Settings(**defaults)
+
+
+def _hpa(scale_target_kind="Pod", scale_target_name="standalone", min_replicas=1, max_replicas=5, current_replicas=1):
+    return V2HorizontalPodAutoscaler(
+        metadata=V1ObjectMeta(name="demo-hpa", namespace=NAMESPACE),
+        spec=V2HorizontalPodAutoscalerSpec(
+            scale_target_ref=V2CrossVersionObjectReference(kind=scale_target_kind, name=scale_target_name),
+            min_replicas=min_replicas,
+            max_replicas=max_replicas,
+            metrics=[],
+        ),
+        status=V2HorizontalPodAutoscalerStatus(
+            current_replicas=current_replicas, desired_replicas=current_replicas, current_metrics=[], conditions=[]
+        ),
+    )
 
 
 class TestAnalyze:
@@ -336,6 +361,61 @@ class TestIncidentIntegration:
         # internal reference to it.
         checked_uids = [call.args[0] for call in incident_repo.find_open_by_resource_uid.call_args_list]
         assert checked_uids.count("pod-uid-1") == 1
+
+
+class TestCapacityIntegration:
+    """Milestone 5 (extension): HPA inventory is built and attached once per
+    analyze() pass, and analyze_capacity() runs alongside analyze_workload()
+    for every workload -- see docs/CAPACITY_PLANNING.md."""
+
+    def test_hpa_targeting_a_workload_produces_a_capacity_recommendation(self, repo):
+        clients = _clients(pods=[_standalone_pod(missing_resources=False)])
+        clients.autoscaling.list_namespaced_horizontal_pod_autoscaler.return_value = _items([_hpa()])
+        service = OptimizationService(clients, repo, _settings())
+
+        service.analyze(namespaces=[NAMESPACE])
+
+        capacity_recs = repo.list_recommendations(category=RecommendationCategory.CAPACITY.value)
+        assert len(capacity_recs) == 1
+        assert "demo-hpa" in capacity_recs[0].reasoning
+
+    def test_no_hpa_at_all_produces_no_capacity_recommendation(self, repo):
+        clients = _clients(pods=[_standalone_pod(missing_resources=False)])
+        service = OptimizationService(clients, repo, _settings())
+
+        service.analyze(namespaces=[NAMESPACE])
+
+        assert repo.list_recommendations(category=RecommendationCategory.CAPACITY.value) == []
+
+    def test_capacity_recommendation_goes_through_the_same_safety_checks(self, repo):
+        # An unhealthy workload must suppress a capacity finding's proposed
+        # numbers the same generic way every other category already does --
+        # confirming analyze_capacity()'s output is run through
+        # safety.py::apply_safety_checks, not persisted directly.
+        clients = _clients(pods=[_standalone_pod(missing_resources=False)])
+        clients.autoscaling.list_namespaced_horizontal_pod_autoscaler.return_value = _items([_hpa()])
+        incident_repo = MagicMock()
+        incident_repo.find_open_by_resource_uid.return_value = _open_incident()
+        service = OptimizationService(clients, repo, _settings(), incident_repo=incident_repo)
+
+        service.analyze(namespaces=[NAMESPACE])
+
+        capacity_recs = repo.list_recommendations(category=RecommendationCategory.CAPACITY.value)
+        assert capacity_recs
+        assert "ACTIVE_INCIDENT" in capacity_recs[0].safety_flags
+        assert capacity_recs[0].related_incident_ids == ["incident-1"]
+
+    def test_node_inventory_failure_degrades_without_aborting_analyze(self, repo):
+        clients = _clients(pods=[_standalone_pod(missing_resources=False)])
+        clients.autoscaling.list_namespaced_horizontal_pod_autoscaler.return_value = _items([_hpa()])
+        clients.core.list_node.side_effect = ApiException(status=503, reason="unreachable")
+        service = OptimizationService(clients, repo, _settings())
+
+        summary = service.analyze(namespaces=[NAMESPACE])
+
+        assert summary.workload_count == 1
+        capacity_recs = repo.list_recommendations(category=RecommendationCategory.CAPACITY.value)
+        assert len(capacity_recs) == 1  # the HPA status finding still happens; only the headroom check degrades
 
 
 class TestOptimizationMetrics:

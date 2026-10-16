@@ -290,6 +290,43 @@ curl -s -X POST http://127.0.0.1:8000/network/analyze -H "Content-Type: applicat
   | python3 -m json.tool
 ```
 
+**8e. Show the capacity planning & autoscaling advisor reason about a
+real HPA -- status, not a guess.**
+
+```bash
+./lab/scripts/run-scenario.sh hpa-capacity-pressure
+kubectl -n kubesentinel-lab get hpa hpa-capacity-pressure-demo -w   # wait for TARGETS to show a real % (metrics-server needs ~60s)
+```
+
+Once it shows something like `cpu: 55%/1%`:
+
+```bash
+.venv/bin/kubesentinel optimize --namespace kubesentinel-lab
+.venv/bin/kubesentinel recommendations --category CAPACITY
+.venv/bin/kubesentinel recommendation <recommendation-id>
+```
+
+Point out `HPA_AT_MAX`: this HPA is pinned at `minReplicas=maxReplicas=1`
+and still over its (deliberately tiny) target -- read from the HPA's own
+real status and `ScalingLimited` condition, never inferred. Then point
+out `SCALING_WOULD_BE_UNSCHEDULABLE` if present: a coarse, cluster-wide
+check against this lab's real Node allocatable-vs-requested numbers,
+explicitly labeled as an approximation, not the scheduling advisor's own
+per-constraint simulation -- and explicitly *environment-dependent*
+(it's only there because this lab's other scenarios' own CPU requests
+leave no room on this single-Node cluster; see CAPACITY_PLANNING.md §11).
+Also worth noting: no code path here ever patches the HPA itself --
+exactly as advisory as every other optimization-engine category.
+
+```bash
+curl -s "http://127.0.0.1:8000/optimization/recommendations?category=CAPACITY" | python3 -m json.tool
+curl -s "http://127.0.0.1:8000/optimization/workloads?namespace=kubesentinel-lab" \
+  | python3 -c "import json,sys; print(json.dumps(next(w for w in json.load(sys.stdin) if w['workload_name']=='hpa-capacity-pressure-demo')['hpa'], indent=2))"
+```
+
+The second command shows the live `HpaSnapshot` -- exposed automatically
+on the existing `/optimization/workloads` route, no new endpoint needed.
+
 **9. Be upfront about what this isn't, yet.**
 
 Nothing in the live diagnosis pipeline *automatically* calls `propose()` --
@@ -300,7 +337,11 @@ health and NetworkPolicy objects, but deliberately never runs an active
 connectivity probe -- that would be this project's first mutation surface
 outside the fully policy-gated `RemediationExecutor`, and was scoped out of
 this milestone for its own dedicated safety review rather than folded in;
-see NETWORK_DIAGNOSTICS.md Section 2. There's no AI layer yet (Milestone 11,
+see NETWORK_DIAGNOSTICS.md Section 2. The capacity planning advisor has no
+visibility into external dependencies/latency at all (no tracing/APM data
+exists in this project) -- every finding says so explicitly rather than
+guessing at the cause of a bottleneck it can't actually see; see
+CAPACITY_PLANNING.md Section 2. There's no AI layer yet (Milestone 11,
 optional). The resource optimization engine never applies a
 recommendation itself -- every number it produces still needs a human (or a
 future, explicitly-built policy-engine path) to act on it; see

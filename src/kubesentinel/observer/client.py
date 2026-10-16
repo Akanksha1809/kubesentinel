@@ -28,6 +28,8 @@ class ClusterClients:
     additive, every existing caller of `core`/`apps`/`discovery` is
     unaffected. `networking` was added for the network troubleshooting
     engine (NetworkPolicy has no client on any of the existing five).
+    `autoscaling` was added for the capacity planning & autoscaling advisor
+    (HorizontalPodAutoscaler has no client on any of the existing six).
     """
 
     def __init__(
@@ -38,6 +40,7 @@ class ClusterClients:
         custom_objects: client.CustomObjectsApi,
         batch: client.BatchV1Api,
         networking: client.NetworkingV1Api,
+        autoscaling: client.AutoscalingV2Api,
     ):
         self.core = core
         self.apps = apps
@@ -45,6 +48,7 @@ class ClusterClients:
         self.custom_objects = custom_objects
         self.batch = batch
         self.networking = networking
+        self.autoscaling = autoscaling
 
 
 def load_kube_config(settings: Settings) -> None:
@@ -76,4 +80,5 @@ def build_clients(settings: Settings) -> ClusterClients:
         custom_objects=client.CustomObjectsApi(api_client),
         batch=client.BatchV1Api(api_client),
         networking=client.NetworkingV1Api(api_client),
+        autoscaling=client.AutoscalingV2Api(api_client),
     )

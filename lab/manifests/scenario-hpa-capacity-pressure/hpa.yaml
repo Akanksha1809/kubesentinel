@@ -1,0 +1,45 @@
+# Scenario: HPA capped at max, still over target
+#
+# minReplicas == maxReplicas == 1, so this HPA is permanently "at max" --
+# it never actually scales (there's nowhere to scale to), which is the
+# point: it isolates the "at max and still over target" condition from
+# any real scaling behavior. averageUtilization: 1 is a deliberately
+# absurd target (1% of the configured CPU request) -- any nonzero real
+# usage at all exceeds it, so this fires the moment metrics-server reports
+# a single sample, with no synthetic load generation needed.
+#
+# Expected Kubernetes behavior: `kubectl get hpa hpa-capacity-pressure-demo
+# -n kubesentinel-lab` shows TARGETS as "<something>%/1%" with current
+# almost always > 1%, and a `ScalingLimited` condition (True,
+# TooManyReplicas) once it tries and fails to exceed maxReplicas.
+#
+# Expected KubeSentinel diagnosis: CAPACITY category, HPA_AT_MAX flag
+# always; SCALING_WOULD_BE_UNSCHEDULABLE additionally when this lab's
+# other steady-state scenarios' own CPU requests leave no room for a
+# second 1700m replica (see deployment.yaml's own comment on this
+# sub-finding's environment-dependence) -- confirmed live, not assumed.
+#
+# Automatic remediation: not applicable -- only a human can decide whether
+# to raise maxReplicas, lower the target, or (if SCALING_WOULD_BE_
+# UNSCHEDULABLE also fires) add Node capacity first.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: hpa-capacity-pressure-demo
+  namespace: kubesentinel-lab
+  labels:
+    kubesentinel.io/scenario: hpa-capacity-pressure
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: hpa-capacity-pressure-demo
+  minReplicas: 1
+  maxReplicas: 1
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 1

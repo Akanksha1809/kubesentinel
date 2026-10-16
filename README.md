@@ -22,7 +22,7 @@ anything), and the resource optimization engine producing a real
 samples. Recorded with [asciinema](https://asciinema.org) + [agg](https://github.com/asciinema/agg) --
 every line is genuine command output, not staged.
 
-## Status: Milestones 1-11 (troubleshooting) + 12-19 (resource optimization) + scheduling advisor + network troubleshooting engine complete
+## Status: Milestones 1-11 (troubleshooting) + 12-19 (resource optimization) + scheduling advisor + network troubleshooting engine + capacity planning advisor complete
 
 The full **observe -> diagnose -> persist -> expose** pipeline is implemented,
 tested, and verified end-to-end against a real kind cluster for 13 of the 14
@@ -96,6 +96,27 @@ outside the fully policy-gated `RemediationExecutor`, and deserves its own
 safety review rather than being folded into a static-analysis milestone.
 See [NETWORK_DIAGNOSTICS.md](docs/NETWORK_DIAGNOSTICS.md) for the design.
 
+A fifth capability -- the **capacity planning & autoscaling advisor** --
+is additive work *inside* the resource optimization engine rather than a
+new top-level package, per the spec's own explicit instruction not to
+build a second metrics collector: it reuses the same workload inventory,
+usage-history collection, and safety checks, and ships through the exact
+same `/optimization/recommendations`/`kubesentinel recommendations`
+surfaces under a new `CAPACITY` category. It reads a workload's real
+`HorizontalPodAutoscaler` status (current/desired replicas, every
+metric's current value vs. target, the real `ScalingLimited` condition),
+flags when an HPA's Utilization target is meaningless because the
+container has no corresponding resource request, and runs a coarse,
+explicitly-approximate cluster-headroom check (reusing the scheduling
+advisor's own Node allocatable math) for the specific case of an HPA
+capped at its maximum while still over target. Memory-leak-shaped and
+single-threaded-bottleneck signals are reported as pattern matches over
+the existing usage samples, always labeled as such -- an external
+dependency as a real bottleneck is named as a hard limitation this
+project has no tracing/latency evidence for at all, never silently
+assumed to be the cause. No apply/write path exists here either. See
+[CAPACITY_PLANNING.md](docs/CAPACITY_PLANNING.md) for the design.
+
 Every stage above is exported as Prometheus metrics with bounded-cardinality
 labels (category/action_type/reason/component, never incident IDs or pod
 names) at `GET /metrics`. [observability/](observability/) has a scrape config
@@ -109,18 +130,21 @@ one dedicated manifest each) plus 2 resource-optimization scenarios
 (oversized requests, missing requests entirely) plus 1 scheduling-advisor
 scenario (an impossible nodeSelector) plus 2 network-engine scenarios (a
 Service selector matching no Pod, and a Service matching a real, Ready
-Pod whose `targetPort` name doesn't resolve) are built and live-verified
--- see [FAILURE_LAB.md](docs/FAILURE_LAB.md). The test suite now includes
+Pod whose `targetPort` name doesn't resolve) plus 1 capacity-advisor
+scenario (a real HPA pinned at its maximum, still over target) are built
+and live-verified -- see [FAILURE_LAB.md](docs/FAILURE_LAB.md). The test suite now includes
 integration and e2e tests that exercise the real cluster directly (RBAC
 boundary enforcement, watch resync, UID-based dedup across a delete/recreate,
 restart recovery, concurrent remediation requests, the full propose/approve/
 execute/verify lifecycle against a real Deployment, the optimization
 engine's own read-only guarantee and real-usage-data right-sizing, the
 scheduling advisor's own independent constraint math reaching the same
-conclusion the real scheduler already did, and the network engine's own
+conclusion the real scheduler already did, the network engine's own
 independent selector/port matching reaching the right conclusion against
-real Services/EndpointSlices/CoreDNS) --
-`./scripts/test.sh --all` runs all 617 tests (566 unit + 51 integration/e2e);
+real Services/EndpointSlices/CoreDNS, and the capacity advisor's own
+HPA-status/scale-headroom reasoning reaching the right conclusion against
+a real HorizontalPodAutoscaler and real Node capacity) --
+`./scripts/test.sh --all` runs all 668 tests (611 unit + 57 integration/e2e);
 see [TESTING.md](docs/TESTING.md).
 
 Optional AI summarization (`kubesentinel explain <incident-id>`, or
@@ -193,6 +217,20 @@ RBAC-scoped to those two names)      NetworkPolicy summaries            may-rest
                                             SQLite persistence  <-->  FastAPI + CLI + /metrics
 ```
 
+A fifth capability extends the *second* pipeline above (resource
+optimization) rather than adding a new one -- one new read-only client
+(`AutoscalingV2Api`), zero new persistence or routes:
+
+```
+Workload inventory (reused)   -->  HPA status (reused scheduling    -->  CAPACITY finding:
++ real HPA status                  Node math for scale headroom)        HPA_AT_MAX/_AT_MIN,
+                                    + trend/pattern checks over            missing-request,
+                                    the existing sample window             leak/bottleneck patterns
+                                                            |
+                                                            v
+                        Same ResourceRecommendation row  <-->  Same FastAPI/CLI/`/metrics` surfaces
+```
+
 ## Quickstart
 
 Prerequisites: Docker (or Colima), [kind](https://kind.sigs.k8s.io/), kubectl, Python 3.11+.
@@ -260,6 +298,15 @@ Service-based connectivity story -- also no extra setup needed:
 .venv/bin/kubesentinel network-finding <finding-id>
 ```
 
+Capacity/HPA findings surface through the same optimization-engine
+commands as CPU/MEMORY/SCHEDULING, under a new category:
+
+```bash
+.venv/bin/kubesentinel optimize --namespace kubesentinel-lab
+.venv/bin/kubesentinel recommendations --category CAPACITY
+.venv/bin/kubesentinel recommendation <recommendation-id>
+```
+
 AI summarization is off by default (works with no AI at all). To try it:
 [install Ollama](https://ollama.com), `ollama pull qwen2.5-coder:3b` (or any
 model you have), then:
@@ -302,7 +349,8 @@ src/kubesentinel/
   observer/      Kubernetes client setup, watch loops with reconnect/resync, evidence extraction
   diagnostics/   Deterministic rule-based diagnostic engine + individual rules
   incidents/     Incident lifecycle: dedup by resource UID, health classification, severity
-  optimization/  Read-only resource right-sizing: inventory, metrics providers, analyzer, safety
+  optimization/  Read-only resource right-sizing: inventory, metrics providers, analyzer, safety,
+                 and capacity.py (HPA status/scale-headroom reasoning, Milestone 5)
   scheduling/    Read-only placement analysis: node inventory, per-constraint evaluators, analyzer
   network/       Read-only connectivity analysis: service/policy inventory, DNS health, analyzer
   persistence/   Repository interfaces + SQLite implementations (incidents, optimization, scheduling, network)
@@ -316,9 +364,10 @@ src/kubesentinel/
 lab/             kind cluster config, namespace, failure scenario manifests, scripts,
                  optional metrics-server installer
 rbac/            Least-privilege Role/RoleBinding/ServiceAccount for what's implemented today
-                 (observer, remediator, optimizer, scheduling-advisor, and network-advisor
-                 Roles -- the last with one narrow, documented kube-system exception for
-                 CoreDNS/kube-dns health -- each independently auditable)
+                 (observer, remediator, optimizer, scheduling-advisor, network-advisor, and
+                 capacity-advisor Roles -- network-advisor's own one narrow, documented
+                 kube-system exception for CoreDNS/kube-dns health -- each independently
+                 auditable)
 observability/   Prometheus scrape config + importable Grafana dashboard
 tests/unit/      Deterministic unit tests, no cluster required
 docs/            Architecture, diagnostic rules, RBAC/threat model, failure lab, resource
@@ -334,6 +383,7 @@ docs/            Architecture, diagnostic rules, RBAC/threat model, failure lab,
 - [RESOURCE_OPTIMIZATION_DESIGN.md](docs/RESOURCE_OPTIMIZATION_DESIGN.md) -- the resource optimization engine's own design, algorithms, and milestone plan
 - [SCHEDULING_ANALYSIS.md](docs/SCHEDULING_ANALYSIS.md) -- the scheduling advisor's own design: what's evaluated for real vs. only detected
 - [NETWORK_DIAGNOSTICS.md](docs/NETWORK_DIAGNOSTICS.md) -- the network troubleshooting engine's own design: evidence chain, scope split, what's deliberately deferred
+- [CAPACITY_PLANNING.md](docs/CAPACITY_PLANNING.md) -- the capacity planning & autoscaling advisor's own design: HPA status, scale headroom, what's a pattern match vs. a diagnosis
 - [DIAGNOSTIC_RULES.md](docs/DIAGNOSTIC_RULES.md) -- every rule, its evidence, and its confidence logic
 - [FAILURE_LAB.md](docs/FAILURE_LAB.md) -- each lab scenario: how it fails, what's expected, how to clean up
 - [RBAC_AND_THREAT_MODEL.md](docs/RBAC_AND_THREAT_MODEL.md) -- least privilege, trust boundaries

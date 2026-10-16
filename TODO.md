@@ -1607,6 +1607,179 @@ project's own "validate all documented commands" discipline).
 ARCHITECTURE.md left untouched by design, same reasoning as Milestone 21 --
 `docs/NETWORK_DIAGNOSTICS.md` is Capability D's own design doc.
 
+## Milestone 23: Capacity Planning & Autoscaling Advisor -- DONE
+
+Per `docs/PLATFORM_ROADMAP.md`'s own sequencing (Milestone 5 of the
+platform spec). Design-first, per this project's own established
+precedent: `docs/CAPACITY_PLANNING.md` before any code -- which, unlike
+every prior capability's design doc, concluded the right shape was *not*
+a new top-level package at all, following the platform spec's own
+explicit instruction not to build a second metrics collector.
+
+Added:
+
+- `optimization/capacity.py` -- a new submodule inside the existing
+  `optimization/` package, not a new `capacity/` package. `build_hpa_inventory()`
+  (one-shot HPA LIST via the new `AutoscalingV2Api`, same "no watch loop"
+  shape every other inventory function in this project already uses),
+  `attach_hpa_snapshots()` (pure, matches an HPA to a `WorkloadSnapshot`
+  by scale-target kind+name -- an HPA has no UID reference to its
+  target, only a name), `compute_trend()` (a plain two-half-mean
+  comparison over an already-time-sorted sample list, explicitly never
+  a forecast), `detect_bottleneck_pattern()` (a narrow single-threaded-
+  ceiling pattern match computed from *this call's own fresh* per-Pod
+  samples, deliberately not the cross-replica pooled bag
+  `analyzer.py` uses for CPU/MEMORY sizing -- pooling across replicas
+  would hide exactly the per-replica signal this check needs),
+  `compute_scale_headroom()` (a coarse, explicitly-approximate greedy
+  first-fit against real Node allocatable-minus-requested totals, reused
+  by import from `scheduling/node_inventory.py::build_node_inventory` --
+  the first time `optimization/` has imported from `scheduling/`, the
+  opposite direction from Milestone 22's network-engine reuse of
+  scheduling's own constraint-matching code), and `analyze_capacity()`
+  (the one public entry point, mirroring `analyzer.py::analyze_workload()`'s
+  "pure function over already-fetched facts" shape, returning at most
+  one `ResourceRecommendation` per workload -- replica capacity is a
+  workload-level concern, not per-container, using
+  `workload.containers[0]` as the representative container for the row,
+  the same precedent `_scheduling_recommendation` already established).
+- `models/optimization.py` -- additive only, no new model file:
+  `TrendDirection` enum, `HpaMetricStatus`/`HpaSnapshot` models, one new
+  `RecommendationCategory.CAPACITY` enum value, and one new optional
+  `WorkloadSnapshot.hpa` field.
+- `observer/client.py::ClusterClients` -- `autoscaling: AutoscalingV2Api`
+  added (new, additive).
+- `config.py` -- seven new `capacity_*` settings, same conservative-
+  defaults discipline as every existing `optimization_*` threshold
+  (e.g. a leak pattern needs a window longer than the general history
+  minimum before it fires, specifically to avoid reading normal
+  warm-up/traffic noise as a leak).
+- `optimization/service.py::OptimizationService.analyze()` -- extended
+  (not replaced) to build the HPA inventory and Node inventory once per
+  pass, call `analyze_capacity()` alongside the existing
+  `analyze_workload()` call for every workload, and run its result
+  through the exact same generic `safety.py::apply_safety_checks()`
+  every other category already goes through. A Node-inventory read
+  failure degrades only the one headroom check (logged, `node_snapshots=[]`)
+  rather than aborting the entire `analyze()` pass -- this project's
+  established "degrade honestly, never abort the whole pass for one
+  optional sub-check" pattern, applied here for the first time to a
+  cross-package dependency rather than a metrics provider.
+- `rbac/capacity-role.yaml` + `rbac/capacity-rolebinding.yaml` -- the
+  smallest Role added since `scheduling-role.yaml`, for the identical
+  reason: every other permission this code needs (Nodes, Pods,
+  Deployments, etc.) is already granted elsewhere to the same
+  ServiceAccount; the only genuinely new grant is
+  `horizontalpodautoscalers.autoscaling` (get/list).
+- A new lab scenario, `scenario-hpa-capacity-pressure` (a real HPA pinned
+  at `minReplicas=maxReplicas=1` with a deliberately tiny 1% CPU target,
+  paired with a CPU-bound busy-loop container), chosen specifically to
+  make the "at max and still over target" condition reproducible
+  deterministically without needing sustained synthetic load generation
+  beyond the busy-loop itself.
+
+**Zero new persistence, API routes, or CLI commands were needed** --
+confirmed by reading the persistence layer (`WorkloadSnapshot`/
+`ResourceRecommendation` are JSON-blob-serialized as a whole; a new
+optional field and a new enum value need no schema migration) and the
+API layer (`category` is already a typed `RecommendationCategory` Enum
+query param, so `?category=CAPACITY` works, 422-on-invalid included, the
+moment the enum gains the value; `GET /optimization/workloads` already
+returns full `WorkloadSnapshot` dicts, so the new `hpa` field appears
+there automatically). The only line of CLI code touched was the
+`--category` help string.
+
+**Two real corrections, caught live during this milestone's own build,
+by this project's own Milestone 20/21/22 audit standard**: the scenario's
+first draft used an idle (`sleep infinity`) container, reasoned to
+trivially exceed a 1% CPU target. Live-checking showed metrics-server
+rounds real usage below roughly 1m CPU down to 0%, so an idle container
+never exceeded even that absurdly low target -- fixed by giving the
+container a real (if synthetic) CPU-bound workload instead. Second: once
+fixed, editing the already-running Deployment's template in place (rather
+than deleting and recreating it) deadlocked a rolling update -- the new,
+large-request Pod couldn't schedule while the old one still held the
+resources, and the old one wasn't replaced until the new one became
+Ready. Both are documented in the scenario manifest's own comments for
+future maintainers, not just fixed silently.
+
+**Live-verified against the real cluster**, not just unit-tested: the
+`hpa-capacity-pressure-demo` scenario correctly produced a `CAPACITY`
+finding with `HPA_AT_MAX`, reading the real HPA's current utilization
+(~54-58%) against its real 1% target and its real
+`ScalingLimited`/`TooManyReplicas` condition, confirmed via
+`kubesentinel optimize`/`kubesentinel recommendations --category
+CAPACITY`/`kubesentinel recommendation <id>`, a real HTTP server's `POST
+/optimization/analyze` and `GET /optimization/recommendations?category=CAPACITY`,
+and `GET /optimization/workloads` exposing the live `HpaSnapshot` with no
+route changes. `SCALING_WOULD_BE_UNSCHEDULABLE` also fired live, from
+this lab's real Node allocation (3860m/4000m requested at analysis time,
+confirmed via `kubectl describe node`) -- honestly documented as
+environment-dependent (this specific sub-finding depends on the lab's
+other scenarios' own current CPU usage, not deterministic in every
+environment) rather than claimed as a guaranteed result. The two new RBAC
+grants verified against the real `kubesentinel` ServiceAccount, not just
+admin: `horizontalpodautoscalers.autoscaling` list/get went from `no` to
+`yes` after applying `capacity-role.yaml`, with no `resourceNames`-style
+false-negative the way the network engine's `kube-system` grant needed a
+workaround for -- confirmed live that plain `can-i` answers correctly for
+this ordinary, non-aggregated API group.
+
+**An environmental incident during this milestone's own live
+verification, worth recording because it was root-caused rather than
+worked around blindly**: a full `--all` run produced 21+ contention-class
+failures including a genuine `cluster-admin ClusterRole not found` error
+for `kubernetes-admin` itself (not just the `kubesentinel` ServiceAccount)
+-- initially indistinguishable from the usual `kubectl` subprocess-timeout
+pattern already documented repeatedly in this project's history. Checked
+`docker stats` directly rather than assuming: this machine was running
+two *other*, entirely unrelated kind/Jenkins containers
+(`ai-platform-engineer-control-plane` at up to 267% CPU / 2.6GB,
+`ai-platform-engineer-jenkins`) alongside this project's own
+`kubesentinel-control-plane`, leaving under 200MB of system RAM free and
+causing the control plane's own components (`kube-apiserver`,
+`kube-controller-manager`, `kube-scheduler`) to crash-loop from resource
+starvation -- confirmed via `crictl ps -a` showing `kube-apiserver` at
+restart attempt 31. This is the same "shared-VM contention" pattern
+already named repeatedly in this project's history, now confirmed with
+direct host-level evidence rather than inferred from symptoms alone. This
+project's own `scenario-hpa-capacity-pressure` (a continuous CPU
+busy-loop, by design) was a secondary, smaller contributor to the same
+container's own CPU pressure -- scaled to 0 replicas just long enough to
+let the apiserver recover and re-verify cleanly, then restored to its
+documented 1 replica before this milestone's work was considered
+complete. Every affected test passed cleanly (43 passed, 1 skipped, 0
+failed) once re-run in isolation after the host's other load subsided.
+This is at least the eighth confirmation of this exact environmental
+pattern across this project's history, using the identical "isolate and
+re-run" method each time, and the first time the root cause was
+confirmed at the host level rather than only inferred from `kubectl`'s
+own symptoms.
+
+**Tests**: 45 new unit tests (`test_capacity.py`: 41, across
+`TestHpaToSnapshot`/`TestBuildHpaInventory`/`TestAttachHpaSnapshots`/
+`TestComputeTrend`/`TestDetectBottleneckPattern`/`TestComputeScaleHeadroom`/
+`TestAnalyzeCapacity`; plus 4 new tests in `test_optimization_service.py`'s
+`TestCapacityIntegration`, confirming the service-level wiring and that
+a Node-inventory failure degrades gracefully) plus 3 new live integration
+tests (`test_capacity_live.py`) plus 3 new RBAC boundary tests.
+`./scripts/test.sh`: ruff clean, mypy clean (85 source files), **611
+unit tests passed** (566 + 45). `./scripts/test.sh --all`: collected
+**668 tests** (611 unit + 57 integration/e2e). See the environmental
+incident above for the one full-suite run's contention-class failures
+and their clean isolated re-run.
+
+**Documentation**: README.md, PLATFORM_ROADMAP.md, IMPLEMENTATION_STATUS.md,
+MASTER_ARCHITECTURE.md (including a note on this milestone being the
+third documented exception to the "its own package" rule, following the
+platform spec's own instruction rather than this project's own
+judgment), TESTING.md, RBAC_AND_THREAT_MODEL.md, FAILURE_LAB.md, and
+DEMO_SCRIPT.md (a new step 8e, every command in it actually run against
+the real cluster while writing it, matching this project's own "validate
+all documented commands" discipline). ARCHITECTURE.md left untouched by
+design, same reasoning as Milestones 21/22 -- `docs/CAPACITY_PLANNING.md`
+is Capability E's own design doc.
+
 ## Known limitations (found during Milestone 1's own live verification, not theoretical)
 
 1. **Pod-UID dedup doesn't survive a Deployment rollout.** A Deployment template

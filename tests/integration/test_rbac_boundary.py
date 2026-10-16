@@ -240,3 +240,21 @@ def test_cannot_list_pods_or_secrets_in_kube_system():
 def test_cannot_patch_coredns_or_kube_dns():
     assert kubectl_can_i("patch", "deployments.apps", namespace="kube-system", resource_name="coredns") is False
     assert kubectl_can_i("patch", "services", namespace="kube-system", resource_name="kube-dns") is False
+
+
+# --- Capacity advisor Role (rbac/capacity-role.yaml): read-only, lab namespace only ---
+
+
+def test_can_list_and_get_hpas_in_lab_namespace():
+    assert kubectl_can_i("list", "horizontalpodautoscalers.autoscaling", namespace=LAB_NAMESPACE) is True
+    assert kubectl_can_i("get", "horizontalpodautoscalers.autoscaling", namespace=LAB_NAMESPACE) is True
+
+
+def test_cannot_patch_hpas():
+    # Read-only Role: optimization/capacity.py only ever lists HPAs, never
+    # mutates minReplicas/maxReplicas or anything else on one.
+    assert kubectl_can_i("patch", "horizontalpodautoscalers.autoscaling", namespace=LAB_NAMESPACE) is False
+
+
+def test_cannot_list_hpas_outside_lab_namespace():
+    assert kubectl_can_i("list", "horizontalpodautoscalers.autoscaling", namespace="kube-system") is False

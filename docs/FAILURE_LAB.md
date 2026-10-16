@@ -18,6 +18,7 @@ kubectl apply -f lab/manifests/scenario-transient-recovery/pod.yaml
 ./lab/scripts/run-scenario.sh invalid-node-selector # scheduling advisor's own scenario
 ./lab/scripts/run-scenario.sh service-selector-mismatch  # network engine's own scenarios
 ./lab/scripts/run-scenario.sh service-port-mismatch
+./lab/scripts/run-scenario.sh hpa-capacity-pressure # capacity planning advisor's own scenario
 ./lab/scripts/cleanup.sh                      # removes all scenario Deployments/Pods
 ./lab/delete-cluster.sh                       # destroys the kind cluster entirely
 ```
@@ -167,6 +168,59 @@ kubectl apply -f lab/manifests/scenario-transient-recovery/pod.yaml
   (selected by no Service at all) correctly returned `INCONCLUSIVE`, and the
   DNS health check correctly read the real `coredns`/`kube-dns` state in
   `kube-system` through the engine's new, narrowly-scoped RBAC grant.
+
+## Scenario: `hpa-capacity-pressure` (Milestone 5 of the platform spec --
+## capacity planning & autoscaling advisor)
+
+- **Manifest**: `lab/manifests/scenario-hpa-capacity-pressure/` (`deployment.yaml` +
+  `hpa.yaml`).
+- **How it's built**: a real `HorizontalPodAutoscaler` pinned at
+  `minReplicas: 1, maxReplicas: 1` (so it's permanently "at max" -- there's
+  nowhere to scale to) targeting `cpu` Utilization at a deliberately
+  absurd `1%` of request, paired with a Deployment whose one container
+  runs a tight CPU busy-loop (`while true; do :; done`) so real usage
+  reliably exceeds that 1% target the moment metrics-server reports its
+  first sample -- no synthetic load generation beyond the busy-loop
+  itself needed. The CPU request (1700m) is deliberately large relative
+  to this lab's single kind Node (4 CPU allocatable).
+- **Expected Kubernetes behavior, confirmed live**: `kubectl get hpa
+  hpa-capacity-pressure-demo -n kubesentinel-lab` shows `cpu:
+  <50-60%>/1%`, `REPLICAS: 1`, and a real `ScalingLimited`
+  (`True`/`TooManyReplicas`) condition once the HPA controller computes a
+  desired replica count above `maxReplicas` and can't act on it.
+- **Expected diagnosis**: `CAPACITY` category, `HPA_AT_MAX` always (from
+  the real "at max and still over target" condition).
+  `SCALING_WOULD_BE_UNSCHEDULABLE` additionally fires when this lab's
+  other steady-state scenarios' own CPU requests leave the single Node
+  with no room for a second 1700m replica -- **honestly
+  environment-dependent**, not deterministic in every environment: with
+  every other lab scenario cleaned up first, there would be enough
+  headroom for the check to instead report room is available. See
+  `docs/CAPACITY_PLANNING.md` §10/§11 and the scenario manifests' own
+  comments.
+- **Automatic remediation**: not applicable -- only a human can decide
+  whether to raise `maxReplicas`, lower the target, or add Node capacity.
+- **A build-time correction, caught before shipping**: the first version
+  of this scenario used an idle (`sleep infinity`) container, reasoned to
+  trivially exceed a 1% target. Live-checking showed metrics-server
+  rounds real usage below roughly 1m CPU down to 0%, so an idle container
+  never triggered the "over target" condition at all -- fixed by giving
+  the container a real (if synthetic) CPU-bound workload instead. A
+  second correction: editing an already-running copy of this Deployment's
+  template (rather than deleting and recreating it) deadlocked a rolling
+  update, since the new Pod couldn't schedule while the old one -- at
+  1700m -- still held the resources; noted in `deployment.yaml`'s own
+  comment for future maintainers.
+- **Verified live**: `kubesentinel optimize --namespace kubesentinel-lab`
+  followed by `kubesentinel recommendations --category CAPACITY` and
+  `kubesentinel recommendation <id>` correctly showed `HPA_AT_MAX` and
+  `SCALING_WOULD_BE_UNSCHEDULABLE` together, with the real current/target
+  utilization and real Node allocation numbers named explicitly in the
+  reasoning, confirmed via both the CLI and a real HTTP server (`POST
+  /optimization/analyze`, `GET /optimization/recommendations?category=CAPACITY`).
+  `GET /optimization/workloads` correctly exposed the live `HpaSnapshot`
+  (replica bounds, metrics, `ScalingLimited` reason) with zero route
+  changes needed.
 
 ## Remediation test fixture (not a failure scenario)
 

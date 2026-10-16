@@ -7,9 +7,9 @@
 ./scripts/test.sh --all    # same, plus integration/e2e against a live kind cluster
 ```
 
-As of Milestone 4 (network troubleshooting engine): **566 unit tests** (no cluster, no Ollama needed) plus **51
+As of Milestone 5 (capacity planning & autoscaling advisor): **611 unit tests** (no cluster, no Ollama needed) plus **57
 integration/e2e tests** (`--all`, against the real `kind-kubesentinel` cluster, one
-of them additionally gated on a local Ollama server) -- 617 total, all passing,
+of them additionally gated on a local Ollama server) -- 668 total, all passing,
 `ruff check` clean, `mypy src/kubesentinel` clean. Every
 integration/e2e test skips (not fails) if its precondition (the cluster, the lab
 namespace, a specific scenario/fixture, Ollama) isn't present -- confirmed by
@@ -24,7 +24,11 @@ tests (Milestone 3 of the platform spec) added a further 92 unit tests and
 4 integration/e2e tests (plus 3 more RBAC boundary tests); the network
 troubleshooting engine's own tests (Milestone 4 of the platform spec) added
 a further 64 unit tests and 5 integration/e2e tests (plus 7 more RBAC
-boundary tests, covering its two new Roles); see below.
+boundary tests, covering its two new Roles); the capacity planning &
+autoscaling advisor's own tests (Milestone 5 of the platform spec) added
+a further 45 unit tests (41 in `test_capacity.py` plus 4 integration
+tests added to `test_optimization_service.py`) and 3 integration tests
+(plus 3 more RBAC boundary tests, covering its one new Role); see below.
 
 This was verified in-session, not assumed -- see the commands actually run, below.
 
@@ -194,6 +198,43 @@ This was verified in-session, not assumed -- see the commands actually run, belo
   lesson rather than rediscovering it), 503 (service unavailable), and
   namespace filtering on the findings list.
 
+## Capacity planning & autoscaling advisor unit test coverage (Milestone 5 of the platform spec)
+
+- **`test_capacity.py`** (41 tests) across six test classes:
+  `TestHpaToSnapshot` (converting a real `V2HorizontalPodAutoscaler` into
+  an `HpaSnapshot`, including the `ScalingLimited` condition read
+  verbatim), `TestBuildHpaInventory`/`TestAttachHpaSnapshots` (the
+  all-namespaces vs. per-namespace LIST path; matching an HPA to a
+  `WorkloadSnapshot` by scale-target kind+name, including a kind
+  mismatch correctly *not* matching), `TestComputeTrend` (every
+  `TrendDirection` branch, including the zero-baseline edge case where a
+  naive percentage-change calculation would divide by zero),
+  `TestDetectBottleneckPattern` (the single-threaded-ceiling pattern
+  firing only with enough plateaued replicas *and* a sufficiently higher
+  limit, and explicitly not firing when usage is merely spread out
+  across a wide range rather than clustered), `TestComputeScaleHeadroom`
+  (fits/doesn't-fit/exactly-at-the-boundary cases, unschedulable/
+  not-Ready Nodes excluded, and that *cumulative* multi-replica headroom
+  is checked correctly, not just a single replica's worth), and
+  `TestAnalyzeCapacity` (every branch end to end: no finding when
+  nothing fires, a healthy HPA's status-only finding, `HPA_AT_MAX` with
+  and without `SCALING_WOULD_BE_UNSCHEDULABLE` depending on real
+  headroom, `HPA_AT_MIN`, `MISSING_REQUESTS_FOR_AUTOSCALING_MATH`, the
+  memory-leak pattern firing/not-firing depending on window length and
+  whether CPU is also increasing, the single-threaded-bottleneck pattern
+  firing without any HPA at all, the "not a statistical forecast" caveat
+  always present, and determinism).
+- **`test_optimization_service.py`**'s new `TestCapacityIntegration`
+  class (4 tests) -- confirms `OptimizationService.analyze()` actually
+  wires `build_hpa_inventory()`/`attach_hpa_snapshots()`/
+  `analyze_capacity()` together correctly (an HPA targeting a workload
+  produces a persisted `CAPACITY` recommendation; no HPA produces none;
+  a capacity finding goes through the exact same generic
+  `safety.py::apply_safety_checks` every other category already does,
+  confirmed via `ACTIVE_INCIDENT`; and that a Node-inventory read failure
+  degrades the one headroom check gracefully rather than aborting the
+  entire `analyze()` pass).
+
 ## Why `kubernetes.client` model objects, not hand-rolled dicts, in tests
 
 `tests/unit/factories.py` builds `V1Pod`/`V1ContainerStatus`/etc. using the real
@@ -243,14 +284,15 @@ shared live-cluster fixtures, every one of which skips (never fails) if its
 precondition (a reachable cluster, the lab namespace, a specific scenario) isn't
 met.
 
-- **`test_rbac_boundary.py`** (30 tests) -- authenticates as the real
+- **`test_rbac_boundary.py`** (33 tests) -- authenticates as the real
   `kubesentinel` ServiceAccount (a token minted live with `kubectl create
   token`, not fabricated) and confirms both what it can do (read Pods/Events/
   Deployments/Nodes/StatefulSets/DaemonSets/Jobs/ResourceQuotas/pod-metrics/
-  Services/NetworkPolicies in the lab namespace, update/patch Deployments,
-  patch the scale subresource) and what it cannot (read Secrets anywhere,
-  read Pods outside the lab namespace, delete Deployments/Pods/Nodes,
-  mutate PVCs/Services/NetworkPolicies, patch
+  Services/NetworkPolicies/HorizontalPodAutoscalers in the lab namespace,
+  update/patch Deployments, patch the scale subresource) and what it
+  cannot (read Secrets anywhere, read Pods outside the lab namespace,
+  delete Deployments/Pods/Nodes, mutate
+  PVCs/Services/NetworkPolicies/HorizontalPodAutoscalers, patch
   StatefulSets/DaemonSets/Jobs/ReplicaSets/ResourceQuotas) -- using both a
   real authenticated API call and `kubectl auth can-i --as=...` (the same
   technique used to manually confirm this boundary in Milestone 4).
@@ -259,7 +301,7 @@ met.
   aggregated API even when the Role genuinely grants it, so that one check
   goes through a real authenticated request instead (treating a `503` --
   metrics-server itself down -- as inconclusive, not a failure, since
-  that's an availability question, not an RBAC one). Seven of the 30 cover
+  that's an availability question, not an RBAC one). Seven of the 33 cover
   the network engine's two new Roles specifically, including its
   `kube-system` exception: `kubectl_can_i()` gained an optional
   `resource_name` parameter (`TYPE/NAME` syntax) because that grant is
@@ -267,7 +309,10 @@ met.
   plain `can-i` without a resource name reports `no` for every one of
   those rules regardless of whether the grant exists, the same
   `metrics.k8s.io`-style false-negative lesson applied here deliberately
-  from the start rather than rediscovered.
+  from the start rather than rediscovered. Three more cover the capacity
+  advisor's one new Role (`rbac/capacity-role.yaml`): list/get
+  HorizontalPodAutoscalers in the lab namespace allowed, patching one or
+  listing them outside the lab namespace denied.
 - **`test_scheduling_live.py`** (4 tests, Milestone 3 of the platform spec)
   -- the `pending-resources`/`invalid-node-selector` scenarios' real Pods
   analyzed against the real cluster's actual Node allocatable/requested
@@ -288,6 +333,21 @@ met.
   through the new `kube-system`-scoped RBAC grant; and the same
   HTTP-transport-level read-only check the scheduling/optimization
   engines' own live tests already established.
+- **`test_capacity_live.py`** (3 tests, Milestone 5 of the platform spec)
+  -- the `hpa-capacity-pressure-demo` scenario's real `HorizontalPodAutoscaler`
+  (pinned `minReplicas=maxReplicas=1`, a deliberately tiny 1% CPU target)
+  analyzed against the real cluster's actual HPA status and Node
+  allocatable/requested numbers (never mocked), confirming `HPA_AT_MAX`
+  fires from the real `ScalingLimited` condition and real over-target
+  utilization, and that the live `HpaSnapshot` (replica bounds, metrics)
+  is correctly attached to its `WorkloadSnapshot`; plus the same
+  HTTP-transport-level read-only check every other engine's own live
+  tests already establish. `SCALING_WOULD_BE_UNSCHEDULABLE` is
+  deliberately *not* asserted here -- it is honestly environment-dependent
+  on this lab's other scenarios' own current CPU usage (see
+  `docs/CAPACITY_PLANNING.md` §11), confirmed live via the CLI/HTTP
+  surfaces instead (see TODO.md's Milestone 23 entry) rather than pinned
+  into an automated test that could flake as the lab's own state changes.
 - **`test_optimization_inventory_live.py`** / **`test_optimization_live_scenarios.py`**
   (5 tests, Milestones 14/18) -- `build_workload_inventory()` against the
   real lab namespace matches known healthy/unhealthy workloads; the

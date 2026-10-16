@@ -24,6 +24,10 @@ class RecommendationCategory(str, Enum):
     # requests/limits entirely, or insufficient evidence -- is still reported
     # (never silently dropped), just under this category instead of CPU/MEMORY.
     DATA_QUALITY = "DATA_QUALITY"
+    # HPA status/replica-capacity reasoning (Milestone 5 of the platform
+    # spec) -- see docs/CAPACITY_PLANNING.md. Never carries proposed_requests/
+    # proposed_limits, the same shape SCHEDULING already uses.
+    CAPACITY = "CAPACITY"
 
 
 class EvidenceQuality(str, Enum):
@@ -92,6 +96,50 @@ class UsageSummary(BaseModel):
         return cls(evidence_quality=EvidenceQuality.INSUFFICIENT, observed_at=observed_at or datetime.now(timezone.utc))
 
 
+class TrendDirection(str, Enum):
+    """A simple two-half-mean comparison over an already-sampled window --
+    explicitly a description of what was observed, never a forecast. See
+    docs/CAPACITY_PLANNING.md §2/§4."""
+
+    INCREASING = "INCREASING"
+    DECREASING = "DECREASING"
+    STABLE = "STABLE"
+    INSUFFICIENT = "INSUFFICIENT"  # not enough samples/window to say anything
+
+
+class HpaMetricStatus(BaseModel):
+    """One of an HPA's configured metrics, current value vs. target, read
+    verbatim from the real object -- never computed or inferred here."""
+
+    metric_name: str
+    metric_type: str
+    target_utilization_percent: int | None = None
+    target_average_value: str | None = None
+    current_utilization_percent: int | None = None
+    current_average_value: str | None = None
+
+
+class HpaSnapshot(BaseModel):
+    """A real HorizontalPodAutoscaler's status, matched to a WorkloadSnapshot
+    by scaleTargetRef kind+name (an HPA has no UID reference to its target,
+    only a name -- see optimization/capacity.py::attach_hpa_snapshots)."""
+
+    hpa_name: str
+    namespace: str
+    scale_target_kind: str
+    scale_target_name: str
+    min_replicas: int | None = None
+    max_replicas: int
+    current_replicas: int
+    desired_replicas: int
+    metrics: list[HpaMetricStatus] = Field(default_factory=list)
+    # The HPA's own ScalingLimited condition, read verbatim -- never
+    # inferred from current_replicas == max_replicas alone (that could
+    # also mean "at max and no longer under pressure").
+    scaling_limited: bool = False
+    scaling_limited_reason: str | None = None
+
+
 class ContainerResourceSnapshot(BaseModel):
     """One container's configured resources, within a WorkloadSnapshot."""
 
@@ -138,6 +186,9 @@ class WorkloadSnapshot(BaseModel):
     # is a SCHEDULING-category recommendation. None means every observed Pod
     # was schedulable, not "unknown."
     unschedulable_reason: str | None = None
+    # None means no HPA targets this workload -- never a placeholder/zeroed
+    # HpaSnapshot, which would misread as "an HPA exists and reports zero."
+    hpa: HpaSnapshot | None = None
 
 
 class ResourceRecommendation(BaseModel):
