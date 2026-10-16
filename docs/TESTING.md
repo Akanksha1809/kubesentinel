@@ -7,9 +7,9 @@
 ./scripts/test.sh --all    # same, plus integration/e2e against a live kind cluster
 ```
 
-As of Milestone 3 (scheduling advisor): **502 unit tests** (no cluster, no Ollama needed) plus **39
+As of Milestone 4 (network troubleshooting engine): **566 unit tests** (no cluster, no Ollama needed) plus **51
 integration/e2e tests** (`--all`, against the real `kind-kubesentinel` cluster, one
-of them additionally gated on a local Ollama server) -- 541 total, all passing,
+of them additionally gated on a local Ollama server) -- 617 total, all passing,
 `ruff check` clean, `mypy src/kubesentinel` clean. Every
 integration/e2e test skips (not fails) if its precondition (the cluster, the lab
 namespace, a specific scenario/fixture, Ollama) isn't present -- confirmed by
@@ -21,7 +21,10 @@ optimization engine's own tests (Milestones 13-18) added 176 of the 410 unit
 tests and 5 of the 32 integration/e2e tests (plus 4 of the RBAC boundary
 suite's tests, specific to its own Role); the scheduling advisor's own
 tests (Milestone 3 of the platform spec) added a further 92 unit tests and
-4 integration/e2e tests (plus 3 more RBAC boundary tests); see below.
+4 integration/e2e tests (plus 3 more RBAC boundary tests); the network
+troubleshooting engine's own tests (Milestone 4 of the platform spec) added
+a further 64 unit tests and 5 integration/e2e tests (plus 7 more RBAC
+boundary tests, covering its two new Roles); see below.
 
 This was verified in-session, not assumed -- see the commands actually run, below.
 
@@ -146,6 +149,51 @@ This was verified in-session, not assumed -- see the commands actually run, belo
   are different failure classes; see `scheduling/service.py::InvalidPodSpecError`),
   503 (service unavailable), and namespace filtering on the findings list.
 
+## Network troubleshooting engine unit test coverage (Milestone 4 of the platform spec)
+
+- **`test_network_service_inventory.py`** (13 tests) -- Service
+  selector-vs-Pod-label matching (exact equality, computed independently
+  rather than inferred from EndpointSlice counts); the
+  EndpointSlice-vs-selector consistency check across agreement and
+  disagreement cases; `_resolve_target_port()`'s asymmetric numeric-vs-named
+  semantics exhaustively (a numeric `targetPort` matching a declared port,
+  matching no declared port but still structurally valid, and a named
+  `targetPort` matching a declared port name vs. matching none at all).
+- **`test_network_policy_inventory.py`** (9 tests) -- `podSelector`
+  matching including the empty-selector-matches-*every*-Pod semantics
+  (the opposite of a Service's own empty selector), `matchExpressions`
+  evaluation via the reused `requirement_matches`, and the
+  ingress/egress-rules-present-vs-absent summary text (deny-all vs.
+  permits-matching-traffic).
+- **`test_network_dns_health.py`** (6 tests) -- a fully healthy case, the
+  `ready_replicas` omitempty-zero normalization (same bug shape already
+  documented for `optimization/inventory.py`), partial CoreDNS readiness,
+  a missing `kube-dns` Service, zero ready EndpointSlice endpoints, and an
+  unreadable Deployment (RBAC/API failure) all correctly reported as
+  unhealthy with a specific reason.
+- **`test_network_analyzer.py`** (12 tests) -- every classification
+  branch and the full priority ordering exhaustively (`DNS_UNHEALTHY` >
+  `CONFIGURATION_ERROR` > `MISSING_OR_UNREADY_ENDPOINTS` >
+  `POLICY_MAY_RESTRICT` > `HEALTHY`, with `INCONCLUSIVE` as its own
+  no-selecting-Service branch), that a configuration error always outranks
+  an applicable policy, that the "not a confirmed end-to-end connectivity
+  test" caveat is always present in `reasoning`, determinism, and that
+  workload fields are carried through unchanged.
+- **`test_network_repo.py`** (7 tests) -- SQLite save/get roundtrip,
+  upsert-not-duplicate, namespace/classification filtering.
+- **`test_network_service.py`** (9 tests) -- a missing Pod raises
+  `PodNotFoundError` (404-mapped), a DNS-unhealthy cluster state correctly
+  drives the finding's own classification, `related_incident_ids` linking
+  (the no-repo-wired-up no-op and a match on the Pod's own UID -- built in
+  from the start this time, not found missing after the fact the way
+  `SchedulingFinding` was), and the `kubesentinel_network_analysis_total`
+  metric's `failed` label on a real exception alongside the happy path.
+- **`test_network_api.py`** (8 tests) -- every route's happy path, 404
+  (missing Pod/finding), 422 (an invalid `classification` filter value --
+  a typed Enum query param from the start, applying Milestone 18's own
+  lesson rather than rediscovering it), 503 (service unavailable), and
+  namespace filtering on the findings list.
+
 ## Why `kubernetes.client` model objects, not hand-rolled dicts, in tests
 
 `tests/unit/factories.py` builds `V1Pod`/`V1ContainerStatus`/etc. using the real
@@ -195,22 +243,31 @@ shared live-cluster fixtures, every one of which skips (never fails) if its
 precondition (a reachable cluster, the lab namespace, a specific scenario) isn't
 met.
 
-- **`test_rbac_boundary.py`** (23 tests) -- authenticates as the real
+- **`test_rbac_boundary.py`** (30 tests) -- authenticates as the real
   `kubesentinel` ServiceAccount (a token minted live with `kubectl create
   token`, not fabricated) and confirms both what it can do (read Pods/Events/
-  Deployments/Nodes/StatefulSets/DaemonSets/Jobs/ResourceQuotas/pod-metrics
-  in the lab namespace, update/patch Deployments, patch the scale
-  subresource) and what it cannot (read Secrets anywhere, read Pods outside
-  the lab namespace, delete Deployments/Pods/Nodes, mutate PVCs/Services,
-  patch StatefulSets/DaemonSets/Jobs/ReplicaSets/ResourceQuotas) -- using
-  both a real authenticated API call and `kubectl auth can-i --as=...` (the
-  same technique used to manually confirm this boundary in Milestone 4).
+  Deployments/Nodes/StatefulSets/DaemonSets/Jobs/ResourceQuotas/pod-metrics/
+  Services/NetworkPolicies in the lab namespace, update/patch Deployments,
+  patch the scale subresource) and what it cannot (read Secrets anywhere,
+  read Pods outside the lab namespace, delete Deployments/Pods/Nodes,
+  mutate PVCs/Services/NetworkPolicies, patch
+  StatefulSets/DaemonSets/Jobs/ReplicaSets/ResourceQuotas) -- using both a
+  real authenticated API call and `kubectl auth can-i --as=...` (the same
+  technique used to manually confirm this boundary in Milestone 4).
   The `metrics.k8s.io` pods check is deliberately *not* asserted via
   `can-i` -- found live (Milestone 18) that `can-i` answers `no` for this
   aggregated API even when the Role genuinely grants it, so that one check
   goes through a real authenticated request instead (treating a `503` --
   metrics-server itself down -- as inconclusive, not a failure, since
-  that's an availability question, not an RBAC one).
+  that's an availability question, not an RBAC one). Seven of the 30 cover
+  the network engine's two new Roles specifically, including its
+  `kube-system` exception: `kubectl_can_i()` gained an optional
+  `resource_name` parameter (`TYPE/NAME` syntax) because that grant is
+  scoped via `resourceNames` to exactly `coredns`/`kube-dns` by name --
+  plain `can-i` without a resource name reports `no` for every one of
+  those rules regardless of whether the grant exists, the same
+  `metrics.k8s.io`-style false-negative lesson applied here deliberately
+  from the start rather than rediscovered.
 - **`test_scheduling_live.py`** (4 tests, Milestone 3 of the platform spec)
   -- the `pending-resources`/`invalid-node-selector` scenarios' real Pods
   analyzed against the real cluster's actual Node allocatable/requested
@@ -221,6 +278,16 @@ met.
   resolution correctly names the owning Deployment, and the same
   HTTP-transport-level read-only check the optimization engine's own live
   tests already established.
+- **`test_network_live.py`** (5 tests, Milestone 4 of the platform spec)
+  -- the `port-mismatch-demo` scenario's real Pod analyzed against the
+  real cluster's actual Service/EndpointSlice/container-port state (never
+  mocked), confirming `CONFIGURATION_ERROR` from the named-targetPort
+  mismatch alone and correct owning-Deployment resolution; the existing
+  `service-selector-mismatch-demo` Service correctly leaves an unrelated,
+  unselected Pod `INCONCLUSIVE`; real CoreDNS/`kube-dns` health read
+  through the new `kube-system`-scoped RBAC grant; and the same
+  HTTP-transport-level read-only check the scheduling/optimization
+  engines' own live tests already established.
 - **`test_optimization_inventory_live.py`** / **`test_optimization_live_scenarios.py`**
   (5 tests, Milestones 14/18) -- `build_workload_inventory()` against the
   real lab namespace matches known healthy/unhealthy workloads; the

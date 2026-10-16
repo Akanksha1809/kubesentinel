@@ -26,7 +26,8 @@ class ClusterClients:
     `kubernetes` version and must be queried via `CustomObjectsApi`; Jobs
     need `BatchV1Api`, not previously constructed anywhere) -- purely
     additive, every existing caller of `core`/`apps`/`discovery` is
-    unaffected.
+    unaffected. `networking` was added for the network troubleshooting
+    engine (NetworkPolicy has no client on any of the existing five).
     """
 
     def __init__(
@@ -36,12 +37,14 @@ class ClusterClients:
         discovery: client.DiscoveryV1Api,
         custom_objects: client.CustomObjectsApi,
         batch: client.BatchV1Api,
+        networking: client.NetworkingV1Api,
     ):
         self.core = core
         self.apps = apps
         self.discovery = discovery
         self.custom_objects = custom_objects
         self.batch = batch
+        self.networking = networking
 
 
 def load_kube_config(settings: Settings) -> None:
@@ -72,4 +75,5 @@ def build_clients(settings: Settings) -> ClusterClients:
         discovery=client.DiscoveryV1Api(api_client),
         custom_objects=client.CustomObjectsApi(api_client),
         batch=client.BatchV1Api(api_client),
+        networking=client.NetworkingV1Api(api_client),
     )

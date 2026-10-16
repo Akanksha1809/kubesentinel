@@ -117,3 +117,13 @@ scheduling_analysis_total = Counter(
     "raised, e.g. the Pod or cluster was unreachable).",
     ["result"],
 )
+
+network_analysis_total = Counter(
+    "kubesentinel_network_analysis_total",
+    "Network troubleshooting engine analysis runs, by the finding's own "
+    "classification (healthy/configuration_error/missing_or_unready_endpoints/"
+    "dns_unhealthy/policy_may_restrict/inconclusive), plus 'failed' for a run "
+    "that raised (e.g. the Pod or cluster was unreachable) rather than "
+    "producing a finding.",
+    ["result"],
+)

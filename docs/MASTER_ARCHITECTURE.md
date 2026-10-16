@@ -2,10 +2,10 @@
 
 The platform-wide view: what's built, what's planned, and the one
 architectural pattern every analysis engine in this project follows,
-proven three times now (troubleshooting, then resource optimization, then
-the scheduling advisor) and intended to be followed a fourth, fifth, and
-sixth time (network, capacity, security) rather than reinvented per
-capability.
+proven four times now (troubleshooting, then resource optimization, then
+the scheduling advisor, then the network troubleshooting engine) and
+intended to be followed a fifth and sixth time (capacity, security) rather
+than reinvented per capability.
 
 This document does not re-explain any already-built pipeline in detail --
 `ARCHITECTURE.md` covers the troubleshooting and resource-optimization
@@ -57,16 +57,20 @@ Every analysis engine in this project, built or planned, is:
    false` plus a `warning` string is this project's established shape for
    that, not a silent fallback to zero or "healthy."
 
-This is not an aspirational list -- it is what `optimization/` and
-`scheduling/` both already do, verified against `diagnostics/`'s own
-original shape. Three data points is still not a law of nature, but the
-pattern has now held up through live verification three times without
-needing to bend, including once (`scheduling/`) with a genuine reason to
-extend it: a read-only placement *simulation* is a kind of computation
-none of the first two engines do (deserializing a hypothetical, not-yet-
-real Pod spec into a typed object and analyzing it exactly like a real
-one), and that extension was written down explicitly in
-`docs/SCHEDULING_ANALYSIS.md` rather than silently absorbed into "the
+This is not an aspirational list -- it is what `optimization/`,
+`scheduling/`, and `network/` all already do, verified against
+`diagnostics/`'s own original shape. Four data points is still not a law
+of nature, but the pattern has now held up through live verification four
+times without needing to bend, including twice with a genuine reason to
+extend it: a read-only placement *simulation* (`scheduling/`, deserializing
+a hypothetical, not-yet-real Pod spec into a typed object and analyzing it
+exactly like a real one) and a deliberate, documented scope boundary
+(`network/`, where the spec's own active connectivity probe was reasoned
+out of this milestone entirely rather than built -- this project's first
+analysis engine to defer part of its own spec on a safety basis, not
+pick-and-choose expediency). Both extensions were written down explicitly
+in their own design docs (`docs/SCHEDULING_ANALYSIS.md`,
+`docs/NETWORK_DIAGNOSTICS.md`) rather than silently absorbed into "the
 pattern" retroactively -- which is exactly the discipline this paragraph
 asks every future capability to follow too.
 
@@ -74,16 +78,17 @@ asks every future capability to follow too.
 
 `observer/client.py::ClusterClients` today bundles `core` (`CoreV1Api`),
 `apps` (`AppsV1Api`), `discovery` (`DiscoveryV1Api`), `custom_objects`
-(`CustomObjectsApi`, for `metrics.k8s.io`), and `batch` (`BatchV1Api`) --
-each added additively, in the milestone that first needed it, never ahead
-of time (`custom_objects`/`batch` were added specifically for the
-optimization engine; nothing before that needed them). The same rule
-applies going forward:
+(`CustomObjectsApi`, for `metrics.k8s.io`), `batch` (`BatchV1Api`), and
+`networking` (`NetworkingV1Api`) -- each added additively, in the
+milestone that first needed it, never ahead of time (`custom_objects`/
+`batch` were added specifically for the optimization engine;
+`networking` for the network troubleshooting engine; nothing before each
+needed them). The same rule applies going forward:
 
 | Capability | New client needed | Status |
 |---|---|---|
 | C: Scheduling | none -- `core.list_node()` already existed on the existing `core` client | **done** -- `scheduling/node_inventory.py` calls it; confirms the prediction that no new client was needed here |
-| D: Network | `NetworkingV1Api` (NetworkPolicy, Ingress) | not constructed |
+| D: Network | `NetworkingV1Api` (NetworkPolicy; no Ingress -- confirmed live that zero Ingress/Gateway resources or CRDs exist on this cluster) | **done** -- `network/policy_inventory.py` calls it |
 | E: Capacity | `AutoscalingV2Api` (HPA) | not constructed |
 | F: Security | `RbacAuthorizationV1Api` (Roles/Bindings), `PolicyV1Api` (PodDisruptionBudget, if used) | not constructed |
 

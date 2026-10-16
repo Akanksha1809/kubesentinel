@@ -122,29 +122,39 @@ any scheduling-engine code): a `docs/SCHEDULING_ANALYSIS.md` design pass,
 covering the exact data model, the exact constraint-evaluation algorithm,
 and the exact API/CLI surface, before implementation begins.
 
-## Milestone 4: Network troubleshooting
+## Milestone 4: Network troubleshooting -- DONE
 
-**Scope**: a new `network/` package. `NetworkingV1Api` added to
-`ClusterClients` (new, additive). Reuses
-`observer/watchers.py::EndpointSliceWatcher` and the existing
-Service/EndpointSlice evidence shape. Builds the
+See `docs/NETWORK_DIAGNOSTICS.md` for the design and TODO.md's own entry
+for the full build-and-verification history. A new `network/` package
+(`service_inventory.py`, `policy_inventory.py`, `dns_health.py`,
+`analyzer.py`, `service.py`); `NetworkingV1Api` added to `ClusterClients`
+(new, additive). Builds the independently-computed
 `Pod -> DNS -> Service -> EndpointSlice -> destination Pod` evidence chain
-the spec asks for, with DNS resolution added as a bounded, explicitly
-opt-in active check scoped to the lab namespace only -- this is also where
-Capability A's long-reserved, long-unused `DNS_RESOLUTION_FAILURE` reason
-code would finally get a producer, if this milestone's design decides the
-active-probe result should also feed back into the troubleshooting
-engine's own incident model (a genuine design decision, not assumed).
+the spec asks for: Service selector-vs-Pod-label matching (computed fresh,
+not inferred from EndpointSlice counts), an EndpointSlice-vs-selector
+consistency check, numeric-vs-named `targetPort` resolution with
+Kubernetes' real asymmetric semantics, CoreDNS/`kube-dns` health, and
+applicable NetworkPolicy summaries. Every finding's reasoning always
+states the API-inspection-cannot-prove-packet-delivery caveat explicitly.
 
-**Environment constraint already on record**: kindnet (this cluster's
-default CNI) does not enforce NetworkPolicy. Every NetworkPolicy-related
-finding this milestone produces must be explicit that it is static
-analysis of the policy object, never a claim about actually-observed
-blocked traffic, unless a CNI capable of enforcement is installed
-separately (out of scope unless requested).
+**Deliberately deferred, as a genuine scope decision made during this
+milestone's own design pass, not an oversight**: the spec's "bounded,
+explicitly enabled diagnostic mechanism" active DNS/connectivity probe.
+Reasoned as this project's first mutation capability outside the fully
+policy-gated `RemediationExecutor`, deserving its own dedicated
+design/safety review rather than folding a new mutation surface into an
+already-large static-analysis milestone. `EvidenceKind.SERVICE_SPEC` and
+`ReasonCode.DNS_RESOLUTION_FAILURE` remain reserved-but-unproduced for the
+same reason. **Ingress/Gateway**: confirmed live (`kubectl get
+ingressclass` / `kubectl get crd`) that zero such resources or CRDs exist
+anywhere in this project's cluster or manifest history -- an honest "not
+applicable," not a built-but-silent gap.
 
-**Design-first, same as Milestone 3**: `docs/NETWORK_DIAGNOSTICS.md` before
-code.
+**Environment constraint already on record, and load-bearing here**:
+kindnet (this cluster's default CNI) does not enforce NetworkPolicy. Every
+NetworkPolicy-related finding this milestone produces is explicit that it
+is static analysis of the policy object (`POLICY_MAY_RESTRICT`, never a
+stronger claim), never a claim about actually-observed blocked traffic.
 
 ## Milestone 5: Capacity planning and autoscaling advisor
 

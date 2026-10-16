@@ -109,13 +109,25 @@ def kubesentinel_sa_clients(
     )
 
 
-def kubectl_can_i(verb: str, resource: str, *, namespace: str | None = None, subresource: str = "") -> bool:
+def kubectl_can_i(
+    verb: str, resource: str, *, namespace: str | None = None, subresource: str = "", resource_name: str = ""
+) -> bool:
     """Shells out to `kubectl auth can-i --as=...`, the authoritative RBAC
     decision (a real SelfSubjectAccessReview against the API server) -- the
     exact command used to manually confirm the RBAC boundary in Milestone 4
     (see TODO.md #14), now automated and repeatable instead of a one-off.
+
+    `resource_name` checks a `resourceNames`-scoped rule (e.g. the network
+    engine's `rbac/network-dns-role.yaml`, which grants `get` on only
+    `coredns`/`kube-dns` by name) -- `kubectl`'s own `TYPE/NAME` syntax,
+    distinct from `subresource`'s `TYPE/SUBRESOURCE` (callers pass at most
+    one of the two).
     """
-    resource_arg = f"{resource}/{subresource}" if subresource else resource
+    resource_arg = resource
+    if subresource:
+        resource_arg = f"{resource}/{subresource}"
+    elif resource_name:
+        resource_arg = f"{resource}/{resource_name}"
     cmd = [
         "kubectl",
         "auth",

@@ -1,0 +1,31 @@
+# A deliberate, narrow exception to this project's "kubesentinel-lab
+# namespace only" RBAC boundary -- the same category of exception
+# rbac/clusterrole.yaml's own Node grant already is (see its own
+# docstring). CoreDNS does not run in the lab namespace, so checking its
+# health (docs/NETWORK_DIAGNOSTICS.md Section 7) genuinely needs a
+# kube-system-scoped grant. Kept to exactly the three resources
+# network/dns_health.py reads -- no Secrets, no write verbs, no blanket
+# kube-system access, and not a ClusterRole (this Role is bound only in
+# kube-system, nowhere else).
+#
+# "get" only (not "list") for the specific coredns Deployment/kube-dns
+# Service this engine reads by name -- "list" is still needed for
+# EndpointSlices, since they're looked up by label selector
+# (kubernetes.io/service-name=kube-dns), not by a known object name.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kubesentinel-network-dns-reader
+  namespace: kube-system
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get"]
+    resourceNames: ["coredns"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get"]
+    resourceNames: ["kube-dns"]
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["list"]

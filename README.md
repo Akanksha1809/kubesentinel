@@ -22,7 +22,7 @@ anything), and the resource optimization engine producing a real
 samples. Recorded with [asciinema](https://asciinema.org) + [agg](https://github.com/asciinema/agg) --
 every line is genuine command output, not staged.
 
-## Status: Milestones 1-11 (troubleshooting) + 12-19 (resource optimization) + scheduling advisor complete
+## Status: Milestones 1-11 (troubleshooting) + 12-19 (resource optimization) + scheduling advisor + network troubleshooting engine complete
 
 The full **observe -> diagnose -> persist -> expose** pipeline is implemented,
 tested, and verified end-to-end against a real kind cluster for 13 of the 14
@@ -78,6 +78,24 @@ affinity/anti-affinity and topology spread constraints are detected and
 named, never guessed at. See
 [SCHEDULING_ANALYSIS.md](docs/SCHEDULING_ANALYSIS.md) for the design.
 
+A fourth, read-only engine -- the **network troubleshooting engine** --
+explains a real Pod's inbound Service-based connectivity story: which
+Services actually select it (computed independently, not inferred from
+EndpointSlice counts), whether its EndpointSlice output agrees, whether
+each Service's `targetPort` actually resolves against the Pod's declared
+container ports (numeric and named `targetPort`s have genuinely different
+Kubernetes semantics, both implemented precisely), whether cluster DNS
+(CoreDNS/`kube-dns`) looks healthy, and which NetworkPolicies apply --
+always as static policy analysis, never a claim about actually-observed
+blocked traffic (this lab cluster's CNI doesn't enforce NetworkPolicy at
+all). Every finding's reasoning ends with the same caveat: Kubernetes API
+inspection can describe configuration, never prove a packet actually
+arrives. An active, bounded connectivity probe was deliberately scoped
+out of this engine -- it would be this project's first mutation surface
+outside the fully policy-gated `RemediationExecutor`, and deserves its own
+safety review rather than being folded into a static-analysis milestone.
+See [NETWORK_DIAGNOSTICS.md](docs/NETWORK_DIAGNOSTICS.md) for the design.
+
 Every stage above is exported as Prometheus metrics with bounded-cardinality
 labels (category/action_type/reason/component, never incident IDs or pod
 names) at `GET /metrics`. [observability/](observability/) has a scrape config
@@ -89,16 +107,20 @@ was caught; see TODO.md's Known limitation #18.
 All 9 lab failure scenarios (every diagnostic category this project implements,
 one dedicated manifest each) plus 2 resource-optimization scenarios
 (oversized requests, missing requests entirely) plus 1 scheduling-advisor
-scenario (an impossible nodeSelector) are built and live-verified
+scenario (an impossible nodeSelector) plus 2 network-engine scenarios (a
+Service selector matching no Pod, and a Service matching a real, Ready
+Pod whose `targetPort` name doesn't resolve) are built and live-verified
 -- see [FAILURE_LAB.md](docs/FAILURE_LAB.md). The test suite now includes
 integration and e2e tests that exercise the real cluster directly (RBAC
 boundary enforcement, watch resync, UID-based dedup across a delete/recreate,
 restart recovery, concurrent remediation requests, the full propose/approve/
 execute/verify lifecycle against a real Deployment, the optimization
-engine's own read-only guarantee and real-usage-data right-sizing, and the
+engine's own read-only guarantee and real-usage-data right-sizing, the
 scheduling advisor's own independent constraint math reaching the same
-conclusion the real scheduler already did) --
-`./scripts/test.sh --all` runs all 541 tests (502 unit + 39 integration/e2e);
+conclusion the real scheduler already did, and the network engine's own
+independent selector/port matching reaching the right conclusion against
+real Services/EndpointSlices/CoreDNS) --
+`./scripts/test.sh --all` runs all 617 tests (566 unit + 51 integration/e2e);
 see [TESTING.md](docs/TESTING.md).
 
 Optional AI summarization (`kubesentinel explain <incident-id>`, or
@@ -152,6 +174,20 @@ hypothetical Pod spec                     node selector, required          pass/
                                            affinity, namespace quota)       arithmetic in the
                                                                             reasoning -- plus what
                                                                             wasn't evaluated
+                                                            |
+                                                            v
+                                            SQLite persistence  <-->  FastAPI + CLI + /metrics
+```
+
+A fourth pipeline, same shared infrastructure again, one new read-only client
+(`NetworkingV1Api`):
+
+```
+Service/Pod/EndpointSlice       -->  Independent selector/port       -->  Finding: classification
+inventory + NetworkPolicy            matching, EndpointSlice             (healthy/config-error/
+inventory + CoreDNS/kube-dns         consistency check, DNS             unready-endpoints/
+health (read-only, kube-system       health, applicable                 dns-unhealthy/policy-
+RBAC-scoped to those two names)      NetworkPolicy summaries            may-restrict/inconclusive)
                                                             |
                                                             v
                                             SQLite persistence  <-->  FastAPI + CLI + /metrics
@@ -215,6 +251,15 @@ hypothetical spec that doesn't exist yet -- also no extra setup needed:
 .venv/bin/kubesentinel scheduling-finding <finding-id>
 ```
 
+The network troubleshooting engine explains a real Pod's inbound
+Service-based connectivity story -- also no extra setup needed:
+
+```bash
+.venv/bin/kubesentinel network-check kubesentinel-lab <pod-name>
+.venv/bin/kubesentinel network-findings
+.venv/bin/kubesentinel network-finding <finding-id>
+```
+
 AI summarization is off by default (works with no AI at all). To try it:
 [install Ollama](https://ollama.com), `ollama pull qwen2.5-coder:3b` (or any
 model you have), then:
@@ -259,9 +304,10 @@ src/kubesentinel/
   incidents/     Incident lifecycle: dedup by resource UID, health classification, severity
   optimization/  Read-only resource right-sizing: inventory, metrics providers, analyzer, safety
   scheduling/    Read-only placement analysis: node inventory, per-constraint evaluators, analyzer
-  persistence/   Repository interfaces + SQLite implementations (incidents, optimization, scheduling)
-  api/           FastAPI app (health/ready/incidents/evidence/actions/metrics/optimization/scheduling)
-  cli/           Typer CLI mirroring the API for one-shot cluster inspection, remediation, optimization, and scheduling analysis
+  network/       Read-only connectivity analysis: service/policy inventory, DNS health, analyzer
+  persistence/   Repository interfaces + SQLite implementations (incidents, optimization, scheduling, network)
+  api/           FastAPI app (health/ready/incidents/evidence/actions/metrics/optimization/scheduling/network)
+  cli/           Typer CLI mirroring the API for one-shot cluster inspection, remediation, optimization, scheduling, and network analysis
   metrics/       Prometheus metric definitions
   policy/        Policy engine: OBSERVE/APPROVAL_REQUIRED/CONTROLLED_AUTO decisions
   remediation/   Remediation executor + service (propose/approve/execute/reject/dry_run)
@@ -270,8 +316,9 @@ src/kubesentinel/
 lab/             kind cluster config, namespace, failure scenario manifests, scripts,
                  optional metrics-server installer
 rbac/            Least-privilege Role/RoleBinding/ServiceAccount for what's implemented today
-                 (observer, remediator, optimizer, and scheduling-advisor Roles, each
-                 independently auditable)
+                 (observer, remediator, optimizer, scheduling-advisor, and network-advisor
+                 Roles -- the last with one narrow, documented kube-system exception for
+                 CoreDNS/kube-dns health -- each independently auditable)
 observability/   Prometheus scrape config + importable Grafana dashboard
 tests/unit/      Deterministic unit tests, no cluster required
 docs/            Architecture, diagnostic rules, RBAC/threat model, failure lab, resource
@@ -281,11 +328,12 @@ docs/            Architecture, diagnostic rules, RBAC/threat model, failure lab,
 ## Documentation
 
 - [MASTER_ARCHITECTURE.md](docs/MASTER_ARCHITECTURE.md) -- the platform-wide shape every analysis engine follows, built or planned
-- [PLATFORM_ROADMAP.md](docs/PLATFORM_ROADMAP.md) -- milestone plan: scheduling advisor done, network/capacity/security/operator ahead
+- [PLATFORM_ROADMAP.md](docs/PLATFORM_ROADMAP.md) -- milestone plan: scheduling advisor and network troubleshooting engine done, capacity/security/operator ahead
 - [IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md) -- evidence-backed, capability-by-capability status audit
 - [ARCHITECTURE.md](docs/ARCHITECTURE.md) -- component design and data flow for the troubleshooting and resource-optimization engines
 - [RESOURCE_OPTIMIZATION_DESIGN.md](docs/RESOURCE_OPTIMIZATION_DESIGN.md) -- the resource optimization engine's own design, algorithms, and milestone plan
 - [SCHEDULING_ANALYSIS.md](docs/SCHEDULING_ANALYSIS.md) -- the scheduling advisor's own design: what's evaluated for real vs. only detected
+- [NETWORK_DIAGNOSTICS.md](docs/NETWORK_DIAGNOSTICS.md) -- the network troubleshooting engine's own design: evidence chain, scope split, what's deliberately deferred
 - [DIAGNOSTIC_RULES.md](docs/DIAGNOSTIC_RULES.md) -- every rule, its evidence, and its confidence logic
 - [FAILURE_LAB.md](docs/FAILURE_LAB.md) -- each lab scenario: how it fails, what's expected, how to clean up
 - [RBAC_AND_THREAT_MODEL.md](docs/RBAC_AND_THREAT_MODEL.md) -- least privilege, trust boundaries

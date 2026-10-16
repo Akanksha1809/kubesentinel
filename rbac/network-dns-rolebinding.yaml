@@ -1,0 +1,19 @@
+# Bound in kube-system (where the Role it references lives), for the
+# kubesentinel ServiceAccount that actually lives in kubesentinel-lab --
+# a RoleBinding's subject namespace and its own namespace are independent;
+# a Role can only ever be referenced by a RoleBinding in its own namespace,
+# which is why this file, unlike every other RoleBinding in this project,
+# is not in the kubesentinel-lab namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kubesentinel-network-dns-reader
+  namespace: kube-system
+subjects:
+  - kind: ServiceAccount
+    name: kubesentinel
+    namespace: kubesentinel-lab
+roleRef:
+  kind: Role
+  name: kubesentinel-network-dns-reader
+  apiGroup: rbac.authorization.k8s.io

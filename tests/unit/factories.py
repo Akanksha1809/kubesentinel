@@ -38,6 +38,7 @@ from kubernetes.client import (
     V1ReplicaSet,
     V1ReplicaSetSpec,
     V1Service,
+    V1ServicePort,
     V1ServiceSpec,
     V1Taint,
 )
@@ -103,10 +104,14 @@ def make_service(
     namespace: str = "kubesentinel-lab",
     uid: str = "svc-uid-1234",
     selector: dict | None = None,
+    ports: list[V1ServicePort] | None = None,
 ) -> V1Service:
+    """`ports` defaults to empty -- added for the network troubleshooting
+    engine's own tests (docs/NETWORK_DIAGNOSTICS.md); every pre-existing
+    caller that only cares about the selector is unaffected."""
     return V1Service(
         metadata=V1ObjectMeta(name=name, namespace=namespace, uid=uid, resource_version="100"),
-        spec=V1ServiceSpec(selector=selector if selector is not None else {"app": name}),
+        spec=V1ServiceSpec(selector=selector if selector is not None else {"app": name}, ports=ports or []),
     )
 
 

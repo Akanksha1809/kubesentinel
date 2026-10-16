@@ -256,14 +256,52 @@ curl -s -X POST http://127.0.0.1:8000/scheduling/simulate -H "Content-Type: appl
   | python3 -m json.tool
 ```
 
+**8d. Show the network troubleshooting engine explain a real Service/Pod
+connectivity problem -- not a guess, evidence.**
+
+```bash
+./lab/scripts/run-scenario.sh service-port-mismatch
+kubectl -n kubesentinel-lab get pods -l app=port-mismatch-demo
+```
+
+Find the real Pod name, then:
+
+```bash
+.venv/bin/kubesentinel network-check kubesentinel-lab <pod-name>
+```
+
+Point out that the Service's selector genuinely matches this Pod and it's
+Ready (unlike the older `service-selector-mismatch-demo` Service, which
+matches nothing) -- the break is specifically the named `targetPort: web`
+not resolving to any container port this Pod actually declares
+(`http`), named explicitly in the reasoning. Contrast with
+`kubesentinel network-check kubesentinel-lab <remediation-test pod-name>`,
+which returns `INCONCLUSIVE` for a Pod no Service selects at all -- the
+engine distinguishes "nothing to validate" from "validated and broken."
+Also point out the DNS health line in the output: a real, live read of the
+cluster's own `coredns`/`kube-dns` state, through a narrowly RBAC-scoped
+exception (see RBAC_AND_THREAT_MODEL.md) -- and that every finding's
+reasoning ends with the same caveat: this is evidence from the Kubernetes
+API, never a confirmed end-to-end packet-delivery test.
+
+```bash
+curl -s -X POST http://127.0.0.1:8000/network/analyze -H "Content-Type: application/json" \
+  -d '{"namespace":"kubesentinel-lab","pod_name":"<pod-name>"}' \
+  | python3 -m json.tool
+```
+
 **9. Be upfront about what this isn't, yet.**
 
 Nothing in the live diagnosis pipeline *automatically* calls `propose()` --
 every remediation above was a deliberate human action (or, in
 `CONTROLLED_AUTO` mode, the policy engine's own explicit decision), never an
-unattended reaction to a diagnosis. DNS/connectivity diagnosis is deliberately
-out of scope (see DIAGNOSTIC_RULES.md), and there's no AI layer yet
-(Milestone 11, optional). The resource optimization engine never applies a
+unattended reaction to a diagnosis. The network engine reads live CoreDNS
+health and NetworkPolicy objects, but deliberately never runs an active
+connectivity probe -- that would be this project's first mutation surface
+outside the fully policy-gated `RemediationExecutor`, and was scoped out of
+this milestone for its own dedicated safety review rather than folded in;
+see NETWORK_DIAGNOSTICS.md Section 2. There's no AI layer yet (Milestone 11,
+optional). The resource optimization engine never applies a
 recommendation itself -- every number it produces still needs a human (or a
 future, explicitly-built policy-engine path) to act on it; see
 RESOURCE_OPTIMIZATION_DESIGN.md's known limitations for what's deliberately

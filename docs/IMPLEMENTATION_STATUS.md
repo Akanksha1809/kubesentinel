@@ -52,7 +52,7 @@ on a contended machine will show skips, not failures.
 | PVC binding problems | Implemented, binding-phase only | `diagnostics/rules/pvc.py` -- diagnoses `ProvisioningFailed`-style binding failure Events. **In-Pod mount failures** (e.g. a Pod stuck in `ContainerCreating` because an already-bound volume won't mount) are not covered -- no rule reads `FailedMount` Events today. |
 | Node pressure / unhealthy Nodes | Implemented | `diagnostics/rules/node.py` (`NodeConditionRule`) |
 | Missing ConfigMaps/Secrets | Implemented | `diagnostics/rules/missing_config.py`, reads the kubelet's own `CreateContainerConfigError` message (never reads Secret values -- see RBAC_AND_THREAT_MODEL.md) |
-| DNS and connectivity problems | **Missing**, deliberately deferred | `ReasonCode.DNS_RESOLUTION_FAILURE` exists in `models/diagnosis.py` as a reserved value, but no rule produces it and it is not in `diagnostics/engine.py::DEFAULT_RULES`. The original spec's own "when the evidence supports it" qualifier was read as "passive evidence alone is too weak a signal without an active probe," which is exactly what Capability D (section 3 of this document) is scoped to build. |
+| DNS and connectivity problems | Partial, by design split | `ReasonCode.DNS_RESOLUTION_FAILURE` exists in `models/diagnosis.py` as a reserved value, but no rule produces it and it is not in `diagnostics/engine.py::DEFAULT_RULES` -- this engine still has no DNS-resolution diagnosis. Capability D (below) now implements real, live CoreDNS/`kube-dns` *health* checking (`DnsHealthResult`), but deliberately as its own separate model/pipeline, not by finally producing this reason code -- doing so would need the bounded active probe Capability D's own design pass explicitly deferred (see below), not passive health evidence alone. |
 | Resource requests/limits contributing to failures | Partial, by design split | The troubleshooting engine itself does not diagnose this; Capability B (below) does, as a separate read-only analysis. Nothing currently cross-links an optimization finding (e.g. "this container has no memory limit") into an open incident's own hypothesis list -- they are two independent outputs today, linked only one direction (`ACTIVE_INCIDENT` on a recommendation), not the other. |
 
 Diagnosis shape: every `Hypothesis` carries `confidence` (never "proven"),
@@ -179,35 +179,73 @@ itself and confirms a full `analyze_pod()` pass issues only `GET`.
 
 ## Capability D: Kubernetes Network Troubleshooting Engine
 
-**Missing.** No `network/` module, no `NetworkingV1Api` client on
-`ClusterClients` (no NetworkPolicy/Ingress access today).
+**Implemented** (Milestone 4 of `docs/PLATFORM_ROADMAP.md`;
+`docs/NETWORK_DIAGNOSTICS.md` is the design). A new `network/` package:
+`service_inventory.py` (Service selector-vs-Pod-label matching, computed
+independently rather than inferred from EndpointSlice counts; the
+EndpointSlice-vs-selector consistency check; numeric-vs-named `targetPort`
+resolution), `policy_inventory.py` (applicable NetworkPolicy summaries),
+`dns_health.py` (CoreDNS/`kube-dns` health, a narrow, explicitly-justified
+`kube-system` RBAC exception), `analyzer.py` (pure classification over
+pre-computed evidence), `service.py` (the one module with side effects,
+mirroring `SchedulingService`/`OptimizationService` exactly).
+`NetworkingV1Api` added to `ClusterClients` (new, additive).
 
-What exists and is reusable: `observer/watchers.py::EndpointSliceWatcher` +
-`inspector.py`'s Service/EndpointSlice evidence extraction (already proven
-live, via `ServiceSelectorMismatchRule`) -- a real foundation for the
-Service -> EndpointSlice half of the request-path explanation this
-capability wants to build.
+| Spec item | Status | Evidence |
+|---|---|---|
+| Service selectors and matching Pods | Implemented | `ServiceMatchResult.matched_pod_names`, exact label-equality, computed fresh from live Pod labels rather than read off the EndpointSlice |
+| Pod readiness and EndpointSlice membership | Implemented | `ready_pod_names` (independent) compared against `endpointslice_ready_count` (the real controller's own output) -- a disagreement is itself a distinct finding, not noise |
+| Service ports / target ports, named-port mismatches | Implemented | `_resolve_target_port()`: a numeric `targetPort` always routes (declaration is informational only); a named `targetPort` must resolve to a real declared `containerPort.name` or the Service port has no usable endpoint on that Pod -- the two cases carry different confidence, not collapsed into one bool |
+| DNS configuration and CoreDNS health | Implemented | `check_dns_health()`: the `coredns` Deployment's real ready/desired replica counts and the `kube-dns` Service's real EndpointSlice ready-endpoint count, both read live |
+| NetworkPolicies and relevant selectors | Implemented, static only | `build_applicable_policies()`: real `podSelector` evaluation (empty selector matches *every* Pod in the namespace -- the opposite of a Service's empty selector, implemented explicitly, not left to a fallthrough) and ingress/egress rule-presence summary. See the kindnet caveat below -- never a stronger claim than `POLICY_MAY_RESTRICT` |
+| Namespace boundaries | Implemented | every lookup (`list_namespaced_service`/`_pod`/`_network_policy`/EndpointSlice) is scoped to the target Pod's own namespace; the one exception (`kube-system` for coredns/kube-dns) is RBAC-scoped to exactly those two named resources, not a general grant |
+| Service types / routing | Partial | ClusterIP routing (selector -> EndpointSlice -> Pod) is the implemented path; `NodePort`/`LoadBalancer`/`ExternalName` type-specific routing is not separately modeled |
+| Ingress / Gateway | **Not applicable** | confirmed live (`kubectl get ingressclass`, `kubectl get crd`) that zero such resources or CRDs exist anywhere in this project's cluster or manifest history -- an honest "not applicable," not a built-but-silent gap |
+| Relevant Events | Detected via reuse | `resolve_pod_owner` (workload resolution) is reused as-is; Event correlation itself is the troubleshooting engine's own existing surface (`observer`/`diagnostics`), not duplicated here |
+| Evidence-based request-path explanation | Implemented | `NetworkFinding.reasoning` always states the specific evidence behind the classification, and always appends the "not a confirmed end-to-end connectivity test" caveat -- API inspection cannot prove a packet actually arrives |
+| Active, bounded diagnostic mechanism | **Deliberately deferred** | reasoned during this milestone's own design pass as this project's first mutation capability outside the fully policy-gated `RemediationExecutor` -- deserves its own dedicated design/safety review rather than folding a new mutation surface into an already-large static-analysis milestone |
+| Never claim a NetworkPolicy blocks traffic without evidence | Honored | `POLICY_MAY_RESTRICT` is the strongest classification an applicable policy can produce; the reasoning text never states a stronger claim, and the kindnet non-enforcement caveat is documented explicitly (below) |
 
-**Environment constraint worth stating now**: this project's kind cluster
-uses kind's default CNI (kindnet), confirmed via `lab/kind-config.yaml`
-(no `networking.disableDefaultCNI` override). **kindnet does not enforce
-NetworkPolicy at all.** This means any `NetworkPolicy`-related analysis
-built on this lab cluster can only ever be *static* (reading the policy
-object's selectors/ports/direction and reasoning about what it *should*
-restrict) -- it can never be confirmed against actual observed blocked
-traffic, because nothing on this cluster is actually enforcing the policy.
-The design for this capability must say this explicitly wherever it reports
-a NetworkPolicy-related finding (matching the spec's own instruction: "Do
-not claim a NetworkPolicy blocks traffic unless the available evidence
-supports that conclusion") -- on this lab setup, the evidence can only ever
-support "this policy, if enforced, would restrict X," never "X is actually
-blocked." A CNI swap (e.g. Calico) is the only way to close that gap, and is
-out of scope unless explicitly requested.
+**Environment constraint, confirmed still true and load-bearing here**:
+this project's kind cluster uses kind's default CNI (kindnet), confirmed
+via `lab/kind-config.yaml` (no `networking.disableDefaultCNI` override).
+**kindnet does not enforce NetworkPolicy at all.** Any NetworkPolicy
+finding this engine produces is therefore *static* analysis of the policy
+object's selectors/ports/direction, never a claim about actually-observed
+blocked traffic -- `POLICY_MAY_RESTRICT`, never "X is actually blocked." A
+CNI swap (e.g. Calico) is the only way to close that gap, and is out of
+scope unless explicitly requested.
 
-No DNS diagnostic capability exists at all yet (Capability A's own
-`DNS_RESOLUTION_FAILURE` reason code is unused) -- this capability is where
-that gap would actually get closed, via a bounded, opt-in active probe
-(the spec's own requirement), not passive evidence alone.
+**A real correction caught live during this milestone's own
+verification**: the new `scenario-service-port-mismatch` lab scenario's
+design doc originally assumed a named `targetPort` that can't resolve
+would leave the EndpointSlice with zero ready endpoints. Confirmed live
+against the real cluster that this is wrong -- the EndpointSlice
+controller still adds a ready address for the matching Pod, just with
+`ports: null` (no port it could resolve), so `endpointslice_consistent`
+stays `true`. The scenario still correctly reaches `CONFIGURATION_ERROR`,
+but via the independent port-match check alone, not via the
+EndpointSlice-consistency check as originally assumed -- corrected in
+`service.yaml`'s own comment and `FAILURE_LAB.md` rather than left
+documented-wrong.
+
+**Live-verified against the real cluster**: the existing
+`service-selector-mismatch-demo` Service (selects no Pod) correctly
+classifies as `INCONCLUSIVE` when checked against an unrelated Pod it
+doesn't select, and a new `port-mismatch-demo` scenario (added this
+milestone, see FAILURE_LAB.md) correctly classifies as
+`CONFIGURATION_ERROR` from the named-targetPort mismatch alone, while its
+owning Deployment is correctly resolved. DNS health reads the real
+`coredns` Deployment (2/2 ready) and `kube-dns` Service (2 ready
+endpoints) live, through the new `kube-system`-scoped RBAC grant --
+confirmed via `kubectl auth can-i ... --as=system:serviceaccount:...` using
+the real `TYPE/NAME` resourceNames syntax (plain `can-i` without a
+resource name reports "no" for every one of these rules, since they're all
+`resourceNames`-scoped -- the same lesson Capability B's `metrics.k8s.io`
+case already taught, applied here from the start rather than re-discovered
+the hard way). A live integration test
+(`tests/integration/test_network_live.py`) patches the HTTP transport
+itself and confirms a full `analyze_pod()` pass issues only `GET`.
 
 ## Capability E: Capacity Planning & Autoscaling Advisor
 

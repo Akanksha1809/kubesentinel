@@ -28,6 +28,14 @@ from kubesentinel.models.optimization import (
     WorkloadKind,
     WorkloadSnapshot,
 )
+from kubesentinel.models.network import (
+    DnsHealthResult,
+    NetworkFinding,
+    NetworkFindingClassification,
+    NetworkPolicyRelevance,
+    PortMatchResult,
+    ServiceMatchResult,
+)
 from kubesentinel.models.scheduling import (
     ConstraintResult,
     ConstraintType,
@@ -72,4 +80,10 @@ __all__ = [
     "NodeSnapshot",
     "NodeTaint",
     "SchedulingFinding",
+    "DnsHealthResult",
+    "NetworkFinding",
+    "NetworkFindingClassification",
+    "NetworkPolicyRelevance",
+    "PortMatchResult",
+    "ServiceMatchResult",
 ]

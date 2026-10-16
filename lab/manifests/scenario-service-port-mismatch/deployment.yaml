@@ -1,0 +1,40 @@
+# Scenario: Service targetPort mismatch (Milestone 4 -- network troubleshooting engine)
+#
+# How the failure is created: this Deployment's Pods are real and Ready --
+# unlike `scenario-service-selector-mismatch`, the Service's selector
+# genuinely matches them. The break is in service.yaml's `targetPort`,
+# which names a container port ("web") that this container never declares
+# (it only declares "http"). See service.yaml for the rest of the story.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: port-mismatch-demo
+  namespace: kubesentinel-lab
+  labels:
+    app: port-mismatch-demo
+    kubesentinel.io/scenario: service-port-mismatch
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: port-mismatch-demo
+  template:
+    metadata:
+      labels:
+        app: port-mismatch-demo
+    spec:
+      containers:
+        - name: app
+          image: busybox:latest
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c", "sleep infinity"]
+          ports:
+            - name: http
+              containerPort: 8080
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 50m
+              memory: 32Mi

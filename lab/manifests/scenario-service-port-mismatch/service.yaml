@@ -1,0 +1,40 @@
+# Scenario: Service targetPort mismatch
+#
+# How the failure is created: `targetPort: web` names a container port that
+# deployment.yaml's Pod never declares (it declares "http", not "web"). A
+# *named* targetPort has no numeric fallback -- Kubernetes requires it to
+# resolve to a real declared containerPort.name on the Pod, or that Service
+# port has no usable endpoint on that Pod at all.
+#
+# Expected Kubernetes behavior, confirmed live against this project's own
+# kind cluster (corrected here from an earlier assumption -- see
+# docs/NETWORK_DIAGNOSTICS.md Section 10 and FAILURE_LAB.md): the Service's
+# selector does match the real, Ready `port-mismatch-demo` Pod (unlike
+# `service-selector-mismatch`, where the selector matches nothing), and the
+# EndpointSlice controller *does* add a ready address for it -- but with
+# `ports: null`, since it still cannot resolve the unresolvable named
+# targetPort to an actual port number. Confirm with:
+#   kubectl -n kubesentinel-lab get endpointslices -l kubernetes.io/service-name=port-mismatch-demo -o yaml
+#
+# Expected KubeSentinel diagnosis: CONFIGURATION_ERROR, from the
+# independently-computed port match alone (named targetPort "web" not found
+# among declared containerPort names on the matched Pod) -- not from the
+# EndpointSlice-vs-selector consistency check, which stays consistent here
+# since the ready-endpoint *count* still agrees even though its ports list
+# is empty. See docs/NETWORK_DIAGNOSTICS.md Section 10.
+#
+# Automatic remediation: not applicable -- only a human can fix the
+# Service's targetPort or the container's port name.
+apiVersion: v1
+kind: Service
+metadata:
+  name: port-mismatch-demo
+  namespace: kubesentinel-lab
+  labels:
+    kubesentinel.io/scenario: service-port-mismatch
+spec:
+  selector:
+    app: port-mismatch-demo
+  ports:
+    - port: 80
+      targetPort: web

@@ -129,7 +129,14 @@ def check_node_selector(node_selector: dict | None, node: NodeSnapshot) -> Const
     )
 
 
-def _requirement_matches(req, labels: dict) -> bool:
+def requirement_matches(req, labels: dict) -> bool:
+    """Evaluates one `In`/`NotIn`/`Exists`/`DoesNotExist`/`Gt`/`Lt`
+    requirement against a label dict. Public specifically so
+    `network/policy_inventory.py` can reuse it for `V1LabelSelectorRequirement`
+    (NetworkPolicy's `podSelector`) -- structurally identical to the
+    `V1NodeSelectorRequirement` shape this was written for (same four field
+    names), even though label selectors only ever use the first four
+    operators in practice; `Gt`/`Lt` simply never fire for that caller."""
     key = req.key
     values = req.values or []
     operator = req.operator
@@ -218,7 +225,7 @@ def check_required_node_affinity(affinity, node: NodeSnapshot) -> ConstraintResu
         if not expressions:
             term_results.append((True, "empty term (matches everything)"))
             continue
-        failed = [f"{e.key} {e.operator} {e.values}" for e in expressions if not _requirement_matches(e, node.labels)]
+        failed = [f"{e.key} {e.operator} {e.values}" for e in expressions if not requirement_matches(e, node.labels)]
         if failed:
             term_results.append((False, f"unmatched: {', '.join(failed)}"))
         else:

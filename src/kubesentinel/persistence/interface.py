@@ -12,6 +12,7 @@ from datetime import datetime
 
 from kubesentinel.models.action import RemediationAction
 from kubesentinel.models.incident import Incident
+from kubesentinel.models.network import NetworkFinding
 from kubesentinel.models.optimization import AnalysisRunSummary, ResourceRecommendation, WorkloadSnapshot
 from kubesentinel.models.scheduling import SchedulingFinding
 
@@ -122,3 +123,23 @@ class SchedulingRepository(ABC):
     def list_findings(
         self, *, namespace: str | None = None, schedulable: bool | None = None
     ) -> builtins.list[SchedulingFinding]: ...
+
+
+class NetworkRepository(ABC):
+    """Persistence for the network troubleshooting engine -- a sibling of
+    `SchedulingRepository`, same reasoning: `NetworkFinding` has no
+    review/approval lifecycle either.
+    """
+
+    @abstractmethod
+    def get_finding(self, finding_id: str) -> NetworkFinding | None: ...
+
+    @abstractmethod
+    def save_finding(self, finding: NetworkFinding) -> None:
+        """Upsert by `finding_id`."""
+        ...
+
+    @abstractmethod
+    def list_findings(
+        self, *, namespace: str | None = None, classification: str | None = None
+    ) -> builtins.list[NetworkFinding]: ...

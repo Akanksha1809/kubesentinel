@@ -186,3 +186,57 @@ def test_cannot_patch_resourcequotas():
 
 def test_cannot_list_resourcequotas_outside_lab_namespace():
     assert kubectl_can_i("list", "resourcequotas", namespace="kube-system") is False
+
+
+# --- Network advisor Role (rbac/network-role.yaml): read-only, lab namespace only ---
+
+
+def test_can_list_services_and_networkpolicies_in_lab_namespace(kubesentinel_sa_clients):
+    core, _, _, _ = kubesentinel_sa_clients
+    assert core.list_namespaced_service(namespace=LAB_NAMESPACE, limit=1) is not None
+    assert kubectl_can_i("list", "networkpolicies.networking.k8s.io", namespace=LAB_NAMESPACE) is True
+
+
+def test_cannot_patch_services_or_networkpolicies():
+    # Read-only Role: network/service_inventory.py and policy_inventory.py
+    # only ever list/get these, never mutate either.
+    assert kubectl_can_i("patch", "services", namespace=LAB_NAMESPACE) is False
+    assert kubectl_can_i("patch", "networkpolicies.networking.k8s.io", namespace=LAB_NAMESPACE) is False
+
+
+def test_cannot_list_services_outside_lab_namespace():
+    assert kubectl_can_i("list", "services", namespace="kube-system") is False
+
+
+# --- Network advisor's kube-system exception (rbac/network-dns-role.yaml):
+# --- read-only, scoped to exactly coredns/kube-dns by name ---
+
+
+def test_can_read_coredns_and_kube_dns_by_name_in_kube_system():
+    assert kubectl_can_i("get", "deployments.apps", namespace="kube-system", resource_name="coredns") is True
+    assert kubectl_can_i("get", "services", namespace="kube-system", resource_name="kube-dns") is True
+    assert kubectl_can_i("list", "endpointslices.discovery.k8s.io", namespace="kube-system") is True
+
+
+def test_cannot_read_other_kube_system_resources_by_name():
+    # The grant is scoped to exactly "coredns"/"kube-dns" via resourceNames
+    # -- confirms it doesn't widen into "any Deployment/Service in
+    # kube-system," which `kubectl auth can-i` without a resource name would
+    # incorrectly report as "no" either way (see kubectl_can_i's docstring),
+    # so this checks a *different* real resource by name instead.
+    assert (
+        kubectl_can_i("get", "deployments.apps", namespace="kube-system", resource_name="kube-dns-autoscaler")
+        is False
+    )
+
+
+def test_cannot_list_pods_or_secrets_in_kube_system():
+    # The kube-system exception grants nothing beyond the two named
+    # resources plus EndpointSlice listing -- no Pod/Secret access at all.
+    assert kubectl_can_i("list", "pods", namespace="kube-system") is False
+    assert kubectl_can_i("list", "secrets", namespace="kube-system") is False
+
+
+def test_cannot_patch_coredns_or_kube_dns():
+    assert kubectl_can_i("patch", "deployments.apps", namespace="kube-system", resource_name="coredns") is False
+    assert kubectl_can_i("patch", "services", namespace="kube-system", resource_name="kube-dns") is False

@@ -1,0 +1,28 @@
+# Read-only Role for the network troubleshooting engine
+# (docs/NETWORK_DIAGNOSTICS.md, Milestone 4 of docs/PLATFORM_ROADMAP.md).
+# Kept SEPARATE from every other capability's own Role, same
+# independent-auditability reason as always.
+#
+# `services`: the one genuinely new core-API grant in this file -- nothing
+# in this project has ever listed Services before this milestone (the
+# troubleshooting engine's own ServiceSelectorMismatchRule only ever reads
+# EndpointSlices, never the Service object itself). `networkpolicies`: new,
+# needed for the static policy analysis in `network/policy_inventory.py`.
+# `pods`/`endpointslices` are already granted by rbac/role.yaml, reused
+# rather than re-granted.
+#
+# "get"/"list" only, never "watch" -- this engine takes a one-shot
+# inventory snapshot per analysis call, the same reason every other
+# optimization-style Role in this project already gives.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kubesentinel-network-advisor
+  namespace: kubesentinel-lab
+rules:
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "list"]

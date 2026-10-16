@@ -1413,6 +1413,200 @@ RBAC_AND_THREAT_MODEL.md, FAILURE_LAB.md, and DEMO_SCRIPT.md (a new step
 writing it, matching this project's own "validate all documented
 commands" discipline).
 
+## Milestone 22: Network Troubleshooting Engine -- DONE
+
+Per `docs/PLATFORM_ROADMAP.md`'s own sequencing (Milestone 4 of the
+platform spec). Design-first, per this project's own established
+precedent: `docs/NETWORK_DIAGNOSTICS.md` before any code, covering the
+exact data model, scope split (what's evaluated for real vs. deliberately
+deferred), and API/CLI surface before implementation began.
+
+Added:
+
+- `network/service_inventory.py` -- `build_service_match_results()`:
+  Service-selector-vs-Pod-label matching computed *independently* for
+  every Pod in the namespace (exact label equality), never inferred from
+  EndpointSlice counts the way the existing `ServiceSelectorMismatchRule`
+  does. A second, separate check compares this independently-computed
+  ready-Pod count against the real EndpointSlice controller's own
+  ready-endpoint count (`endpointslice_consistent`) -- disagreement is
+  itself a genuine finding (controller lag or bug), not noise. A one-shot
+  raw-JSON EndpointSlice LIST (`_list_endpointslices_raw()`) reuses
+  `observer/watchers.py::_ListWatchLoop`'s own technique
+  (`_preload_content=False` + `json.loads`), because the generated
+  client's typed `V1EndpointSlice` model still raises on a genuinely-empty
+  `endpoints` field (Go's `omitempty` on a nil slice) -- confirmed live
+  against this project's own kind cluster, the same bug already documented
+  from building the original `EndpointSliceWatcher`. `_resolve_target_port()`
+  implements Kubernetes' real, asymmetric `targetPort` semantics precisely:
+  a **numeric** `targetPort` always routes to that port on the Pod's
+  network namespace whether or not any container *declares* it
+  (declaration is purely informational); a **named** `targetPort` has no
+  such fallback and must resolve to a real, declared `containerPort.name`
+  or that Service port has no usable endpoint on that Pod at all -- the two
+  cases are reported with different confidence, never collapsed into one
+  bool.
+- `network/policy_inventory.py` -- `build_applicable_policies()`: real
+  `podSelector` evaluation, explicitly implementing the empty-selector
+  semantics that are the *opposite* of a Service's own empty selector (a
+  NetworkPolicy's empty/absent `podSelector` matches **every** Pod in the
+  namespace, not none) -- written as its own explicit branch, not left to
+  an accidental fallthrough. Reuses `scheduling/constraints.py::requirement_matches`
+  (renamed from the private `_requirement_matches` specifically for this)
+  for `V1LabelSelectorRequirement` evaluation, structurally identical to
+  the `V1NodeSelectorRequirement` matching already proven for the
+  scheduling advisor. Summarizes each policy's ingress/egress rule
+  presence (deny-all vs. permits-matching-traffic) without ever claiming
+  traffic is actually blocked.
+- `network/dns_health.py` -- `check_dns_health()`: reads the real
+  `kube-system/coredns` Deployment's ready/desired replica counts (with
+  the same `ready_replicas or 0` omitempty-zero normalization already
+  documented for `optimization/inventory.py`) and the real
+  `kube-system/kube-dns` Service's own EndpointSlices (same raw-JSON
+  technique as above). A new, narrow, explicitly-justified exception to
+  this project's "lab namespace only" RBAC boundary -- the first
+  capability needing read access outside `kubesentinel-lab` for anything
+  other than the existing cluster-scoped Node `ClusterRole`.
+- `network/analyzer.py` -- `analyze_network()`, a pure function over
+  already-fetched evidence (zero Kubernetes clients, fully deterministic,
+  confirmed by an explicit `test_determinism` test) -- the same
+  "pure function over pre-computed facts" shape `optimization/safety.py`
+  and `scheduling/analyzer.py` already established. Classification
+  priority, deliberately designed and exhaustively tested: `DNS_UNHEALTHY`
+  > `CONFIGURATION_ERROR` (an unmatched port OR an EndpointSlice
+  inconsistency) > `MISSING_OR_UNREADY_ENDPOINTS` > `POLICY_MAY_RESTRICT`
+  (an applicable NetworkPolicy exists) > `HEALTHY`, with `INCONCLUSIVE` as
+  its own separate branch for "no Service selects this Pod at all"
+  (nothing to validate, not the same as "validated and fine"). Every
+  finding's `reasoning` always appends the same caveat: this is
+  evidence-based analysis of Kubernetes object state, never a confirmed
+  end-to-end connectivity test -- API inspection cannot prove a packet
+  actually arrives.
+- `network/service.py` -- `NetworkService`, the one module with side
+  effects, mirroring `SchedulingService`/`OptimizationService` exactly:
+  `analyze_pod()` (resolves the owning workload via
+  `optimization/ownership.py::resolve_pod_owner`, reused by import),
+  `get_finding()`/`list_findings()`. Incident linking
+  (`_open_incident_ids_for()`, the same dual-UID dedup pattern) was built
+  in from the start this time, with its own unit tests from the first
+  commit -- not found missing after the fact the way
+  `SchedulingFinding.related_incident_ids` was in Milestone 21. Wraps
+  `analyze_pod()` in a try/except recording
+  `kubesentinel_network_analysis_total{result}`
+  (healthy/configuration_error/missing_or_unready_endpoints/dns_unhealthy/
+  policy_may_restrict/inconclusive/failed).
+- `models/network.py`, `persistence/network_repo.py`
+  (`SQLiteNetworkRepository`, a fourth sibling behind
+  `persistence/interface.py`), `api/network_routes.py` (`POST
+  /network/analyze`, `GET /network/findings[/{id}]` -- the
+  `classification` query filter is a typed Enum from the start, applying
+  Milestone 18's own 422-vs-silent-empty-list lesson rather than
+  rediscovering it), and 3 new CLI commands (`network-check`,
+  `network-findings`, `network-finding`) -- all following the exact
+  pattern `MASTER_ARCHITECTURE.md` describes, now proven against a fourth
+  capability.
+- `observer/client.py::ClusterClients` -- `networking: NetworkingV1Api`
+  added (new, additive); confirmed via grep that `build_clients()` is the
+  only direct `ClusterClients(...)` construction site in the codebase, so
+  no other call site needed updating.
+- `rbac/network-role.yaml` (`services`/`networkpolicies` get/list, lab
+  namespace) and `rbac/network-dns-role.yaml` +
+  `rbac/network-dns-rolebinding.yaml` (the `kube-system` exception: `get`
+  on exactly `coredns`/`kube-dns` by name via `resourceNames`, `list` on
+  EndpointSlices). The DNS RoleBinding is bound in `kube-system` itself,
+  not `kubesentinel-lab` -- a RoleBinding can only reference a Role in its
+  *own* namespace, while its subject (the `kubesentinel` ServiceAccount)
+  still lives in `kubesentinel-lab`, the first time this project's RBAC
+  needed a binding outside the lab namespace for anything other than the
+  existing cluster-scoped Node `ClusterRole`.
+- A new lab scenario, `scenario-service-port-mismatch` (a Deployment whose
+  Pod declares container port `http`, paired with a Service whose
+  `targetPort: web` never resolves), chosen specifically because the
+  existing `service-selector-mismatch` scenario's selector matches zero
+  Pods -- this milestone needed a scenario where the selector genuinely
+  matches a real, Ready Pod, isolating the port-mismatch path specifically.
+
+**Deliberate scope decisions, made during this milestone's own design
+pass, not oversights**: the spec's "bounded, explicitly enabled diagnostic
+mechanism" active DNS/connectivity probe was scoped out entirely --
+reasoned as this project's first mutation capability outside the fully
+policy-gated `RemediationExecutor`, deserving its own dedicated
+design/safety review rather than folding a new mutation surface into an
+already-large static-analysis milestone. Ingress/Gateway support was also
+excluded, confirmed live (`kubectl get ingressclass`, `kubectl get crd`)
+rather than assumed: zero such resources or CRDs exist anywhere in this
+project's cluster or manifest history, making it an honest "not
+applicable," not a built-but-silent gap.
+
+**A real correction caught live during this milestone's own
+verification, by this project's own Milestone 20/21 audit standard**: the
+design doc and the new scenario's own first-draft comment assumed an
+unresolvable named `targetPort` would leave the EndpointSlice with zero
+ready endpoints (mirroring `service-selector-mismatch`'s zero-endpoint
+shape). Live-checking the real EndpointSlice
+(`kubectl get endpointslices -o yaml`) showed this was wrong: the
+controller still adds a `ready: true` address for the genuinely-matched,
+genuinely-Ready Pod -- just with `ports: null`, since it still can't
+resolve the port. `endpointslice_consistent` therefore correctly stays
+`true` for this scenario; the engine still reaches `CONFIGURATION_ERROR`,
+but via the independent port-match check alone, not via the
+EndpointSlice-consistency check as first assumed. Corrected in the
+scenario manifest's own comment, `FAILURE_LAB.md`, and
+`IMPLEMENTATION_STATUS.md` rather than left documented-wrong -- caught
+before shipping, not after, by live-checking rather than trusting the
+design doc's own prediction.
+
+**Live-verified against the real cluster**, not just unit-tested: the new
+`port-mismatch-demo` Pod (real, Ready, genuinely selected by its Service)
+correctly classified `CONFIGURATION_ERROR` from the named-`targetPort`
+mismatch alone, via both `kubesentinel network-check` and a real HTTP
+server (`POST /network/analyze`, `GET /network/findings[/{id}]`,
+including the `classification` filter's `422` on an invalid value and its
+namespace filter); its owning Deployment was correctly resolved. The
+unrelated `remediation-test` Pod (selected by no Service at all) correctly
+returned `INCONCLUSIVE`. DNS health correctly read the real `coredns`
+Deployment (2/2 ready) and `kube-dns` Service (2 ready endpoints) live,
+through the new `kube-system`-scoped RBAC grant -- confirmed via `kubectl
+auth can-i get deployments.apps/coredns -n kube-system --as=...` using the
+real `TYPE/NAME` resourceNames syntax (plain `can-i get deployments.apps
+-n kube-system`, with no resource name, correctly reports `no` for this
+exact grant, the same `metrics.k8s.io`-style false-negative lesson from
+Milestone 18 applied here from the start rather than rediscovered the hard
+way; `tests/conftest.py::kubectl_can_i()` gained an optional
+`resource_name` parameter for this). The two new Roles verified against
+the real `kubesentinel` ServiceAccount, not just admin: `services`/
+`networkpolicies` list went from `no` to `yes` after applying
+`network-role.yaml`, and the `kube-system` exception was confirmed scoped
+to exactly `coredns`/`kube-dns` by name (a different kube-system
+Deployment by name, and Pods/Secrets generally, all correctly denied).
+
+**Tests**: 64 new unit tests (`test_network_service_inventory.py`: 13,
+`test_network_policy_inventory.py`: 9, `test_network_dns_health.py`: 6,
+`test_network_analyzer.py`: 12, `test_network_repo.py`: 7,
+`test_network_service.py`: 9, `test_network_api.py`: 8) plus 5 new live
+integration tests (`test_network_live.py`) plus 7 new RBAC boundary
+tests. `./scripts/test.sh`: ruff clean, mypy clean (83 source files),
+**566 unit tests passed** (502 + 64). `./scripts/test.sh --all`: collected
+**617 tests** (566 unit + 51 integration/e2e). Two uninterrupted `--all`
+runs each hit the same shared-VM-contention pattern documented repeatedly
+throughout this project's history (21 failed/4 errored on the first run,
+including tests entirely unrelated to this milestone's own changes --
+`test_optimization_inventory_live.py`, `test_observer_live_detection.py`
+-- all contention-class `kubectl` subprocess timeouts, not real
+regressions); every one of the affected tests passed cleanly when
+re-run together in isolation immediately afterward (40 passed, 2 skipped
+for unrelated preconditions, 0 failed). This is at least the seventh
+confirmation of this exact environmental pattern across this project's
+history, using the identical "isolate and re-run" method each time.
+
+**Documentation**: README.md, PLATFORM_ROADMAP.md, IMPLEMENTATION_STATUS.md,
+MASTER_ARCHITECTURE.md, TESTING.md, RBAC_AND_THREAT_MODEL.md,
+FAILURE_LAB.md, and DEMO_SCRIPT.md (a new step 8d, every command in it
+actually run against the real cluster while writing it, matching this
+project's own "validate all documented commands" discipline).
+ARCHITECTURE.md left untouched by design, same reasoning as Milestone 21 --
+`docs/NETWORK_DIAGNOSTICS.md` is Capability D's own design doc.
+
 ## Known limitations (found during Milestone 1's own live verification, not theoretical)
 
 1. **Pod-UID dedup doesn't survive a Deployment rollout.** A Deployment template

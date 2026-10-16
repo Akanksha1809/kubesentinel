@@ -36,6 +36,12 @@ from kubesentinel.optimization.service import (
     RecommendationNotFoundError,
 )
 from kubesentinel.models.optimization import RecommendationStatus
+from kubesentinel.network.service import (
+    FindingNotFoundError as NetworkFindingNotFoundError,
+    NetworkService,
+    PodNotFoundError as NetworkPodNotFoundError,
+)
+from kubesentinel.persistence.network_repo import SQLiteNetworkRepository
 from kubesentinel.persistence.optimization_repo import SQLiteOptimizationRepository
 from kubesentinel.persistence.scheduling_repo import SQLiteSchedulingRepository
 from kubesentinel.persistence.sqlite_repo import SQLiteIncidentRepository
@@ -622,6 +628,111 @@ def show_scheduling_finding(
         for cr in node_result.constraint_results:
             mark = "[green]pass[/green]" if cr.satisfied else "[red]fail[/red]"
             console.print(f"    {cr.constraint_type.value} [{mark}]: {cr.reasoning}")
+
+
+def _build_network_service(settings: Settings) -> tuple[NetworkService, SQLiteNetworkRepository]:
+    clients = build_clients(settings)
+    repo = SQLiteNetworkRepository(settings.db_path)
+    incident_repo = SQLiteIncidentRepository(settings.db_path)
+    return NetworkService(clients, repo, incident_repo=incident_repo), repo
+
+
+@app.command("network-check")
+def network_check(
+    namespace: str = typer.Argument(..., help="Namespace of the Pod"),
+    pod_name: str = typer.Argument(..., help="Pod to analyze"),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """Explain a real Pod's inbound Service-based connectivity story: which
+    Services select it, whether its ports resolve, which NetworkPolicies
+    apply, and whether cluster DNS looks healthy. Read-only: inspects
+    Services/EndpointSlices/NetworkPolicies/CoreDNS and persists the
+    finding locally -- never modifies anything in the cluster. Never a
+    proof of end-to-end connectivity; see docs/NETWORK_DIAGNOSTICS.md."""
+    settings = get_settings()
+    configure_logging(settings.log_level)
+    service, _repo = _build_network_service(settings)
+    try:
+        finding = service.analyze_pod(namespace, pod_name)
+    except NetworkPodNotFoundError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from exc
+
+    if json_output:
+        print(json_module.dumps(finding.model_dump(mode="json"), indent=2))
+        return
+
+    console.print(f"{finding.namespace}/{pod_name}: [bold]{finding.classification.value}[/bold]")
+    console.print(f"  {finding.reasoning}")
+    if finding.related_incident_ids:
+        console.print(f"  Related incident(s): {', '.join(finding.related_incident_ids)}")
+    for svc in finding.service_results:
+        console.print(f"  Service '{svc.service_name}': {len(svc.ready_pod_names)}/{len(svc.matched_pod_names)} matched Pod(s) ready")
+        for pr in svc.port_results:
+            mark = "[green]pass[/green]" if pr.matched else "[red]fail[/red]"
+            console.print(f"    port {pr.service_port} -> {pr.target_port} [{mark}]: {pr.reasoning}")
+    for policy in finding.applicable_network_policies:
+        console.print(f"  NetworkPolicy '{policy.policy_name}': {policy.summary}")
+
+
+@app.command("network-findings")
+def list_network_findings(
+    namespace: str = typer.Option(None, help="Filter by namespace"),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """List persisted network findings from past analyses."""
+    settings = get_settings()
+    service, _repo = _build_network_service(settings)
+    findings = service.list_findings(namespace=namespace)
+
+    if json_output:
+        print(json_module.dumps([f.model_dump(mode="json") for f in findings], indent=2))
+        return
+
+    table = Table(title="Network Findings")
+    for col in ("ID", "Namespace", "Pod", "Workload", "Classification"):
+        table.add_column(col)
+    for f in findings:
+        table.add_row(
+            f.finding_id[:8],
+            f.namespace,
+            f.target_pod_name or "",
+            f.workload_name or "",
+            f.classification.value,
+        )
+    console.print(table)
+
+
+@app.command("network-finding")
+def show_network_finding(
+    finding_id: str = typer.Argument(..., help="Finding to show"),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """Show one network finding in full."""
+    settings = get_settings()
+    service, _repo = _build_network_service(settings)
+    try:
+        finding = service.get_finding(finding_id)
+    except NetworkFindingNotFoundError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from exc
+
+    if json_output:
+        print(json_module.dumps(finding.model_dump(mode="json"), indent=2))
+        return
+
+    console.print(f"[bold]{finding.namespace}/{finding.target_pod_name}[/bold]: {finding.classification.value}")
+    console.print(f"  {finding.reasoning}")
+    console.print(f"  DNS: {finding.dns_health.reasoning}")
+    if finding.related_incident_ids:
+        console.print(f"  Related incident(s): {', '.join(finding.related_incident_ids)}")
+    for svc in finding.service_results:
+        console.print(f"  Service '{svc.service_name}': selector={svc.selector}")
+        for pr in svc.port_results:
+            mark = "[green]pass[/green]" if pr.matched else "[red]fail[/red]"
+            console.print(f"    port {pr.service_port} -> {pr.target_port} [{mark}]: {pr.reasoning}")
+    for policy in finding.applicable_network_policies:
+        console.print(f"  NetworkPolicy '{policy.policy_name}' (applies={policy.applies_to_target}): {policy.summary}")
 
 
 def _state_label(cs) -> str:

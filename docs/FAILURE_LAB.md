@@ -2,7 +2,9 @@
 
 All lab resources live in the `kubesentinel-lab` namespace
 (`lab/manifests/namespace.yaml`), never in a system namespace, and KubeSentinel's RBAC
-(`rbac/role.yaml`) is scoped to that namespace only.
+(`rbac/role.yaml`) is scoped to that namespace only -- with one narrow, documented
+exception for the network troubleshooting engine's CoreDNS/`kube-dns` health check
+(`rbac/network-dns-role.yaml`, bound in `kube-system`; see RBAC_AND_THREAT_MODEL.md).
 
 ```bash
 ./lab/create-cluster.sh                      # create the kind cluster + namespace
@@ -14,6 +16,8 @@ kubectl apply -f lab/manifests/scenario-transient-recovery/pod.yaml
 ./lab/scripts/run-scenario.sh missing-requests      # own scenarios (not failures)
 ./lab/install-metrics-server.sh                     # optional, for CPU/memory recommendations
 ./lab/scripts/run-scenario.sh invalid-node-selector # scheduling advisor's own scenario
+./lab/scripts/run-scenario.sh service-selector-mismatch  # network engine's own scenarios
+./lab/scripts/run-scenario.sh service-port-mismatch
 ./lab/scripts/cleanup.sh                      # removes all scenario Deployments/Pods
 ./lab/delete-cluster.sh                       # destroys the kind cluster entirely
 ```
@@ -126,6 +130,43 @@ kubectl apply -f lab/manifests/scenario-transient-recovery/pod.yaml
 - **Verified live**: incident opened and correctly diagnosed via the exact manifest
   file above. Building the `EndpointSliceWatcher` this scenario depends on surfaced
   a real upstream `kubernetes` client bug -- see TROUBLESHOOTING.md.
+
+## Scenario: `service-port-mismatch` (Milestone 4 of the platform spec --
+## network troubleshooting engine)
+
+- **Manifest**: `lab/manifests/scenario-service-port-mismatch/` (`deployment.yaml` +
+  `service.yaml`).
+- **How it fails**: unlike `service-selector-mismatch` above, this Service's
+  selector genuinely matches a real, Ready Pod (`port-mismatch-demo`, which
+  declares a container port named `http`) -- the break is the Service's
+  `targetPort: web`, naming a container port the Pod never declares. A
+  *named* `targetPort` has no numeric fallback: Kubernetes requires it to
+  resolve to a real, declared `containerPort.name`, or that Service port has
+  no usable endpoint on that Pod at all.
+- **Expected Kubernetes behavior, confirmed live against this project's own
+  kind cluster** (an assumption corrected during this milestone -- see
+  IMPLEMENTATION_STATUS.md Capability D): the EndpointSlice controller
+  *does* add a `ready: true` address for the Pod (the selector match is
+  real), but with `ports: null`, since it still cannot resolve the
+  unresolvable named `targetPort` to an actual port number:
+  `kubectl -n kubesentinel-lab get endpointslices -l kubernetes.io/service-name=port-mismatch-demo -o yaml`.
+- **Expected diagnosis**: `CONFIGURATION_ERROR`, from the independently-computed
+  port match alone (named `targetPort` "web" not found among declared
+  `containerPort` names on the matched Pod) -- not from the
+  EndpointSlice-vs-selector consistency check, which stays consistent here
+  since the ready-endpoint *count* still agrees even though its ports list is
+  empty. See `docs/NETWORK_DIAGNOSTICS.md` Section 10.
+- **Automatic remediation**: not applicable -- only a human can fix the
+  Service's `targetPort` or the container's declared port name.
+- **Verified live**: `kubesentinel network-check kubesentinel-lab
+  <port-mismatch-demo pod>` correctly returned `CONFIGURATION_ERROR` with the
+  named-targetPort mismatch named explicitly in the reasoning, confirmed via
+  both the CLI and a real HTTP server (`POST /network/analyze`,
+  `GET /network/findings[/{id}]`). The owning Deployment was correctly
+  resolved. A separate check against the unrelated `remediation-test` Pod
+  (selected by no Service at all) correctly returned `INCONCLUSIVE`, and the
+  DNS health check correctly read the real `coredns`/`kube-dns` state in
+  `kube-system` through the engine's new, narrowly-scoped RBAC grant.
 
 ## Remediation test fixture (not a failure scenario)
 

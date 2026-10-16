@@ -115,20 +115,78 @@ since a real Pod already passed admission and quota can't explain why it's
 Pending. `get`/`list` only, same "one-shot snapshot, never a watch" reason
 as `optimization-role.yaml`.
 
-This entire boundary -- all four Roles, both directions (what's granted and
-what isn't) -- is now covered by `tests/integration/test_rbac_boundary.py`:
-23 automated checks, authenticated as the real `kubesentinel`
-ServiceAccount's own minted token plus `kubectl auth can-i --as=...`, run
-against the live cluster every time `./scripts/test.sh --all` does. This is
-the repeatable version of what Milestone 4's one-off manual verification
-caught; it isn't a one-time check anymore. One exception, found live while
-verifying the optimizer Role (Milestone 18): `kubectl auth can-i` itself
-gave a *wrong* answer (`no`) for `metrics.k8s.io` pods even after the Role
-genuinely granted it -- `can-i`'s client-side API discovery doesn't always
-know about aggregated APIs. `test_can_get_pod_metrics_via_real_authenticated_call`
+```yaml
+# rbac/network-role.yaml (current, in full) -- a fifth, separate Role,
+# for the network troubleshooting engine (Milestone 4 of the platform spec)
+rules:
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "list"]
+```
+
+```yaml
+# rbac/network-dns-role.yaml + rbac/network-dns-rolebinding.yaml
+# (current, in full) -- a deliberate, narrow exception to this project's
+# "lab namespace only" boundary, bound in kube-system itself (the one
+# other RoleBinding namespace in the whole project, alongside
+# clusterrole.yaml's own cluster-scoped exception for Nodes). A
+# RoleBinding can only reference a Role in its *own* namespace, so this
+# Role and its binding both live in kube-system -- the subject (the
+# kubesentinel ServiceAccount) still lives in kubesentinel-lab, proving a
+# RoleBinding's own namespace and its subject's namespace are independent.
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get"]
+    resourceNames: ["coredns"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get"]
+    resourceNames: ["kube-dns"]
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["list"]
+```
+
+`services`/`networkpolicies` cover exactly what `network/service_inventory.py`
+and `policy_inventory.py` call, scoped to the lab namespace like every
+other Role -- Pods/Deployments/ReplicaSets are already granted by
+`role.yaml`/`remediation-role.yaml` and reused as-is for selector matching
+and owner-reference resolution. The `kube-system` exception is scoped as
+narrowly as RBAC's `resourceNames` allows: `get` on exactly the
+`coredns` Deployment and the `kube-dns` Service by name (not "any
+Deployment/Service in kube-system"), plus `list` on EndpointSlices (not
+name-scopable, since they're queried by label selector, not by name).
+This is the same category of deliberate, documented exception as
+`clusterrole.yaml`'s Node grant -- a capability that genuinely needs
+something outside the lab namespace, granted as narrowly as the API
+allows and called out explicitly, never folded silently into a wider Role.
+
+This entire boundary -- all five Roles plus the kube-system exception,
+both directions (what's granted and what isn't) -- is now covered by
+`tests/integration/test_rbac_boundary.py`: 30 automated checks,
+authenticated as the real `kubesentinel` ServiceAccount's own minted token
+plus `kubectl auth can-i --as=...`, run against the live cluster every
+time `./scripts/test.sh --all` does. This is the repeatable version of
+what Milestone 4's one-off manual verification caught; it isn't a one-time
+check anymore. One exception, found live while verifying the optimizer
+Role (Milestone 18): `kubectl auth can-i` itself gave a *wrong* answer
+(`no`) for `metrics.k8s.io` pods even after the Role genuinely granted it
+-- `can-i`'s client-side API discovery doesn't always know about
+aggregated APIs. `test_can_get_pod_metrics_via_real_authenticated_call`
 checks this one via a real authenticated request instead of `can-i`,
 specifically because the convenience tool was confirmed unreliable for it;
-see KUBERNETES_CONCEPTS.md.
+see KUBERNETES_CONCEPTS.md. A related but distinct lesson surfaced
+verifying the network engine's `resourceNames`-scoped `kube-system` grant:
+plain `can-i get deployments.apps -n kube-system` (no resource name)
+correctly reports `no` even though the Role *does* grant `get` on
+`coredns` specifically -- not a bug, but a reminder that a
+`resourceNames`-scoped rule must be checked with `kubectl`'s own
+`TYPE/NAME` syntax (`deployments.apps/coredns`), which `kubectl_can_i()`
+now supports via an optional `resource_name` parameter.
 
 ## What will be added, and when
 

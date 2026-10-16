@@ -12,8 +12,10 @@ from fastapi import Header, HTTPException
 from kubesentinel.ai.client import OllamaClient
 from kubesentinel.config import Settings
 from kubesentinel.incidents.manager import IncidentManager
+from kubesentinel.network.service import NetworkService
 from kubesentinel.observer.service import ObserverService
 from kubesentinel.optimization.service import OptimizationService
+from kubesentinel.persistence.network_repo import SQLiteNetworkRepository
 from kubesentinel.persistence.optimization_repo import SQLiteOptimizationRepository
 from kubesentinel.persistence.scheduling_repo import SQLiteSchedulingRepository
 from kubesentinel.persistence.sqlite_repo import SQLiteIncidentRepository
@@ -32,6 +34,8 @@ class AppState:
     optimization: OptimizationService | None = None
     scheduling_repo: SQLiteSchedulingRepository
     scheduling: SchedulingService | None = None
+    network_repo: SQLiteNetworkRepository
+    network: NetworkService | None = None
 
 
 state = AppState()
