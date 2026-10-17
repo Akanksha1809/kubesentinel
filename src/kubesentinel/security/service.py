@@ -19,6 +19,7 @@ from kubesentinel.models.security import SecurityAuditResult, SecurityFinding
 from kubesentinel.observer.client import ClusterClients
 from kubesentinel.persistence.interface import SecurityRepository
 from kubesentinel.security.engine import SecurityAuditEngine
+from kubesentinel.security.image_scanning import RULE_ID as IMAGE_SCAN_RULE_ID, scan_images
 from kubesentinel.security.inventory import build_security_inventory
 
 
@@ -30,6 +31,7 @@ class SecurityService:
     def __init__(self, clients: ClusterClients, repo: SecurityRepository, settings: Settings):
         self._clients = clients
         self._repo = repo
+        self._settings = settings
         self._engine = SecurityAuditEngine(settings)
 
     def audit(self, namespaces: list[str] | None = None) -> SecurityAuditResult:
@@ -37,6 +39,11 @@ class SecurityService:
         try:
             inventory = build_security_inventory(self._clients, namespaces=namespaces)
             result = self._engine.audit(inventory, namespaces)
+            if self._settings.security_enable_image_scanning:
+                image_findings, image_warnings = scan_images(inventory, self._settings)
+                result.findings.extend(image_findings)
+                result.warnings.extend(image_warnings)
+                result.rules_evaluated.append(IMAGE_SCAN_RULE_ID)
         except Exception:  # noqa: BLE001 - any failure here means "failed", not a partial result
             security_audit_total.labels(result="failed").inc()
             raise

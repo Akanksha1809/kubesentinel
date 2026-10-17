@@ -1,7 +1,7 @@
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from kubernetes.client import V1Container, V1PodSpec, V1SecurityContext
@@ -91,6 +91,42 @@ class TestAudit:
 
         with pytest.raises(Exception, match="boom"):
             service.audit(namespaces=[NAMESPACE])
+
+
+class TestImageScanningGating:
+    def test_disabled_by_default_never_calls_scan_images(self, repo):
+        clients = _clients(pods=[])
+        service = SecurityService(clients, repo, Settings())
+
+        with patch("kubesentinel.security.service.scan_images") as mock_scan:
+            service.audit(namespaces=[NAMESPACE])
+
+        mock_scan.assert_not_called()
+
+    def test_enabled_calls_scan_images_and_merges_results(self, repo):
+        from kubesentinel.models.security import SecurityFinding, SecurityResourceRef, SecuritySeverity
+
+        clients = _clients(pods=[])
+        settings = Settings(security_enable_image_scanning=True)
+        service = SecurityService(clients, repo, settings)
+        fake_finding = SecurityFinding(
+            finding_id="f1",
+            rule_id="IMAGE_HAS_KNOWN_VULNERABILITIES",
+            severity=SecuritySeverity.HIGH,
+            resource=SecurityResourceRef(namespace=NAMESPACE, kind="Deployment", name="demo"),
+            evidence=["image 'x' has known vulnerabilities"],
+            explanation="x",
+            remediation="x",
+        )
+
+        with patch("kubesentinel.security.service.scan_images", return_value=([fake_finding], ["a warning"])) as mock_scan:
+            result = service.audit(namespaces=[NAMESPACE])
+
+        mock_scan.assert_called_once()
+        assert fake_finding in result.findings
+        assert "a warning" in result.warnings
+        assert "IMAGE_HAS_KNOWN_VULNERABILITIES" in result.rules_evaluated
+        assert len(repo.list_findings()) == 1
 
 
 class TestGetAndList:

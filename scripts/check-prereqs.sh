@@ -20,10 +20,28 @@ check() {
   fi
 }
 
+# Unlike check() above, a missing optional tool never flips $ok to false --
+# KUBESENTINEL_SECURITY_ENABLE_IMAGE_SCANNING is off by default specifically
+# so this project runs fully without it (docs/SECURITY_AUDITING.md Section 14).
+check_optional() {
+  local name="$1"
+  local cmd="$2"
+  local version_args="$3"
+  local hint="$4"
+  if command -v "$cmd" >/dev/null 2>&1; then
+    local version
+    version=$("$cmd" $version_args 2>&1 | head -1)
+    echo "[OK]       $name: $version"
+  else
+    echo "[OPTIONAL] $name not found: $hint"
+  fi
+}
+
 check "Docker"       docker     "--version" "install Docker Desktop or Colima: https://docs.docker.com/get-docker/"
 check "kind"         kind       "--version" "brew install kind"
 check "kubectl"      kubectl    "version --client" "brew install kubectl"
 check "Python 3.11+" python3.12 "--version" "brew install python@3.12 (3.11+ required; system python3 may be too old)"
+check_optional "Trivy" trivy "--version" "only needed for CVE/image vulnerability scanning (KUBESENTINEL_SECURITY_ENABLE_IMAGE_SCANNING=true) -- brew install trivy"
 
 echo
 if command -v docker >/dev/null 2>&1; then

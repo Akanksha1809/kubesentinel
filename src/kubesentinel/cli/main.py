@@ -758,7 +758,10 @@ def security_audit(
     container security context, RBAC over-permissiveness, NetworkPolicy
     coverage, PodDisruptionBudget coverage. Read-only: inspects
     Pods/RBAC objects/NetworkPolicies/PodDisruptionBudgets and persists
-    findings locally -- never modifies anything in the cluster. See
+    findings locally -- never modifies anything in the cluster. If
+    KUBESENTINEL_SECURITY_ENABLE_IMAGE_SCANNING=true, also scans each
+    unique container image with a local Trivy binary for known CVEs
+    (off by default; see docs/SECURITY_AUDITING.md Section 14). See
     docs/SECURITY_AUDITING.md for exactly what is and isn't evaluated."""
     settings = get_settings()
     configure_logging(settings.log_level)

@@ -206,6 +206,26 @@ class Settings(BaseSettings):
     # would address.
     security_min_replicas_for_pdb_check: int = 2
 
+    # CVE/image vulnerability scanning (docs/SECURITY_AUDITING.md §14) --
+    # opt-in, off by default: unlike every other check in this engine, it
+    # shells out to a local Trivy binary rather than reading an
+    # already-typed Kubernetes object, so it's gated the same way
+    # ai_enabled/optimization_prometheus_url already gate this project's
+    # other genuinely optional extras. False means zero code runs and
+    # zero subprocess calls happen -- not "best-effort," identical to this
+    # feature not existing.
+    security_enable_image_scanning: bool = False
+    # Passed straight to `trivy image --severity <this>` -- Trivy does its
+    # own floor filtering (more efficient than fetch-then-filter in
+    # Python, and keeps findings actionable rather than flooding
+    # `security-findings` with the dozens of LOW/MEDIUM CVEs a typical
+    # base image carries).
+    security_image_scan_min_severity: str = "HIGH,CRITICAL"
+    # Generous because Trivy's first scan on a machine can include
+    # downloading its own vulnerability database -- a one-time cost this
+    # project does not pre-warm or special-case.
+    security_image_scan_timeout_seconds: int = 180
+
     @property
     def security_builtin_subject_group_prefix_list(self) -> list[str]:
         return [p.strip() for p in self.security_builtin_subject_group_prefixes.split(",") if p.strip()]

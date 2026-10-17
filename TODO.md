@@ -3220,3 +3220,155 @@ milestone specifically.
 **Full regression suite**: ruff clean, mypy clean, **828 unit tests
 passed** (803 + 25, including 1 renamed/relocated from
 `test_security_availability_rule.py`).
+
+## Milestone 32: CVE/image vulnerability scanning via Trivy -- DONE
+
+The third of the five scope boundaries the user asked to close, per
+the same "safest/most in-pattern first" order as Milestones 30-31
+above -- the first of the three remaining items that genuinely needs an
+external dependency, per the user's own choice ("local scanner binary
+(Trivy/Grype)" over OSV.dev's public API or skipping this item).
+Closes `docs/SECURITY_AUDITING.md` Section 12's own long-named gap,
+written up as new Section 14 in that doc (an extension of an
+already-designed capability, like Milestone 30's own Section 13, not a
+new standalone design doc) before any code.
+
+**Why this needed its own section, not just a new rule file**: every
+other check in this engine (`security/rules/*.py`) is a pure function
+over an already-fetched, already-typed Kubernetes object --
+`SecurityRule.evaluate(inventory)`, zero side effects. Deciding whether
+an image has a known CVE genuinely needs a maintained vulnerability
+database this project has no intention of building -- Section 2's own
+original reasoning for building this engine's catalog natively named
+this exact case as "the one item where an external tool would
+genuinely add capability this native catalog cannot responsibly
+claim." Closing it means accepting the one deliberate exception to
+that reasoning, not abandoning it -- scoped narrowly enough (an
+optional, additive, off-by-default step) to not compromise the native
+catalog's own guarantees for every other check.
+
+**Design decisions, made deliberately rather than assumed**:
+- **Genuinely optional, off by default.** New `Settings.
+  security_enable_image_scanning` (default `False`) gates the entire
+  feature -- off means zero code runs and zero subprocess calls happen,
+  the same "never the only source of a capability's own logic"
+  discipline `ai_enabled`/`optimization_prometheus_url` already
+  established for this project's other optional extras. On, but
+  `trivy` missing from `PATH`, degrades to a `warnings` entry; every
+  other check in this engine is unaffected either way.
+- **Not a `SecurityRule`.** A subprocess call isn't a pure function
+  over already-fetched evidence, so `security/image_scanning.py`
+  lives on its own and is orchestrated directly by
+  `SecurityService.audit()`, not registered in `default_rules()`.
+- **The first subprocess call in this project's core analysis path.**
+  `evaluation/harness.py` already shells out to `kubectl`, but only as
+  lab tooling for the chaos-evaluation harness, never feeding a
+  finding. This is the first module where a subprocess call's own
+  output *becomes* a finding -- named explicitly in the design doc, not
+  glossed over, because it's a real, new category of dependency
+  (outbound network access for Trivy's own vulnerability DB and image
+  pulls) that Kubernetes RBAC has no say over at all.
+- **No new Kubernetes RBAC.** Image references are strings already
+  present in the already-fetched `SecurityInventory.pod_templates` --
+  this step makes zero new Kubernetes API calls.
+- **Trivy does its own severity floor filtering** (`--severity
+  HIGH,CRITICAL` by default, configurable via
+  `security_image_scan_min_severity`) rather than fetch-then-filter in
+  Python -- more efficient, and keeps findings actionable instead of
+  flooding `security-findings` with the dozens of LOW/MEDIUM CVEs a
+  typical base image carries. `--scanners vuln` deliberately excludes
+  Trivy's own secret/misconfig scanners, which would overlap with and
+  potentially contradict this engine's own native `SECRET_AS_ENV_VAR`
+  and friends.
+- **One finding per (image, referencing workload)** that has at least
+  one CVE at or above the floor -- mirroring `MUTABLE_IMAGE_TAG`'s own
+  per-workload finding shape, not one finding per image (hides which
+  workload is affected) or one per CVE (unmanageable row count for a
+  popular base image). Severity is the worst CVE severity Trivy itself
+  reported, never re-judged. A unique image is scanned once per
+  `audit()` call no matter how many workloads reference it.
+- **Generous default timeout** (`security_image_scan_timeout_seconds`,
+  default 180s) -- Trivy's first scan on a machine can include
+  downloading its own vulnerability database, a one-time cost this
+  project does not pre-warm or special-case.
+
+**What was added**:
+
+- `security/image_scanning.py` (new) -- `trivy_available()`
+  (`shutil.which`), `_images_to_workloads()` (dedupes images across
+  `SecurityInventory.pod_templates`, `initContainers` excluded, the
+  same existing simplification every rule in
+  `security/rules/container.py` already makes), `_run_trivy()` (list-
+  form `subprocess.run`, never a shell string, with a timeout; a
+  timeout/nonzero-exit/invalid-JSON result all return `None` rather
+  than raising), `_findings_for_image()` (aggregates per-image,
+  severity = worst CVE found, evidence names per-severity counts plus
+  up to 10 *distinct* example CVE IDs -- deduped, since the same CVE
+  genuinely appears more than once in real Trivy output, once per
+  affected package; caught live, not assumed, see below), and
+  `scan_images()` (the orchestration entry point: `[]`/warning if
+  Trivy's missing, otherwise one scan per unique image with per-image
+  failure isolation).
+- `config.py` -- `security_enable_image_scanning`,
+  `security_image_scan_min_severity`, `security_image_scan_timeout_seconds`.
+- `security/service.py::SecurityService.audit()` -- calls
+  `scan_images()` when enabled, merges its findings/warnings into the
+  same `SecurityAuditResult` the native rules already produced, and
+  appends `IMAGE_HAS_KNOWN_VULNERABILITIES` to `rules_evaluated`.
+- `scripts/check-prereqs.sh` -- new `check_optional()` helper (distinct
+  from `check()`): a missing Trivy is reported `[OPTIONAL]`, never
+  flips the script's own exit code to non-zero, matching this
+  feature's "genuinely optional" guarantee in the one place a user
+  would check before assuming something is broken.
+- `cli/main.py::security_audit` -- docstring updated to mention the
+  opt-in scan and its env var.
+
+**Tests**: 22 new unit tests in `test_security_image_scanning.py`
+(image deduplication, per-image/per-workload finding shape, worst-
+severity selection, example-CVE-ID capping and deduplication, every
+`_run_trivy` failure mode -- timeout, nonzero exit, invalid JSON,
+missing binary -- confirmed via mocking `subprocess.run` that the
+real argument list is used, never a shell string, and that `_run_trivy`
+genuinely never raises) plus 2 new tests in `test_security_service.py`
+(`TestImageScanningGating`: disabled-by-default never calls
+`scan_images`; enabled merges its findings/warnings/rule-id correctly).
+
+**Live-verified against the real cluster, after installing Trivy**
+(the user confirmed installing it first, since it wasn't already on
+this machine): ran `kubesentinel security-audit` with
+`KUBESENTINEL_SECURITY_ENABLE_IMAGE_SCANNING=true` against the real
+lab namespace, which already has a deliberately-fake nonexistent image
+running as part of the existing `imagepull-demo` scenario (Milestone
+whichever added that lab scenario) -- confirmed the graceful-
+degradation path for real: Trivy genuinely failed to pull/scan that
+image, and the audit recorded exactly one `warnings` entry naming it
+and continued, rather than aborting. Separately applied a real,
+throwaway Pod running `node:14` (a real, old image with many genuine,
+publicly known CVEs) and confirmed a real `IMAGE_HAS_KNOWN_VULNERABILITIES`
+CRITICAL finding, with accurate evidence ("23 CRITICAL, 572 HIGH")
+matching a direct `trivy image` run against the same image byte for
+byte. This direct comparison is also what caught the duplicate-CVE-ID
+bug in the example-evidence list (real packages genuinely report the
+same CVE ID more than once) -- fixed immediately (deduped before
+capping at 10) and covered by a new regression test, not just patched
+and moved on. Test fixture deleted immediately after.
+
+**Documentation**: `docs/SECURITY_AUDITING.md` (new Section 14; §2's
+and §3's own text updated so the native-catalog reasoning and the
+"evaluated for real" list both stay accurate now that one check is a
+deliberate, scoped exception to each; §12 updated to point to §14).
+`docs/IMPLEMENTATION_STATUS.md` (Capability F's CVE-scanning row
+updated to Implemented/opt-in). `README.md` (Capability F's own
+paragraph updated -- and, caught in the same pass, a stale leftover
+from Milestone 30 fixed too: it still named "resolving a subject's
+effective permissions" as an open gap after Milestone 30 had already
+closed it, now folded into the RBAC sentence correctly).
+`docs/PLATFORM_ROADMAP.md`'s own Milestone 6 section is left
+unedited, same reasoning as Milestones 30/31's own precedent -- a
+historical record of that milestone's original scope (13 rules,
+CVE scanning named as deferred, at the time), with this closure
+recorded as separate follow-up work here instead.
+
+**Full regression suite**: ruff clean, mypy clean, **849 unit tests
+passed** (828 + 21, including the dedup regression test added after
+the live-verification fix above).

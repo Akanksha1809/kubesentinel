@@ -125,18 +125,21 @@ deliberate build-vs-integrate decision, not an oversight) covering
 container security context (privileged, allowPrivilegeEscalation,
 runAsNonRoot, readOnlyRootFilesystem, host namespace sharing, hostPath
 volumes, mutable image tags, Secrets as env vars), RBAC
-over-permissiveness (cluster-admin bindings and wildcard verb+resource
-rules, both excluding Kubernetes' own built-in, unfixable Roles/bindings
--- confirmed live that a real cluster has *two* such built-in identities,
-not the one better-known one), NetworkPolicy coverage (namespaces with
-zero policies, policies with an unrestricted-allow-all ingress rule,
-reusing the network engine's own classification rather than re-reading
-NetworkPolicy objects a second time), and PodDisruptionBudget coverage
-for multi-replica workloads. Deliberately out of scope: CVE/image
-vulnerability scanning (no maintained vulnerability database this
-project has access to) and resolving a subject's *effective* permissions
-across every Role it's bound to combined -- both named as real gaps, not
-silently absent. No apply/write path exists here either. See
+over-permissiveness (cluster-admin bindings, wildcard verb+resource
+rules, and a subject's *effective* permissions resolved across every
+Role/ClusterRole binding naming it combined -- all excluding Kubernetes'
+own built-in, unfixable Roles/bindings -- confirmed live that a real
+cluster has *two* such built-in identities, not the one better-known
+one), NetworkPolicy coverage (namespaces with zero policies, policies
+with an unrestricted-allow-all ingress rule, reusing the network
+engine's own classification rather than re-reading NetworkPolicy objects
+a second time), PodDisruptionBudget coverage for multi-replica
+workloads, and CVE/image vulnerability scanning (opt-in, off by
+default: a local Trivy binary scans each unique container image, the
+one check in this engine that shells out to an external scanner rather
+than reading a Kubernetes object directly, since that genuinely needs a
+maintained vulnerability database this project has no intention of
+building). No apply/write path exists here either. See
 [SECURITY_AUDITING.md](docs/SECURITY_AUDITING.md) for the design.
 
 A **chaos & resilience evaluation harness** drives all six engines above

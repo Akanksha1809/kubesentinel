@@ -43,13 +43,18 @@ design pass. Built natively, not integrated, for three concrete reasons:
 
 1. **Consistency.** Every other analysis engine in this project
    (Capabilities A-E) is a native, deterministic, in-repo rule catalog.
-   No external scanner binary, no subprocess execution surface, exists
-   anywhere in this codebase today -- confirmed by grep. Integrating one
-   here would be the first time this project shells out to a third-party
-   tool for its *core* logic, a materially different category of
-   dependency than the existing *optional data sources*
-   (Prometheus/Ollama/metrics-server), which this engine's own findings
-   never depend on to function at all.
+   No external scanner binary feeds this core, always-on rule catalog's
+   own logic -- integrating one here, as the *only* source of the
+   container-security/RBAC/NetworkPolicy/PDB checks above, would be a
+   materially different category of dependency than the existing
+   *optional data sources* (Prometheus/Ollama/metrics-server), which
+   this engine's own core findings never depend on to function at all.
+   (CVE/image vulnerability scanning specifically is the one later
+   addition to this engine that *does* shell out to an external
+   scanner -- added afterward, scoped as a strictly additive, opt-in
+   extra under the exact same "never the only source of a capability's
+   own logic" discipline; see §14. It does not change the reasoning
+   below for the native catalog itself.)
 2. **Scope fits.** The checks this milestone needs (container security
    context, RBAC over-permissiveness, NetworkPolicy coverage, PDB
    coverage) are each a handful of field reads against already-typed
@@ -65,9 +70,10 @@ design pass. Built natively, not integrated, for three concrete reasons:
 
 ## 3. Scope: what this milestone evaluates for real vs. defers
 
-**Evaluated for real**, each a deterministic field read against a real,
-typed Kubernetes object -- never a CVE scan, never a compliance-framework
-score:
+**Evaluated for real** -- items 1-4 below are each a deterministic field
+read against a real, typed Kubernetes object; item 5 is the one
+exception, a real external scan rather than a field read (§14). Never a
+compliance-framework score, in either case:
 
 1. **Container security context** (`security/rules/container.py`),
    deduped per owning workload the same way `optimization/inventory.py`
@@ -128,6 +134,13 @@ score:
    - `MISSING_PDB_FOR_MULTI_REPLICA_WORKLOAD` -- a Deployment/StatefulSet
      with `desired_replicas >= 2` has no PodDisruptionBudget whose
      selector matches it.
+5. **CVE/image vulnerability scanning** (`security/image_scanning.py`,
+   §14) -- `IMAGE_HAS_KNOWN_VULNERABILITIES`, opt-in (off by default,
+   see §14), via a local Trivy binary. Not a `SecurityRule`: unlike
+   every check above, it genuinely needs a maintained vulnerability
+   database this project has no intention of building, so, uniquely
+   among this engine's checks, it shells out to an external scanner
+   rather than reading an already-typed Kubernetes object directly.
 
 **Explicitly deferred, stated once here rather than per-finding:**
 
@@ -136,12 +149,6 @@ score:
   -- duplicating it here would be exactly the "re-reading a second time"
   the roadmap's own NetworkPolicy instruction already warns against,
   generalized to every other already-covered domain too.
-- **CVE/image vulnerability scanning.** Needs a maintained vulnerability
-  database this project has no access to and no intention of building;
-  this is the single clearest example of where an external tool
-  (Trivy/Grype) would genuinely add capability this native catalog
-  cannot responsibly claim, named explicitly as a gap rather than
-  silently absent.
 - **Pod Security Admission namespace-label auditing** (the modern
   replacement for the deprecated PodSecurityPolicy). A real, valuable
   check, but deliberately out of this milestone's first pass -- the
@@ -336,11 +343,12 @@ pass itself succeed," distinct from how many findings it produced.
 
 Everything named "explicitly deferred" in §3 applies cluster-wide, not
 per-finding. The effective-permissions gap this section used to name is
-closed -- see §13. What remains genuinely unresolved: CVE/image
-vulnerability scanning (no maintained vulnerability database this
-project has access to), and an active connectivity probe for the network
-engine (its own, separate, deliberately-deferred mutation surface --
-see NETWORK_DIAGNOSTICS.md §2).
+closed -- see §13. CVE/image vulnerability scanning is closed too, as an
+opt-in extra -- see §14. What remains genuinely unresolved: an active
+connectivity probe for the network engine (its own, separate,
+deliberately-deferred mutation surface -- see NETWORK_DIAGNOSTICS.md §2),
+and the resource optimizer applying its own recommendations
+(RESOURCE_OPTIMIZATION_DESIGN.md's own policy-boundary section).
 
 ## 13. Effective RBAC permission resolution
 
@@ -399,3 +407,129 @@ excluded there for the same reason), report a CRITICAL finding naming
 every contributing binding by name, so a multi-binding case is visibly
 different in its own evidence from a single-binding one, not collapsed
 into one undifferentiated claim.
+
+## 14. CVE/image vulnerability scanning
+
+Closes the gap §12 used to name. §2's own reasoning for why this
+engine's *core* catalog is native, not integrated, still holds: this
+addition doesn't change that reasoning, it's the one deliberate
+exception to it, scoped narrowly enough to not compromise it.
+
+**Why an exception here, specifically, and nowhere else in this
+engine.** Every other check in this engine (§3 items 1-4) is a
+deterministic field read against an object this project already has
+cause to fetch from the Kubernetes API -- no external expertise is
+needed to decide "is `privileged: true` a problem," only a field read.
+Whether a given image has a known CVE is a categorically different
+question: it depends on a vulnerability database that changes daily,
+tracks upstream package versions this project has no way to reproduce,
+and is maintained by people whose actual job is tracking CVEs -- not
+something a native, in-repo rule catalog can respectably claim to
+replicate, no matter how much code gets written. §2 named this
+specific case as "the single clearest example of where an external tool
+would genuinely add capability this native catalog cannot responsibly
+claim" before any of this engine's other rules were even scoped --
+closing it now, after the two free, zero-new-dependency extensions
+(§13, and the scheduling advisor's own pod-affinity/topology-spread
+closure) were done first, per the order explicitly chosen when this
+work was requested.
+
+**Genuinely optional, the same way Prometheus/Ollama/metrics-server
+already are for other capabilities -- never the only source of this
+engine's own logic.** `security_enable_image_scanning` (new `Settings`
+field, default `False`) gates this entirely: off means this step runs
+zero code and makes zero subprocess calls, exactly as if it didn't
+exist. Turned on, if the `trivy` binary isn't on `PATH`, the step is
+skipped with a `SecurityAuditResult.warnings` entry naming the
+misconfiguration -- the rest of the audit (every check in §3 items 1-4)
+runs and completes normally either way. This is a materially stronger
+guarantee than "best-effort": a cluster operator who never installs
+Trivy, or runs with scanning disabled, gets the *exact* same native
+auditor this project had before this section existed, not a degraded
+version of a newly-dependent one.
+
+**The first subprocess call in this project's core analysis path.**
+`evaluation/harness.py` already shells out to `kubectl`, but only as lab
+tooling for the chaos-evaluation harness (applying/deleting demo
+scenarios) -- never as part of any finding-producing analysis.
+`security/image_scanning.py` is the first module where a subprocess
+call's own output *becomes* a finding. Named explicitly, not glossed
+over, because it's a real, new category of dependency: Trivy needs
+outbound network access (to pull an image it can't find in a local
+image store, and to keep its own vulnerability database up to date) --
+a dependency this project's Kubernetes RBAC model has no say over at
+all, unlike every other engine's own dependencies, which are all
+satisfied by RBAC-scoped Kubernetes API reads.
+
+**What it does**, in `security/image_scanning.py` (new, not a
+`SecurityRule` -- it doesn't implement that ABC's pure
+`evaluate(inventory)` shape, since a subprocess call is not a pure
+function over already-fetched evidence the way every other rule's
+check is):
+
+1. Collects every unique container image reference already present in
+   `SecurityInventory.pod_templates` (no new Kubernetes API call --
+   `WorkloadPodTemplate.pod_spec.containers[].image` is already fetched
+   for the container-security checks in §3 item 1), grouped by which
+   `(namespace, workload_kind, workload_name)` reference it, so one
+   Trivy scan per distinct image covers every workload using it rather
+   than scanning the same image once per replica or once per workload
+   that happens to share a base image. `initContainers` images are not
+   scanned, the same existing simplification every container-security
+   rule in `security/rules/container.py` already makes (confirmed by
+   grep: none of them read `initContainers` either).
+2. For each unique image, runs `trivy image --format json --quiet
+   --scanners vuln --severity <floor> <image>` as a list-form
+   `subprocess.run` (never a shell string -- no injection surface, the
+   same discipline `evaluation/harness.py::_run_kubectl` already uses),
+   with a configurable timeout (`security_image_scan_timeout_seconds`,
+   default 180s -- generous because Trivy's *first* scan on a machine
+   can include downloading its own vulnerability database, a one-time
+   cost this project does not try to pre-warm or special-case).
+   `--scanners vuln` deliberately excludes Trivy's own secret/misconfig
+   scanners -- those overlap with checks this engine already has
+   natively (`SECRET_AS_ENV_VAR` and friends) and scanning for them
+   twice, by two different mechanisms with potentially different
+   verdicts, would be confusing, not additive.
+3. A scan that times out, exits non-zero (image not pullable, Trivy
+   itself erroring), or returns output that isn't valid JSON is recorded
+   as one `warnings` entry naming the image and skipped -- exactly the
+   same "a sub-read that fails doesn't abort the whole audit" discipline
+   `build_security_inventory`'s own `_safe_list_all` already established
+   for a failed Kubernetes API call, generalized to a failed subprocess
+   call.
+4. Trivy's own `--severity` flag does the floor filtering
+   (`security_image_scan_min_severity`, default `"HIGH,CRITICAL"`) --
+   deliberately not fetched-then-filtered in Python, both because
+   Trivy's own flag is the more efficient place to do it (it skips
+   querying its database for severities that will be discarded anyway)
+   and because a base image routinely carries dozens of LOW/MEDIUM CVEs
+   that are rarely actionable; defaulting to HIGH/CRITICAL keeps
+   findings meaningful rather than flooding `security-findings` with
+   noise no one asked for. Configurable, not hardcoded, the same
+   "threshold, not a structural rule" treatment
+   `security_min_replicas_for_pdb_check` already gets.
+5. One `IMAGE_HAS_KNOWN_VULNERABILITIES` finding per `(image,
+   referencing workload)` pair that has at least one CVE at or above the
+   floor -- mirroring `MUTABLE_IMAGE_TAG`'s own per-container/per-workload
+   finding shape, not one giant finding per image or one per CVE (which
+   would either hide which workload is affected, or produce an
+   unmanageable number of rows for a popular base image). Severity is
+   the worst CVE severity actually found for that image (never
+   escalated or downgraded past what Trivy itself reported); evidence
+   names the per-severity count and up to 10 example CVE IDs, not every
+   CVE id -- enough to act on, not a dump of the raw scanner output.
+
+**RBAC: none new.** This step reads image reference *strings* already
+present in an already-fetched `SecurityInventory` -- it makes zero new
+Kubernetes API calls, so it needs zero new `ClusterRole`/`Role` grants.
+Its only new dependency is the local `trivy` binary and the outbound
+network access described above, neither of which Kubernetes RBAC can
+express.
+
+**Prerequisite check**: `scripts/check-prereqs.sh` reports Trivy's
+presence as `[OPTIONAL]`, distinct from the `[OK]`/`[MISSING]` required
+tools -- missing Trivy is never a reason that script exits non-zero,
+matching this feature's own "genuinely optional" guarantee one level up
+the stack, in the one place a user would check before assuming
+something is broken.
