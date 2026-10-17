@@ -1,9 +1,11 @@
 import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import MagicMock
 from uuid import uuid4
 
 import pytest
+from kubernetes.client.rest import ApiException
 
 from kubesentinel.incidents.manager import IncidentManager
 from kubesentinel.metrics.registry import incidents_active
@@ -15,11 +17,13 @@ from kubesentinel.models.optimization import (
     WorkloadKind,
 )
 from kubesentinel.models.incident import IncidentStatus, ResourceRef
-from kubesentinel.observer.inspector import pod_evidence
+from kubesentinel.observer.inspector import deployment_evidence, pod_evidence, resource_ref_from_deployment
 from kubesentinel.persistence.optimization_repo import SQLiteOptimizationRepository
 from kubesentinel.persistence.sqlite_repo import SQLiteIncidentRepository
 from tests.unit.factories import (
+    make_deployment,
     make_pod,
+    make_replica_set,
     mid_restart_terminated_container_status,
     running_container_status,
     waiting_container_status,
@@ -294,3 +298,200 @@ class TestRecommendationCrossLink:
         incident = manager.observe(_ref_with_owner(), _oom_evidence())
 
         assert incident.latest_diagnosis.top_hypothesis.related_recommendation_ids == []
+
+
+# -- Stale Pod-incident supersede sweep (docs/INCIDENT_RECONCILIATION_DESIGN.md) --
+
+_DEPLOYMENT_UID = "deploy-uid-1"
+_NEW_REPLICASET_UID = "rs-uid-new"
+_OLD_REPLICASET_UID = "rs-uid-old"
+
+
+@pytest.fixture
+def manager_with_clients():
+    with tempfile.TemporaryDirectory() as d:
+        repo = SQLiteIncidentRepository(str(Path(d) / "test.db"))
+        clients = MagicMock()
+        yield IncidentManager(repo, clients=clients), repo, clients
+        repo.close()
+
+
+def _healthy_deployment_ref_and_evidence(desired: int = 1):
+    deployment = make_deployment(
+        name="demo-deployment",
+        uid=_DEPLOYMENT_UID,
+        desired_replicas=desired,
+        ready_replicas=desired,
+        available_replicas=desired,
+        updated_replicas=desired,
+    )
+    return resource_ref_from_deployment(deployment), deployment_evidence(deployment)
+
+
+def _stale_pod_incident_ref(
+    pod_uid: str = "pod-uid-old", owner_uid: str = _OLD_REPLICASET_UID, pod_name: str = "demo-deployment-old-abcde"
+) -> ResourceRef:
+    return ResourceRef(
+        namespace="kubesentinel-lab",
+        kind="Pod",
+        name=pod_name,
+        uid=pod_uid,
+        owner_kind="ReplicaSet",
+        owner_name="demo-deployment-old",
+        owner_uid=owner_uid,
+    )
+
+
+class TestSupersedeStalePodIncidents:
+    def test_no_clients_wired_up_is_a_safe_no_op(self, manager):
+        # The default `manager` fixture passes no `clients` at all -- every
+        # existing caller that only wires up `repo` must behave exactly as
+        # it did before this feature existed.
+        incident = manager.observe(*_healthy_deployment_ref_and_evidence())
+        assert incident is None  # a healthy Deployment with no prior incident opens nothing
+
+    def test_no_candidates_makes_zero_api_calls(self, manager_with_clients):
+        manager, _repo, clients = manager_with_clients
+        manager.observe(*_healthy_deployment_ref_and_evidence())
+        clients.apps.list_namespaced_replica_set.assert_not_called()
+        clients.core.read_namespaced_pod.assert_not_called()
+
+    def test_supersedes_a_stale_pod_incident_confirmed_gone(self, manager_with_clients):
+        manager, repo, clients = manager_with_clients
+        stale_ref = _stale_pod_incident_ref()
+        cs = waiting_container_status(reason="CrashLoopBackOff", restart_count=5)
+        stale = manager.observe(stale_ref, pod_evidence(make_pod(container_statuses=[cs])))
+        assert stale.status == IncidentStatus.DIAGNOSED
+
+        clients.apps.list_namespaced_replica_set.return_value.items = [
+            make_replica_set(uid=_OLD_REPLICASET_UID, owner_uid=_DEPLOYMENT_UID, owner_name="demo-deployment")
+        ]
+        clients.core.read_namespaced_pod.side_effect = ApiException(status=404, reason="Not Found")
+
+        manager.observe(*_healthy_deployment_ref_and_evidence())
+
+        superseded = repo.get(stale.incident_id)
+        assert superseded.status == IncidentStatus.SUPERSEDED
+        assert superseded.resolved_at is not None
+        # Load-bearing: never fabricate a recovery that was never observed.
+        assert superseded.recovery_duration_seconds is None
+        assert superseded.audit_log[-1].event_type == "incident_superseded"
+        assert superseded.audit_log[-1].details["replaced_by_deployment"] == "demo-deployment"
+
+    def test_decrements_the_active_incidents_gauge(self, manager_with_clients):
+        manager, repo, clients = manager_with_clients
+        stale_ref = _stale_pod_incident_ref()
+        cs = waiting_container_status(reason="CrashLoopBackOff", restart_count=5)
+        stale = manager.observe(stale_ref, pod_evidence(make_pod(container_statuses=[cs])))
+        incidents_active.labels(category=stale.category).set(1)
+
+        clients.apps.list_namespaced_replica_set.return_value.items = [
+            make_replica_set(uid=_OLD_REPLICASET_UID, owner_uid=_DEPLOYMENT_UID, owner_name="demo-deployment")
+        ]
+        clients.core.read_namespaced_pod.side_effect = ApiException(status=404, reason="Not Found")
+        manager.observe(*_healthy_deployment_ref_and_evidence())
+
+        assert incidents_active.labels(category=stale.category)._value.get() == 0
+
+    def test_does_not_supersede_when_replicaset_already_pruned(self, manager_with_clients):
+        manager, repo, clients = manager_with_clients
+        stale_ref = _stale_pod_incident_ref()
+        cs = waiting_container_status(reason="CrashLoopBackOff", restart_count=5)
+        stale = manager.observe(stale_ref, pod_evidence(make_pod(container_statuses=[cs])))
+
+        clients.apps.list_namespaced_replica_set.return_value.items = []  # the old ReplicaSet is gone
+        clients.core.read_namespaced_pod.side_effect = ApiException(status=404, reason="Not Found")
+
+        manager.observe(*_healthy_deployment_ref_and_evidence())
+
+        still_open = repo.get(stale.incident_id)
+        assert still_open.status != IncidentStatus.SUPERSEDED
+        clients.core.read_namespaced_pod.assert_not_called()
+
+    def test_does_not_supersede_when_replicaset_belongs_to_a_different_deployment(self, manager_with_clients):
+        manager, repo, clients = manager_with_clients
+        stale_ref = _stale_pod_incident_ref()
+        cs = waiting_container_status(reason="CrashLoopBackOff", restart_count=5)
+        stale = manager.observe(stale_ref, pod_evidence(make_pod(container_statuses=[cs])))
+
+        clients.apps.list_namespaced_replica_set.return_value.items = [
+            make_replica_set(uid=_OLD_REPLICASET_UID, owner_uid="some-other-deployment-uid", owner_name="other")
+        ]
+        clients.core.read_namespaced_pod.side_effect = ApiException(status=404, reason="Not Found")
+
+        manager.observe(*_healthy_deployment_ref_and_evidence())
+
+        still_open = repo.get(stale.incident_id)
+        assert still_open.status != IncidentStatus.SUPERSEDED
+        clients.core.read_namespaced_pod.assert_not_called()
+
+    def test_does_not_supersede_when_the_pod_still_exists(self, manager_with_clients):
+        manager, repo, clients = manager_with_clients
+        stale_ref = _stale_pod_incident_ref()
+        cs = waiting_container_status(reason="CrashLoopBackOff", restart_count=5)
+        stale = manager.observe(stale_ref, pod_evidence(make_pod(container_statuses=[cs])))
+
+        clients.apps.list_namespaced_replica_set.return_value.items = [
+            make_replica_set(uid=_OLD_REPLICASET_UID, owner_uid=_DEPLOYMENT_UID, owner_name="demo-deployment")
+        ]
+        clients.core.read_namespaced_pod.return_value = make_pod(container_statuses=[cs])  # still there
+
+        manager.observe(*_healthy_deployment_ref_and_evidence())
+
+        still_open = repo.get(stale.incident_id)
+        assert still_open.status != IncidentStatus.SUPERSEDED
+
+    def test_does_not_supersede_on_an_inconclusive_live_check(self, manager_with_clients):
+        # A non-404 error (e.g. a transient 5xx) must never be treated as
+        # confirmation the Pod is gone -- conservative by design.
+        manager, repo, clients = manager_with_clients
+        stale_ref = _stale_pod_incident_ref()
+        cs = waiting_container_status(reason="CrashLoopBackOff", restart_count=5)
+        stale = manager.observe(stale_ref, pod_evidence(make_pod(container_statuses=[cs])))
+
+        clients.apps.list_namespaced_replica_set.return_value.items = [
+            make_replica_set(uid=_OLD_REPLICASET_UID, owner_uid=_DEPLOYMENT_UID, owner_name="demo-deployment")
+        ]
+        clients.core.read_namespaced_pod.side_effect = ApiException(status=500, reason="Internal Error")
+
+        manager.observe(*_healthy_deployment_ref_and_evidence())
+
+        still_open = repo.get(stale.incident_id)
+        assert still_open.status != IncidentStatus.SUPERSEDED
+
+    def test_fires_even_when_the_deployment_itself_never_opens_an_incident(self, manager_with_clients):
+        # The core design decision (docs/INCIDENT_RECONCILIATION_DESIGN.md
+        # Section 3): a clean rollout that never produces its own
+        # ROLLOUT_FAILED/UNSATISFIED_REPLICAS incident must still trigger
+        # the sweep -- that's the common case, not the edge case.
+        manager, repo, clients = manager_with_clients
+        stale_ref = _stale_pod_incident_ref()
+        cs = waiting_container_status(reason="CrashLoopBackOff", restart_count=5)
+        stale = manager.observe(stale_ref, pod_evidence(make_pod(container_statuses=[cs])))
+
+        clients.apps.list_namespaced_replica_set.return_value.items = [
+            make_replica_set(uid=_OLD_REPLICASET_UID, owner_uid=_DEPLOYMENT_UID, owner_name="demo-deployment")
+        ]
+        clients.core.read_namespaced_pod.side_effect = ApiException(status=404, reason="Not Found")
+
+        deployment_ref, evidence = _healthy_deployment_ref_and_evidence()
+        result = manager.observe(deployment_ref, evidence)
+        assert result is None  # the Deployment itself never opens an incident
+
+        superseded = repo.get(stale.incident_id)
+        assert superseded.status == IncidentStatus.SUPERSEDED
+
+    def test_already_resolved_or_superseded_incidents_are_never_reconsidered(self, manager_with_clients):
+        manager, repo, clients = manager_with_clients
+        stale_ref = _stale_pod_incident_ref()
+        cs = waiting_container_status(reason="CrashLoopBackOff", restart_count=5)
+        stale = manager.observe(stale_ref, pod_evidence(make_pod(container_statuses=[cs])))
+        # Resolve it the normal way first.
+        for _ in range(2):
+            manager.observe(stale_ref, pod_evidence(make_pod(container_statuses=[running_container_status()])))
+        resolved = repo.get(stale.incident_id)
+        assert resolved.status == IncidentStatus.RESOLVED
+
+        manager.observe(*_healthy_deployment_ref_and_evidence())
+
+        clients.apps.list_namespaced_replica_set.assert_not_called()

@@ -55,7 +55,8 @@ class SQLiteIncidentRepository(IncidentRepository):
     def find_open_by_resource_uid(self, resource_uid: str) -> Incident | None:
         with self._lock:
             rows = self._conn.execute(
-                "SELECT data FROM incidents WHERE resource_uid = ? AND status != 'RESOLVED' "
+                "SELECT data FROM incidents WHERE resource_uid = ? "
+                "AND status NOT IN ('RESOLVED', 'SUPERSEDED') "
                 "ORDER BY updated_at DESC",
                 (resource_uid,),
             ).fetchall()

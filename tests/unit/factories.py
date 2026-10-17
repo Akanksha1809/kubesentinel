@@ -47,13 +47,15 @@ from kubernetes.client import (
 def make_replica_set(
     name: str = "test-deployment-abc123",
     namespace: str = "kubesentinel-lab",
+    uid: str = "replicaset-uid-1234",
     revision: str = "1",
     owner_uid: str = "deploy-uid-1234",
+    owner_name: str = "test-deployment",
     image: str = "busybox:latest",
     owned: bool = True,
 ) -> V1ReplicaSet:
     owner_references = (
-        [V1OwnerReference(api_version="apps/v1", kind="Deployment", name="test-deployment", uid=owner_uid)]
+        [V1OwnerReference(api_version="apps/v1", kind="Deployment", name=owner_name, uid=owner_uid, controller=True)]
         if owned
         else []
     )
@@ -61,6 +63,7 @@ def make_replica_set(
         metadata=V1ObjectMeta(
             name=name,
             namespace=namespace,
+            uid=uid,
             annotations={"deployment.kubernetes.io/revision": revision},
             owner_references=owner_references,
         ),

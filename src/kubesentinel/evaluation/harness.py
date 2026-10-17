@@ -188,7 +188,12 @@ class EvaluationHarness:
     # -- TROUBLESHOOTING: push-based, via a harness-owned ObserverService --
 
     def _check_troubleshooting(self, spec: ScenarioSpec, applied_at_mono: float) -> _CheckResult:
-        manager = IncidentManager(self._incident_repo, engine=DiagnosticEngine(), optimization_repo=self._optimization_repo)
+        manager = IncidentManager(
+            self._incident_repo,
+            engine=DiagnosticEngine(),
+            optimization_repo=self._optimization_repo,
+            clients=self._clients,
+        )
         observer = ObserverService(self._clients, self._settings, manager)
         observer.start()
         try:
@@ -435,7 +440,7 @@ class EvaluationHarness:
         unattributed = 0
 
         for incident in self._incident_repo.list(namespace=None):
-            if incident.status.value == "RESOLVED":
+            if incident.status.value in ("RESOLVED", "SUPERSEDED"):
                 continue
             total += 1
             if not _is_known(incident.resource.name):

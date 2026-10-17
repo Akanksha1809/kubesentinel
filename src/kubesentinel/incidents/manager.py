@@ -11,6 +11,8 @@ import logging
 from datetime import datetime, timezone
 from uuid import uuid4
 
+from kubernetes.client.rest import ApiException
+
 from kubesentinel.diagnostics.engine import DiagnosticEngine
 from kubesentinel.incidents.health import has_failure_signal, is_confirmed_healthy
 from kubesentinel.incidents.severity import severity_for
@@ -22,6 +24,8 @@ from kubesentinel.metrics.registry import (
 from kubesentinel.models.diagnosis import DiagnosisResult, Hypothesis, ReasonCode
 from kubesentinel.models.evidence import Evidence
 from kubesentinel.models.incident import Incident, IncidentStatus, ResourceRef
+from kubesentinel.observer.client import ClusterClients
+from kubesentinel.optimization.ownership import controller_ref
 from kubesentinel.persistence.interface import IncidentRepository, OptimizationRepository
 
 logger = logging.getLogger(__name__)
@@ -47,12 +51,22 @@ class IncidentManager:
         repo: IncidentRepository,
         engine: DiagnosticEngine | None = None,
         optimization_repo: OptimizationRepository | None = None,
+        clients: ClusterClients | None = None,
     ):
         self._repo = repo
         self._engine = engine or DiagnosticEngine()
         # Optional, additive -- every existing caller that only passes `repo`
         # (and possibly `engine`) is unaffected; see _enrich_with_recommendations.
         self._optimization_repo = optimization_repo
+        # Optional, additive -- every existing caller that doesn't pass this
+        # is unaffected (the stale-Pod-incident sweep below becomes a no-op
+        # when it's None). This is the one thing IncidentManager uses live
+        # cluster access for: confirming a Pod is genuinely gone and its
+        # owning ReplicaSet's own controller really is the Deployment that
+        # was just observed healthy. See
+        # docs/INCIDENT_RECONCILIATION_DESIGN.md and
+        # _maybe_supersede_stale_pod_incidents.
+        self._clients = clients
 
     @property
     def engine(self) -> DiagnosticEngine:
@@ -80,7 +94,9 @@ class IncidentManager:
         for reason_code in ReasonCode:
             incidents_active.labels(category=reason_code.value).set(0)
 
-        open_incidents = [i for i in self._repo.list() if i.status != IncidentStatus.RESOLVED]
+        open_incidents = [
+            i for i in self._repo.list() if i.status not in (IncidentStatus.RESOLVED, IncidentStatus.SUPERSEDED)
+        ]
         counts: dict[str, int] = {}
         for incident in open_incidents:
             counts[incident.category] = counts.get(incident.category, 0) + 1
@@ -89,6 +105,16 @@ class IncidentManager:
 
     def observe(self, resource: ResourceRef, evidence: list[Evidence]) -> Incident | None:
         now = datetime.now(timezone.utc)
+
+        # Fires independent of whether *this* Deployment has an open
+        # incident of its own -- the common case is a rollout that never
+        # opens one at all, which is exactly the case a stale old Pod
+        # incident most needs this sweep for. See
+        # docs/INCIDENT_RECONCILIATION_DESIGN.md §3 for why this can't be
+        # gated on "an incident just resolved" instead.
+        if resource.kind == "Deployment" and is_confirmed_healthy(evidence):
+            self._maybe_supersede_stale_pod_incidents(resource, now)
+
         existing = self._repo.find_open_by_resource_uid(resource.uid)
 
         if existing is not None:
@@ -206,4 +232,94 @@ class IncidentManager:
                 "incident_id": incident.incident_id,
                 "recovery_duration_seconds": incident.recovery_duration_seconds,
             },
+        )
+
+    def _maybe_supersede_stale_pod_incidents(self, deployment_resource: ResourceRef, now: datetime) -> None:
+        """Closes a Pod-level incident whose own Pod was replaced by this
+        Deployment's rollout -- confirmed live, never guessed. See
+        docs/INCIDENT_RECONCILIATION_DESIGN.md for the full design this
+        implements; this docstring only tracks the steps, not the
+        reasoning behind them.
+
+        No-op when no `clients` was wired up (the same "absence of the
+        check, not a false negative" shape `_enrich_with_recommendations`
+        already uses for its own optional `optimization_repo`), and
+        no-op, with zero live API calls, whenever there is nothing in the
+        repository that could possibly be a candidate -- the common case
+        once this has been running a while.
+        """
+        if self._clients is None:
+            return
+
+        candidates = [
+            i
+            for i in self._repo.list(namespace=deployment_resource.namespace)
+            if i.resource.kind == "Pod"
+            and i.resource.owner_kind == "ReplicaSet"
+            and i.status not in (IncidentStatus.RESOLVED, IncidentStatus.SUPERSEDED)
+        ]
+        if not candidates:
+            return
+
+        try:
+            replicasets = self._clients.apps.list_namespaced_replica_set(
+                namespace=deployment_resource.namespace
+            ).items
+        except ApiException:
+            logger.exception(
+                "failed listing ReplicaSets for stale-incident sweep",
+                extra={"namespace": deployment_resource.namespace},
+            )
+            return
+        replicasets_by_uid = {rs.metadata.uid: rs for rs in replicasets}
+
+        for incident in candidates:
+            replica_set = replicasets_by_uid.get(incident.resource.owner_uid)
+            if replica_set is None:
+                # Already pruned (revisionHistoryLimit), or never listed --
+                # the chain can't be verified, so this incident is left
+                # exactly as it is today. See
+                # docs/INCIDENT_RECONCILIATION_DESIGN.md Section 6.
+                continue
+            owner = controller_ref(replica_set.metadata.owner_references)
+            if owner is None or owner.kind != "Deployment" or owner.uid != deployment_resource.uid:
+                continue
+
+            try:
+                self._clients.core.read_namespaced_pod(
+                    name=incident.resource.name, namespace=incident.resource.namespace
+                )
+                # Still exists (even under a different UID, which would be a
+                # genuinely different situation this sweep doesn't attempt
+                # to classify -- see docs/INCIDENT_RECONCILIATION_DESIGN.md
+                # Section 4 step 3) -- leave it alone.
+                continue
+            except ApiException as exc:
+                if exc.status != 404:
+                    # Some other error (e.g. a transient 5xx) -- be
+                    # conservative, never supersede on an inconclusive check.
+                    continue
+
+            self._supersede(incident, now, deployment_resource.name)
+            self._repo.save(incident)
+
+    @staticmethod
+    def _supersede(incident: Incident, now: datetime, replaced_by_deployment: str) -> None:
+        """Closes an incident whose own Pod was replaced by a rollout --
+        deliberately not `_resolve()`: no recovery of *this* object was
+        ever observed, so `recovery_duration_seconds` is never set here.
+        See docs/INCIDENT_RECONCILIATION_DESIGN.md Section 1."""
+        incident.last_observed_at = now
+        incident.status = IncidentStatus.SUPERSEDED
+        incident.resolved_at = now
+        incident.add_audit(
+            "incident_superseded",
+            actor="observer",
+            replaced_by_deployment=replaced_by_deployment,
+            reason="pod confirmed gone (live 404); owning Deployment observed healthy",
+        )
+        incidents_active.labels(category=incident.category).dec()
+        logger.info(
+            "superseded incident",
+            extra={"incident_id": incident.incident_id, "replaced_by_deployment": replaced_by_deployment},
         )

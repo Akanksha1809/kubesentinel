@@ -2880,3 +2880,125 @@ This completes every milestone in `docs/PLATFORM_ROADMAP.md`, including
 Milestone 9 itself -- the full platform specification (Capabilities A-F,
 the chaos & resilience evaluation harness, and the Kubernetes operator)
 is now built, tested, live-verified, and documented.
+
+## Milestone 29: Close the Pod-UID-dedup-survives-a-rollout limitation -- DONE
+
+Not a platform-roadmap milestone -- the oldest open item in this file's
+own "Known limitations" section (Milestone 1's own entry, #1): "Pod-UID
+dedup doesn't survive a Deployment rollout." A rollout replaces a Pod
+under a new UID; the old Pod's incident never receives another
+observation at all and sits open forever. Asked about, and by the user's
+own explicit follow-up request, written up as a real design first
+(`docs/INCIDENT_RECONCILIATION_DESIGN.md`) before any code -- the user
+then asked to implement it.
+
+**What "fixed" had to mean, precisely**: never claim a recovery that was
+never observed. A Pod replaced by a rollout is never going to report
+healthy again; there is no later observation to confirm one. The design's
+load-bearing constraint, carried through to the implementation exactly:
+a new terminal `IncidentStatus.SUPERSEDED`, distinct from `RESOLVED`,
+which never sets `recovery_duration_seconds`.
+
+**What was added**:
+
+- `models/incident.py` -- `IncidentStatus.SUPERSEDED`.
+- `incidents/manager.py` -- `IncidentManager` gained an optional
+  `clients: ClusterClients | None = None` constructor parameter
+  (additive; every existing caller passing only `repo` is unaffected).
+  `_maybe_supersede_stale_pod_incidents()` fires on *every* confirmed-
+  healthy Deployment observation (not gated on "an incident just
+  resolved" -- the design's own key insight: a clean rollout that never
+  opens its own Deployment-level incident is the common case, and that
+  gate would have silently skipped it). A cheap, local repository query
+  decides whether there's anything to sweep at all before any live API
+  call happens. For each candidate: look up its recorded `owner_uid`
+  (the ReplicaSet at observation time) in a live, namespace-wide
+  ReplicaSet list by UID, confirm that ReplicaSet's own
+  `ownerReferences` names the exact Deployment that was just observed
+  healthy (by `uid`, never by name), then confirm the Pod itself is
+  genuinely gone via a live 404 -- only then call the new `_supersede()`,
+  which mirrors `_resolve()`'s own shape exactly except it never touches
+  `recovery_duration_seconds` or its histogram.
+- `optimization/ownership.py::controller_ref` -- promoted from a private
+  `_controller_ref`, reused rather than duplicated: the exact same
+  Pod -> ReplicaSet -> Deployment ownership-chain logic
+  `resolve_pod_owner()` already used for an unrelated capability is the
+  only correct way to confirm a ReplicaSet's own controller without
+  guessing from a name prefix (this project's own established refusal to
+  use fragile string heuristics for a correctness-sensitive decision).
+- `persistence/sqlite_repo.py::find_open_by_resource_uid`,
+  `api/app.py::cluster_summary`, `evaluation/harness.py`'s own false-
+  positive counter, and `IncidentManager.reconcile_metrics()` -- every
+  existing "is this incident still open" check across the codebase was
+  updated to also exclude `SUPERSEDED`, not just `RESOLVED`; found by a
+  deliberate, exhaustive grep for every such check before writing any
+  test, not assumed safe to skip.
+- `api/app.py`'s lifespan was reordered so `clients` is built (or safely
+  set to `None` on failure, exactly preserving today's
+  "serve read endpoints without a cluster" behavior) before
+  `IncidentManager` is constructed, the same restructuring shape already
+  used once for `optimization_repo` (Milestone 1's own audit closure,
+  item 3) -- and `evaluation/harness.py`'s own `IncidentManager`
+  construction was updated to pass its already-available `clients` too,
+  for consistency.
+
+**Tests**: 10 new unit tests in `test_incident_manager.py`'s new
+`TestSupersedeStalePodIncidents` class -- covers the safe-no-op cases (no
+`clients` wired up, no candidates at all), the positive case (confirmed
+gone + confirmed healthy parent -> superseded, with
+`recovery_duration_seconds` asserted `None` and the audit entry asserted
+exactly), and every negative case named in the design's own "what this
+doesn't attempt" section (a pruned ReplicaSet, a ReplicaSet belonging to
+a different Deployment, the Pod still existing, an inconclusive non-404
+live check, an already-RESOLVED/SUPERSEDED incident never reconsidered)
+plus the one case proving the design's own central claim -- the sweep
+fires even when the Deployment itself never opens an incident of its
+own. `tests/unit/factories.py::make_replica_set` gained a `uid` parameter
+(additive; every existing call site keeps its old default). All 10
+passed on their first run -- stated plainly, not dressed up as a bug
+hunt that didn't happen this time.
+
+**Live-verified against the real cluster**, with a throwaway crash-
+looping Deployment rather than any permanent `lab/manifests/` scenario
+(every one of those is relied on by some other milestone's own live test
+to *stay* broken, so none was a safe "fix it and watch" candidate here).
+A real Pod-level `CRASH_LOOP_BACKOFF` incident opened; the Deployment was
+patched to a command that actually succeeds (a genuine rollout -- new
+ReplicaSet, new Pod, old Pod terminated); once the Deployment reported
+healthy, the old Pod's incident was confirmed precisely: `status:
+SUPERSEDED`, `resolved_at` set, `recovery_duration_seconds: None`, and
+the final audit entry naming `replaced_by_deployment: "supersede-test-
+demo"` and the exact live-404-plus-healthy-parent reason. The
+Deployment's own incident resolved through the unchanged, ordinary
+`RESOLVED` path alongside it, with a real measured
+`recovery_duration_seconds` (221.4s) -- confirming the new sweep didn't
+disturb the path it runs next to. Full detail, including the precise
+field dump, is in `docs/INCIDENT_RECONCILIATION_DESIGN.md`'s own new
+"Implemented and live-verified" section.
+
+Two environmental complications were hit during this one live-
+verification run, both self-resolved and neither a code defect: this
+host's chronic shared-VM contention (documented repeatedly throughout
+this project's history) showed up twice -- once as
+`kube-controller-manager` stuck retrying with a literal `"too many open
+files"` error for several minutes before a ReplicaSet could even be
+created, and again as a second `kube-controller-manager`/
+`kube-scheduler` `CrashLoopBackOff` episode that delayed the rollout
+itself. Both were waited out patiently, never worked around. Separately,
+and worth recording honestly rather than quietly fixing and moving on:
+this same verification pass discovered several *stale* throwaway demo-
+server processes left running on other ports from earlier, unrelated
+points in this same session -- an operational cleanup slip by this
+agent, not a finding about the feature itself. All were found and killed
+before the verification concluded.
+
+**Full regression suite**: `./scripts/test.sh` -- ruff clean, mypy clean
+(108 source files), **784 unit tests passed** (774 + 10).
+
+**Documentation**: `docs/INCIDENT_RECONCILIATION_DESIGN.md` (the design
+doc itself, plus its new "Implemented and live-verified" section).
+`TODO.md`'s own "Known limitations" entry for this item is left in place
+unedited -- it accurately describes what the gap *was*; this new
+milestone entry is where its closure is recorded, matching this
+project's own "TODO.md is append-only history, not a doc that gets
+rewritten" discipline.

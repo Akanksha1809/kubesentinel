@@ -28,6 +28,12 @@ class IncidentStatus(str, Enum):
     VERIFYING = "VERIFYING"
     RESOLVED = "RESOLVED"
     UNRESOLVED = "UNRESOLVED"
+    #: The specific Pod this incident was about was replaced by a Deployment
+    #: rollout -- confirmed gone (a live 404), with its owning Deployment
+    #: confirmed healthy. Deliberately distinct from RESOLVED: no recovery of
+    #: *this* object was ever observed, so recovery_duration_seconds is never
+    #: set for a SUPERSEDED incident. See docs/INCIDENT_RECONCILIATION_DESIGN.md.
+    SUPERSEDED = "SUPERSEDED"
 
 
 class AuditEntry(BaseModel):

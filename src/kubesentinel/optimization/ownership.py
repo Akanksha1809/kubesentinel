@@ -42,7 +42,14 @@ class ResolvedOwner:
     uid: str
 
 
-def _controller_ref(owner_references: list | None):
+def controller_ref(owner_references: list | None):
+    """Picks the one `ownerReference` that actually controls an object's
+    lifecycle. Promoted to public: reused by
+    `incidents/manager.py`'s stale-Pod-incident sweep
+    (docs/INCIDENT_RECONCILIATION_DESIGN.md) -- a second capability, not a
+    one-off, so this follows the same "promote when reused" precedent as
+    every other function this project has made public for the same reason.
+    """
     if not owner_references:
         return None
     # A Kubernetes object can carry several ownerReferences (e.g. a
@@ -81,7 +88,7 @@ def resolve_pod_owner(pod: V1Pod, replicasets_by_uid: dict[str, V1ReplicaSet]) -
       which is worse than visibly declining to classify it.
     """
     meta = pod.metadata
-    ref = _controller_ref(meta.owner_references if meta else None)
+    ref = controller_ref(meta.owner_references if meta else None)
     if ref is None:
         return ResolvedOwner(kind=WorkloadKind.POD, name=meta.name, uid=meta.uid)
 
@@ -92,7 +99,7 @@ def resolve_pod_owner(pod: V1Pod, replicasets_by_uid: dict[str, V1ReplicaSet]) -
         replica_set = replicasets_by_uid.get(ref.uid)
         if replica_set is None:
             return None
-        rs_ref = _controller_ref(replica_set.metadata.owner_references)
+        rs_ref = controller_ref(replica_set.metadata.owner_references)
         if rs_ref is not None and rs_ref.kind == "Deployment":
             return ResolvedOwner(kind=WorkloadKind.DEPLOYMENT, name=rs_ref.name, uid=rs_ref.uid)
         # A ReplicaSet with no Deployment owner (created directly, not via a

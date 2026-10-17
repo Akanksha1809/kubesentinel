@@ -70,7 +70,21 @@ async def lifespan(app: FastAPI):
     # for the same workload (Milestone 1's own "stabilize the core" audit,
     # item 3); see IncidentManager._enrich_with_recommendations.
     state.optimization_repo = SQLiteOptimizationRepository(settings.db_path)
-    state.manager = IncidentManager(state.repo, optimization_repo=state.optimization_repo)
+
+    # Also built before IncidentManager, for the same reason: the
+    # stale-Pod-incident-after-a-rollout sweep
+    # (docs/INCIDENT_RECONCILIATION_DESIGN.md) needs live ReplicaSet/Pod
+    # reads. None, not raised, when no kubeconfig/in-cluster config is
+    # available -- IncidentManager must still construct and serve read
+    # endpoints without a cluster, exactly like every other optional
+    # dependency here.
+    try:
+        clients = build_clients(settings)
+    except Exception:  # noqa: BLE001 - IncidentManager must still construct without a cluster
+        logger.exception("could not build cluster clients; no kubeconfig/in-cluster config available")
+        clients = None
+
+    state.manager = IncidentManager(state.repo, optimization_repo=state.optimization_repo, clients=clients)
     state.manager.reconcile_metrics()
     state.ai_client = (
         OllamaClient(settings.ai_base_url, settings.ai_model, settings.ai_timeout_seconds)
@@ -82,29 +96,38 @@ async def lifespan(app: FastAPI):
     state.security_repo = SQLiteSecurityRepository(settings.db_path)
     state.evaluation_repo = SQLiteEvaluationRepository(settings.db_path)
 
-    try:
-        clients = build_clients(settings)
-        state.observer = ObserverService(clients, settings, state.manager)
-        state.observer.start()
-        executor = RemediationExecutor(clients.apps, timeout_seconds=settings.action_execution_timeout_seconds)
-        verifier = RecoveryVerifier(
-            clients.apps,
-            deadline_seconds=settings.verification_deadline_seconds,
-            poll_interval_seconds=settings.verification_poll_interval_seconds,
-        )
-        state.remediation = RemediationService(PolicyEngine(settings), executor, verifier, state.repo, settings)
-        state.optimization = OptimizationService(clients, state.optimization_repo, settings, incident_repo=state.repo)
-        state.scheduling = SchedulingService(clients, state.scheduling_repo, incident_repo=state.repo)
-        state.network = NetworkService(clients, state.network_repo, incident_repo=state.repo)
-        state.security = SecurityService(clients, state.security_repo, settings)
-    except Exception:  # noqa: BLE001 - API must still serve read endpoints without a cluster
-        logger.exception("could not start observer; no kubeconfig/in-cluster config available")
+    if clients is None:
         state.observer = None
         state.remediation = None
         state.optimization = None
         state.scheduling = None
         state.network = None
         state.security = None
+    else:
+        try:
+            state.observer = ObserverService(clients, settings, state.manager)
+            state.observer.start()
+            executor = RemediationExecutor(clients.apps, timeout_seconds=settings.action_execution_timeout_seconds)
+            verifier = RecoveryVerifier(
+                clients.apps,
+                deadline_seconds=settings.verification_deadline_seconds,
+                poll_interval_seconds=settings.verification_poll_interval_seconds,
+            )
+            state.remediation = RemediationService(PolicyEngine(settings), executor, verifier, state.repo, settings)
+            state.optimization = OptimizationService(
+                clients, state.optimization_repo, settings, incident_repo=state.repo
+            )
+            state.scheduling = SchedulingService(clients, state.scheduling_repo, incident_repo=state.repo)
+            state.network = NetworkService(clients, state.network_repo, incident_repo=state.repo)
+            state.security = SecurityService(clients, state.security_repo, settings)
+        except Exception:  # noqa: BLE001 - API must still serve read endpoints without a cluster
+            logger.exception("could not start observer")
+            state.observer = None
+            state.remediation = None
+            state.optimization = None
+            state.scheduling = None
+            state.network = None
+            state.security = None
 
     yield
 
@@ -286,7 +309,7 @@ def reject_action(incident_id: str, action_id: str, body: RejectRequest) -> dict
 @app.get("/cluster/summary")
 def cluster_summary() -> dict:
     incidents = state.repo.list()
-    open_incidents = [i for i in incidents if i.status.value != "RESOLVED"]
+    open_incidents = [i for i in incidents if i.status.value not in ("RESOLVED", "SUPERSEDED")]
     by_category: dict[str, int] = {}
     for i in open_incidents:
         by_category[i.category] = by_category.get(i.category, 0) + 1
