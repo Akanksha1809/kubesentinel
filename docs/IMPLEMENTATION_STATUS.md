@@ -328,8 +328,11 @@ catch.
 `docs/SECURITY_AUDITING.md` is the design). A new `security/` package:
 `inventory.py` (one-shot read, Pods grouped by owning workload via the
 reused `optimization/ownership.py::resolve_pod_owner`, RBAC objects,
-NetworkPolicies, Deployments/StatefulSets/PodDisruptionBudgets), 13 rules
-across `rules/{container,rbac,network_policy,availability}.py`,
+NetworkPolicies, Deployments/StatefulSets/PodDisruptionBudgets), 14 rules
+across `rules/{container,rbac,network_policy,availability}.py` (a 14th,
+`EffectiveRbacEscalationRule`, closes `docs/SECURITY_AUDITING.md`
+Section 12's own named "effective permissions across combined bindings"
+gap -- see Section 13),
 `engine.py` (mirrors `diagnostics/engine.py::DiagnosticEngine` exactly),
 `service.py` (the one module with side effects). `RbacAuthorizationV1Api`
 and `PolicyV1Api` added to `ClusterClients` (new, additive).

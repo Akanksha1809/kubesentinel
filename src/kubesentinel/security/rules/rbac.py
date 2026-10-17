@@ -1,5 +1,5 @@
-"""RBAC over-permissiveness rules (docs/SECURITY_AUDITING.md Section
-3.2). Both rules deliberately exclude Kubernetes' own built-in,
+"""RBAC over-permissiveness rules (docs/SECURITY_AUDITING.md Sections
+3.2, 13). All three rules deliberately exclude Kubernetes' own built-in,
 intentionally-broad objects -- there is no fix a cluster operator can
 apply to a built-in Role/binding, so flagging them would be pure noise
 with no actionable remediation.
@@ -12,9 +12,17 @@ from uuid import uuid4
 from kubesentinel.config import Settings
 from kubesentinel.models.security import SecurityFinding, SecurityResourceRef, SecuritySeverity
 from kubesentinel.security.inventory import SecurityInventory
+from kubesentinel.security.rbac_resolution import bindings_granting_verb_on_rbac_objects, resolve_subject_bindings
 from kubesentinel.security.rules.base import SecurityRule
 
 _CLUSTER_ADMIN_ROLE_NAME = "cluster-admin"
+
+
+def _is_builtin_role_name(name: str, builtin_names: set[str]) -> bool:
+    """Shared by `WildcardRbacRuleRule` and `EffectiveRbacEscalationRule`
+    -- both need the same "is this a Kubernetes built-in, not something a
+    cluster operator can actually fix" exclusion."""
+    return name.startswith("system:") or name in builtin_names
 
 
 class ClusterAdminBindingRule(SecurityRule):
@@ -96,7 +104,7 @@ class WildcardRbacRuleRule(SecurityRule):
         self._builtin_names = set(settings.security_builtin_wildcard_role_name_list)
 
     def _is_builtin_role(self, name: str) -> bool:
-        return name.startswith("system:") or name in self._builtin_names
+        return _is_builtin_role_name(name, self._builtin_names)
 
     def evaluate(self, inventory: SecurityInventory) -> list[SecurityFinding]:
         findings = []
@@ -128,6 +136,69 @@ class WildcardRbacRuleRule(SecurityRule):
                         "resource or apiGroup -- effectively unrestricted within its scope.",
                         remediation="Enumerate the specific apiGroups/resources/verbs this subject actually "
                         "needs instead of using '*'.",
+                    )
+                )
+        return findings
+
+
+class EffectiveRbacEscalationRule(SecurityRule):
+    """Closes docs/SECURITY_AUDITING.md Section 12/13's own named gap:
+    the two rules above each look at one binding or one rule at a time,
+    never a subject's combined access across every binding naming it.
+    Scoped narrowly to one unambiguous case rather than attempting to
+    re-derive Kubernetes' own RBAC authorizer -- see Section 13 for why
+    `escalate`/`bind` specifically, not a broader "how much combined
+    access is too much" heuristic this project has no principled way to
+    judge."""
+
+    rule_id = "RBAC_SELF_ESCALATION_CAPABLE"
+    _ESCALATION_VERBS = ("escalate", "bind")
+
+    def __init__(self, settings: Settings):
+        self._builtin_names = set(settings.security_builtin_wildcard_role_name_list)
+
+    def evaluate(self, inventory: SecurityInventory) -> list[SecurityFinding]:
+        findings = []
+        subject_bindings = resolve_subject_bindings(inventory)
+        for subject_key, bindings in subject_bindings.items():
+            for verb in self._ESCALATION_VERBS:
+                matches = bindings_granting_verb_on_rbac_objects(bindings, verb)
+                matches = [
+                    (binding, resource)
+                    for binding, resource in matches
+                    if not _is_builtin_role_name(binding.role_name, self._builtin_names)
+                ]
+                if not matches:
+                    continue
+                evidence = [
+                    f"{binding.binding_kind} '{binding.binding_name}'"
+                    + (f" (namespace '{binding.binding_namespace}')" if binding.binding_namespace else "")
+                    + f" binds {binding.role_kind} '{binding.role_name}', which grants '{verb}' on '{resource}'"
+                    for binding, resource in matches
+                ]
+                findings.append(
+                    SecurityFinding(
+                        finding_id=str(uuid4()),
+                        rule_id=self.rule_id,
+                        severity=SecuritySeverity.CRITICAL,
+                        resource=SecurityResourceRef(
+                            namespace=subject_key.namespace, kind=subject_key.kind, name=subject_key.name
+                        ),
+                        evidence=evidence,
+                        explanation=f"This subject holds the '{verb}' verb on Roles/ClusterRoles -- one of "
+                        "the two verbs Kubernetes' own RBAC admission treats as explicitly bypassing its "
+                        "built-in self-escalation prevention. It can grant itself or anyone else "
+                        "arbitrary additional permissions later, regardless of how narrow its current "
+                        "bindings look today."
+                        + (
+                            f" Assembled from {len(matches)} separate bindings, none of which alone would "
+                            "be the full picture."
+                            if len(matches) > 1
+                            else ""
+                        ),
+                        remediation=f"Remove the '{verb}' verb unless this subject genuinely needs to "
+                        "grant RBAC permissions on Kubernetes' behalf (e.g. a real controller) -- almost "
+                        "no workload-level ServiceAccount should ever need this.",
                     )
                 )
         return findings

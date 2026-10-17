@@ -335,10 +335,67 @@ pass itself succeed," distinct from how many findings it produced.
 ## 12. Known limitations, stated once here rather than per-finding
 
 Everything named "explicitly deferred" in §3 applies cluster-wide, not
-per-finding. In addition: this engine's RBAC checks only look at direct
-bindings and rules -- they do not resolve what a subject's *effective*
-permissions are across every Role/ClusterRole it's bound to combined
-(aggregated ClusterRoles, multiple overlapping bindings). A subject could
-have broad effective access assembled from several individually-narrow
-grants that no single rule here would catch; this is a real, named gap,
-not a claim of completeness.
+per-finding. The effective-permissions gap this section used to name is
+closed -- see §13. What remains genuinely unresolved: CVE/image
+vulnerability scanning (no maintained vulnerability database this
+project has access to), and an active connectivity probe for the network
+engine (its own, separate, deliberately-deferred mutation surface --
+see NETWORK_DIAGNOSTICS.md §2).
+
+## 13. Effective RBAC permission resolution
+
+Closes the gap §12 used to name: the two existing RBAC rules
+(`ClusterAdminBindingRule`, `WildcardRbacRuleRule`) each look at one
+binding or one rule at a time. A subject bound to several individually-
+narrow Roles/ClusterRoles could hold broad effective access that no
+single one of those checks would ever see, because none of them combine
+a subject's bindings together at all.
+
+**Scoped narrowly, on purpose, rather than attempting to fully re-derive
+Kubernetes' own RBAC authorizer.** The tempting, broader version of this
+feature -- "does this subject's combined rule set amount to cluster-admin-
+equivalent access" -- requires judgment calls this project has no
+principled way to make deterministically (how much combined access is
+"too much" for a resource that isn't a wildcard). Kubernetes itself does
+not leave this to judgment for one specific, well-known case: the
+`escalate` and `bind` verbs on `roles`/`clusterroles` (apiGroup
+`rbac.authorization.k8s.io`) are the two verbs Kubernetes' own RBAC
+admission treats as explicitly bypassing its built-in self-escalation
+prevention (without one of these, the apiserver already refuses to let
+a subject create a Role/binding granting more than that subject already
+has -- this project doesn't need to re-check that itself). A subject
+holding either verb, from any combination of its bindings, can grant
+itself or anyone else arbitrary additional permissions later, regardless
+of how narrow any single one of its current bindings looks today. This
+is the one case where "effective permissions, combined across bindings"
+has an unambiguous, textbook-correct answer -- the only case this first
+pass evaluates.
+
+**`security/rbac_resolution.py`** (new, pure functions over an already-
+built `SecurityInventory` -- no new API calls): for every
+RoleBinding/ClusterRoleBinding in the inventory, resolve its `roleRef`
+to the actual Role/ClusterRole object (a RoleBinding may reference
+either a Role in its own namespace or a ClusterRole, both real,
+documented Kubernetes patterns; a reference that can't be resolved --
+the Role/ClusterRole genuinely isn't in the inventory -- is skipped, not
+guessed at, the same "never fabricate" discipline every rule in this
+engine already follows). Groups every binding by subject
+(`kind`/`name`/`namespace`), so the result is: for each subject, the
+full list of bindings naming it, each carrying its own resolved rules.
+
+**`EffectiveRbacEscalationRule`** (new rule in `security/rules/rbac.py`,
+`rule_id="RBAC_SELF_ESCALATION_CAPABLE"`): for each subject, unions the
+`verbs`/`resources`/`apiGroups` triples across every one of its resolved
+bindings' rules (regardless of whether that's one binding or several --
+a single binding with this capability is exactly as real a finding as
+one assembled from combining several, and excluding the single-binding
+case would leave a real, equally-findable gap right next to the one
+being closed). If the union includes `escalate` or `bind` on
+`roles`/`clusterroles`, and the *contributing* Role/ClusterRole isn't a
+built-in one (reusing `WildcardRbacRuleRule`'s own `system:`-prefix +
+`security_builtin_wildcard_role_names` exclusion -- the same cluster
+control-plane subjects legitimately need this verb, and already get
+excluded there for the same reason), report a CRITICAL finding naming
+every contributing binding by name, so a multi-binding case is visibly
+different in its own evidence from a single-binding one, not collapsed
+into one undifferentiated claim.

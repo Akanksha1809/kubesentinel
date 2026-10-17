@@ -90,6 +90,7 @@ class TestDefaultRules:
             "SECRET_AS_ENV_VAR",
             "CLUSTER_ADMIN_BINDING",
             "WILDCARD_RBAC_RULE",
+            "RBAC_SELF_ESCALATION_CAPABLE",
             "NAMESPACE_WITHOUT_NETWORK_POLICY",
             "UNRESTRICTED_INGRESS_POLICY",
             "MISSING_PDB_FOR_MULTI_REPLICA_WORKLOAD",

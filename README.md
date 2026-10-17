@@ -286,7 +286,7 @@ clients (`RbacAuthorizationV1Api`, `PolicyV1Api`) -- the full A-F
 capability list from the platform spec is now complete:
 
 ```
-Pod/RBAC/NetworkPolicy/PDB   -->  13 native rules (container        -->  SecurityFinding(s):
+Pod/RBAC/NetworkPolicy/PDB   -->  14 native rules (container        -->  SecurityFinding(s):
 inventory (one-shot,              security context, RBAC                severity, evidence,
 Pods grouped by owning            over-permissiveness, NetworkPolicy     explanation, remediation
 workload, reused owner             coverage, PDB coverage) --
@@ -448,7 +448,7 @@ src/kubesentinel/
                  and capacity.py (HPA status/scale-headroom reasoning, Milestone 5)
   scheduling/    Read-only placement analysis: node inventory, per-constraint evaluators, analyzer
   network/       Read-only connectivity analysis: service/policy inventory, DNS health, analyzer
-  security/      Read-only security/config auditing: inventory, 13 native rules, engine, service
+  security/      Read-only security/config auditing: inventory, 14 native rules, engine, service
   evaluation/    Chaos & resilience evaluation harness: scenario registry + the harness itself
                  (drives all six engines above against the real cluster and measures them)
   operator/      Kubernetes operator: reconciles KubeSentinelRemediationPolicy CRs, never
@@ -493,7 +493,7 @@ docs/            Architecture, diagnostic rules, RBAC/threat model, failure lab,
 - [SCHEDULING_ANALYSIS.md](docs/SCHEDULING_ANALYSIS.md) -- the scheduling advisor's own design: what's evaluated for real vs. only detected
 - [NETWORK_DIAGNOSTICS.md](docs/NETWORK_DIAGNOSTICS.md) -- the network troubleshooting engine's own design: evidence chain, scope split, what's deliberately deferred
 - [CAPACITY_PLANNING.md](docs/CAPACITY_PLANNING.md) -- the capacity planning & autoscaling advisor's own design: HPA status, scale headroom, what's a pattern match vs. a diagnosis
-- [SECURITY_AUDITING.md](docs/SECURITY_AUDITING.md) -- the security & configuration auditor's own design: the 13-rule catalog, the build-vs-integrate decision, what's deliberately deferred
+- [SECURITY_AUDITING.md](docs/SECURITY_AUDITING.md) -- the security & configuration auditor's own design: the 14-rule catalog, the build-vs-integrate decision, what's deliberately deferred
 - [CHAOS_RESILIENCE_LAB.md](docs/CHAOS_RESILIENCE_LAB.md) -- the evaluation harness's own design: ground truth, push-vs-pull timing, recovery/false-positive scope
 - [OPERATOR_DESIGN.md](docs/OPERATOR_DESIGN.md) -- the Kubernetes operator's own design: why one CRD, what the controller deliberately never decides, reconciliation step by step
 - [DIAGNOSTIC_RULES.md](docs/DIAGNOSTIC_RULES.md) -- every rule, its evidence, and its confidence logic

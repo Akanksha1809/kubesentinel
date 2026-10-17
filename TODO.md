@@ -3002,3 +3002,79 @@ unedited -- it accurately describes what the gap *was*; this new
 milestone entry is where its closure is recorded, matching this
 project's own "TODO.md is append-only history, not a doc that gets
 rewritten" discipline.
+
+## Milestone 30: Effective RBAC permission resolution -- DONE
+
+The first of five named, deliberate scope boundaries the user asked to
+close, in the order agreed: safest/most in-pattern first. Closes
+`docs/SECURITY_AUDITING.md` Section 12's own long-named gap: the two
+existing RBAC rules (`ClusterAdminBindingRule`, `WildcardRbacRuleRule`)
+each look at one binding or one rule at a time, never a subject's
+combined access across every binding naming it. Written up as a new
+Section 13 in that same doc (an extension of an already-designed
+capability, not a new standalone design doc) before any code.
+
+**Scoped narrowly, on purpose**: the tempting, broader version --
+"does this subject's combined rule set amount to cluster-admin-
+equivalent access" -- needs judgment calls this project has no
+principled way to make deterministically. Kubernetes itself doesn't
+leave the *one* specific case to judgment: the `escalate` and `bind`
+verbs on `roles`/`clusterroles` are the two verbs its own RBAC admission
+treats as explicitly bypassing the built-in self-escalation prevention
+check. A subject holding either, from any combination of its bindings,
+can grant itself or anyone else arbitrary additional permissions later
+-- the one case this first pass evaluates, deliberately not a broader
+heuristic.
+
+**What was added**:
+
+- `security/rbac_resolution.py` (new) -- pure functions over an
+  already-built `SecurityInventory`, no new API calls: resolves every
+  RoleBinding/ClusterRoleBinding's `roleRef` to the real Role/ClusterRole
+  it names (a RoleBinding may reference either a Role in its own
+  namespace or a ClusterRole, both real Kubernetes patterns; an
+  unresolvable reference is skipped, never guessed at), grouped by every
+  subject each binding names.
+- `security/rules/rbac.py::EffectiveRbacEscalationRule` (new,
+  `rule_id="RBAC_SELF_ESCALATION_CAPABLE"`) -- unions the resolved rules
+  across every one of a subject's bindings (one or several; a
+  single-binding case is exactly as real a finding as a multi-binding
+  one, so neither is treated as the only interesting case), checks for
+  `escalate`/`bind` on `roles`/`clusterroles`, excludes built-in
+  Roles/ClusterRoles (reusing `WildcardRbacRuleRule`'s own exclusion,
+  promoted to a shared `_is_builtin_role_name` function -- the same
+  cluster control-plane subjects legitimately need this verb and are
+  already excluded there for the same reason), and names every
+  contributing binding in its own evidence so a multi-binding case reads
+  differently from a single-binding one.
+- `security/engine.py::default_rules` -- registered the new rule.
+
+**Tests**: 19 new unit tests -- `test_rbac_resolution.py` (11, the pure
+resolution/matching functions) and a new `TestEffectiveRbacEscalationRule`
+class in `test_security_rbac_rules.py` (8, including the multi-binding
+evidence-assembly case and both builtin exclusions). One existing test
+(`test_security_engine.py::test_default_rules_includes_every_documented_rule_id`)
+needed its own expected rule-id set updated -- found immediately by
+running the suite, not missed.
+
+**Live-verified against the real cluster**: a real ServiceAccount bound
+via a real RoleBinding to a real Role granting `escalate` on `roles` in
+the lab namespace produced exactly the expected `RBAC_SELF_ESCALATION_CAPABLE`
+CRITICAL finding, with accurate evidence naming the real binding/Role.
+Separately, and just as important: confirmed the exclusion correctly
+holds against a *real* system ClusterRole that genuinely has this verb
+today -- `system:controller:clusterrole-aggregation-controller` grants
+`escalate` on `clusterroles` (confirmed via `kubectl get clusterroles -o
+json`), and the real audit run against the whole cluster correctly never
+flagged it. Test fixture removed immediately after.
+
+**Documentation**: `docs/SECURITY_AUDITING.md` (new Section 13, Section
+12 updated to point to it rather than left describing a now-closed gap),
+`docs/IMPLEMENTATION_STATUS.md` and `README.md` (rule count: 13 -> 14).
+`docs/PLATFORM_ROADMAP.md`'s own Milestone 6 section is left unedited --
+it's a historical record of what that milestone shipped with (13 rules
+at the time), and this 14th rule was added afterward as separate,
+explicitly-requested follow-up work, not part of that milestone.
+
+**Full regression suite**: ruff clean, mypy clean, **803 unit tests
+passed** (784 + 19).
