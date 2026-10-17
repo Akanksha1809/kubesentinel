@@ -63,6 +63,33 @@ reason, computed from the actual Node/Pod objects):
   request -- this is simple, exact arithmetic (no scheduler internals to
   approximate), so it's evaluated for real rather than flagged
   inconclusive.
+- **Required pod affinity / anti-affinity**: `Pod.spec.affinity.
+  podAffinity`/`podAntiAffinity`'s own
+  `requiredDuringSchedulingIgnoredDuringExecution` terms (ANDed, per real
+  Kubernetes semantics -- unlike node affinity's OR'd `nodeSelectorTerms`),
+  evaluated against the labels of every other already-scheduled Pod in the
+  cluster via a second, dedicated snapshot
+  (`node_inventory.py::build_pod_label_inventory()`), cross-referenced by
+  `topologyKey` against each Node's own labels. A term using
+  `namespaceSelector` needs a separate per-Namespace-labels call this
+  engine doesn't make, so it is never guessed at: an affinity term that
+  can't be proven met is treated as **not satisfied** (never claim a
+  required condition holds without evidence), and an anti-affinity term
+  that can't be proven *violated* is treated as **satisfied** (never
+  fabricate a problem it hasn't earned the evidence for) -- the same
+  unevaluatable term is also named in `unevaluated_constraints` either way,
+  so a caller knows the required-side result may be incomplete.
+- **Topology spread constraints**: every `topologySpreadConstraint`'s
+  `maxSkew`/`topologyKey`/`labelSelector` evaluated for real -- per-domain
+  Pod counts across every topology value any candidate Node has for that
+  key (not just the one candidate node), with the candidate Pod
+  hypothetically added to its own target domain before checking
+  `max(counts) - min(counts) > maxSkew`. `whenUnsatisfiable=ScheduleAnyway`
+  is a soft preference, reported but never blocking -- the same soft/hard
+  split `PreferNoSchedule` taints already established. `minDomains`,
+  `matchLabelKeys`, `nodeAffinityPolicy`, and `nodeTaintsPolicy` (newer,
+  less commonly set fields) are not evaluated, a documented v1
+  simplification, not an oversight.
 
 **Detected and reported, explicitly not evaluated** (the finding names
 that the constraint exists and why it isn't simulated, rather than silently
@@ -72,14 +99,10 @@ ignoring it or guessing):
   -- a soft scoring preference, not a hard constraint; reported as present,
   never treated as a reason a Pod can't be scheduled.
   the required half above checked for real.
-- **Pod affinity / anti-affinity** -- correctly evaluating this needs the
-  labels of *every other Pod* on *every candidate node*, cross-referenced
-  by topology key. Real, but meaningfully more state to track correctly
-  than the checks above; v1 detects the constraint's presence and reports
-  it as **inconclusive** rather than guessing at a pass/fail.
-- **Topology spread constraints** -- same reasoning: real evaluation needs
-  per-topology-domain Pod counts across the whole domain, not just the one
-  candidate node. Detected, reported, not simulated in v1.
+- **Preferred pod affinity / anti-affinity** -- same treatment as
+  preferred node affinity: a soft scoring preference, reported as present,
+  never a reason a Pod can't be scheduled. (The *required* half is
+  evaluated for real, above.)
 - **Pod priority / preemption** -- `Pod.spec.priority`/`priorityClassName`
   are read and reported (no extra API call needed, already on the Pod
   object); whether a *lower*-priority Pod could actually be preempted to
@@ -124,11 +147,16 @@ class ConstraintType(str, Enum):
     NODE_SELECTOR = "NODE_SELECTOR"
     REQUIRED_NODE_AFFINITY = "REQUIRED_NODE_AFFINITY"
     NAMESPACE_QUOTA = "NAMESPACE_QUOTA"
-    # Detected, not evaluated -- always end up in unevaluated_constraints:
+    REQUIRED_POD_AFFINITY = "REQUIRED_POD_AFFINITY"
+    REQUIRED_POD_ANTI_AFFINITY = "REQUIRED_POD_ANTI_AFFINITY"
+    TOPOLOGY_SPREAD = "TOPOLOGY_SPREAD"
+    # Detected, not evaluated -- always end up in unevaluated_constraints
+    # (the preferred half of node/pod affinity, or a required pod-affinity/
+    # anti-affinity term using namespaceSelector, which the two REQUIRED_*
+    # types above can't evaluate either):
     PREFERRED_NODE_AFFINITY = "PREFERRED_NODE_AFFINITY"
     POD_AFFINITY = "POD_AFFINITY"
     POD_ANTI_AFFINITY = "POD_ANTI_AFFINITY"
-    TOPOLOGY_SPREAD = "TOPOLOGY_SPREAD"
 
 class ConstraintResult(BaseModel):
     constraint_type: ConstraintType

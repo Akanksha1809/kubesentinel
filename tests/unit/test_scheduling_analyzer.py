@@ -118,19 +118,101 @@ class TestUnevaluatedConstraintDetection:
         )
         assert ConstraintType.PREFERRED_NODE_AFFINITY in _detect_unevaluated_constraints(spec)
 
-    def test_pod_affinity_detected(self):
-        from kubernetes.client import V1Affinity, V1PodAffinity
+    def test_required_pod_affinity_with_evaluable_term_is_not_unevaluated(self):
+        """A required podAffinity term using only `topologyKey`/
+        `labelSelector` is now actually evaluated (REQUIRED_POD_AFFINITY in
+        `evaluated_constraints`), so it must NOT also show up here --
+        `check_pod_affinity` already covers it, never both lists at once."""
+        from kubernetes.client import V1Affinity, V1LabelSelector, V1PodAffinity, V1PodAffinityTerm
 
-        spec = _pod_spec(affinity=V1Affinity(pod_affinity=V1PodAffinity(required_during_scheduling_ignored_during_execution=[])))
+        spec = _pod_spec(
+            affinity=V1Affinity(
+                pod_affinity=V1PodAffinity(
+                    required_during_scheduling_ignored_during_execution=[
+                        V1PodAffinityTerm(topology_key="zone", label_selector=V1LabelSelector())
+                    ]
+                )
+            )
+        )
+        assert ConstraintType.POD_AFFINITY not in _detect_unevaluated_constraints(spec)
+
+    def test_preferred_pod_affinity_detected(self):
+        from kubernetes.client import V1Affinity, V1PodAffinity, V1PodAffinityTerm, V1WeightedPodAffinityTerm
+
+        spec = _pod_spec(
+            affinity=V1Affinity(
+                pod_affinity=V1PodAffinity(
+                    preferred_during_scheduling_ignored_during_execution=[
+                        V1WeightedPodAffinityTerm(weight=1, pod_affinity_term=V1PodAffinityTerm(topology_key="zone"))
+                    ]
+                )
+            )
+        )
         assert ConstraintType.POD_AFFINITY in _detect_unevaluated_constraints(spec)
 
-    def test_pod_anti_affinity_detected(self):
-        from kubernetes.client import V1Affinity, V1PodAntiAffinity
+    def test_required_pod_affinity_with_namespace_selector_term_detected(self):
+        """A required term using `namespaceSelector` can't be evaluated by
+        `check_pod_affinity` either -- still surfaced here so a caller
+        knows the required-side result may be incomplete."""
+        from kubernetes.client import V1Affinity, V1LabelSelector, V1PodAffinity, V1PodAffinityTerm
 
-        spec = _pod_spec(affinity=V1Affinity(pod_anti_affinity=V1PodAntiAffinity(required_during_scheduling_ignored_during_execution=[])))
+        spec = _pod_spec(
+            affinity=V1Affinity(
+                pod_affinity=V1PodAffinity(
+                    required_during_scheduling_ignored_during_execution=[
+                        V1PodAffinityTerm(topology_key="zone", namespace_selector=V1LabelSelector())
+                    ]
+                )
+            )
+        )
+        assert ConstraintType.POD_AFFINITY in _detect_unevaluated_constraints(spec)
+
+    def test_required_pod_anti_affinity_with_evaluable_term_is_not_unevaluated(self):
+        from kubernetes.client import V1Affinity, V1LabelSelector, V1PodAffinityTerm, V1PodAntiAffinity
+
+        spec = _pod_spec(
+            affinity=V1Affinity(
+                pod_anti_affinity=V1PodAntiAffinity(
+                    required_during_scheduling_ignored_during_execution=[
+                        V1PodAffinityTerm(topology_key="zone", label_selector=V1LabelSelector())
+                    ]
+                )
+            )
+        )
+        assert ConstraintType.POD_ANTI_AFFINITY not in _detect_unevaluated_constraints(spec)
+
+    def test_preferred_pod_anti_affinity_detected(self):
+        from kubernetes.client import V1Affinity, V1PodAffinityTerm, V1PodAntiAffinity, V1WeightedPodAffinityTerm
+
+        spec = _pod_spec(
+            affinity=V1Affinity(
+                pod_anti_affinity=V1PodAntiAffinity(
+                    preferred_during_scheduling_ignored_during_execution=[
+                        V1WeightedPodAffinityTerm(weight=1, pod_affinity_term=V1PodAffinityTerm(topology_key="zone"))
+                    ]
+                )
+            )
+        )
         assert ConstraintType.POD_ANTI_AFFINITY in _detect_unevaluated_constraints(spec)
 
-    def test_topology_spread_constraint_detected(self):
+    def test_required_pod_anti_affinity_with_namespace_selector_term_detected(self):
+        from kubernetes.client import V1Affinity, V1LabelSelector, V1PodAffinityTerm, V1PodAntiAffinity
+
+        spec = _pod_spec(
+            affinity=V1Affinity(
+                pod_anti_affinity=V1PodAntiAffinity(
+                    required_during_scheduling_ignored_during_execution=[
+                        V1PodAffinityTerm(topology_key="zone", namespace_selector=V1LabelSelector())
+                    ]
+                )
+            )
+        )
+        assert ConstraintType.POD_ANTI_AFFINITY in _detect_unevaluated_constraints(spec)
+
+    def test_topology_spread_constraint_is_no_longer_reported_as_unevaluated(self):
+        """Every topologySpreadConstraint is now evaluated for real
+        (TOPOLOGY_SPREAD moved to `EVALUATED_CONSTRAINT_TYPES`), so
+        `_detect_unevaluated_constraints` must never report it."""
         from kubernetes.client import V1LabelSelector, V1TopologySpreadConstraint
 
         spec = _pod_spec(
@@ -138,9 +220,9 @@ class TestUnevaluatedConstraintDetection:
                 V1TopologySpreadConstraint(max_skew=1, topology_key="zone", when_unsatisfiable="DoNotSchedule", label_selector=V1LabelSelector())
             ]
         )
-        assert ConstraintType.TOPOLOGY_SPREAD in _detect_unevaluated_constraints(spec)
+        assert ConstraintType.TOPOLOGY_SPREAD not in _detect_unevaluated_constraints(spec)
 
-    def test_unevaluated_constraints_appear_in_the_finding(self):
+    def test_topology_spread_constraint_appears_as_evaluated_in_the_finding(self):
         from kubernetes.client import V1LabelSelector, V1TopologySpreadConstraint
 
         node = _node()
@@ -150,8 +232,8 @@ class TestUnevaluatedConstraintDetection:
             ]
         )
         finding = analyze_pod_scheduling(spec, [node], namespace="ns")
-        assert ConstraintType.TOPOLOGY_SPREAD in finding.unevaluated_constraints
-        assert "not evaluated" in finding.reasoning
+        assert ConstraintType.TOPOLOGY_SPREAD in finding.evaluated_constraints
+        assert ConstraintType.TOPOLOGY_SPREAD not in finding.unevaluated_constraints
 
 
 class TestHypotheticalSpec:

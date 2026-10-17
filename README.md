@@ -71,11 +71,13 @@ Pod or a hypothetical spec, it independently reconstructs *why* a Node does
 or doesn't fit, one constraint at a time (real Node allocatable-vs-requested
 arithmetic, real taint/toleration matching, real node-selector/required-
 node-affinity evaluation, real namespace-ResourceQuota checking for a
-hypothetical spec), rather than only classifying the scheduler's own
-message text the way the troubleshooting engine's `PendingSchedulingRule`
-already does. It's explicit about what it *doesn't* evaluate too -- pod
-affinity/anti-affinity and topology spread constraints are detected and
-named, never guessed at. See
+hypothetical spec, real required pod affinity/anti-affinity and topology
+spread constraint evaluation against every other already-scheduled Pod's
+labels), rather than only classifying the scheduler's own message text the
+way the troubleshooting engine's `PendingSchedulingRule` already does.
+It's explicit about what it *doesn't* evaluate too -- the preferred half
+of node/pod affinity, and any required pod-affinity/anti-affinity term
+using `namespaceSelector`, are detected and named, never guessed at. See
 [SCHEDULING_ANALYSIS.md](docs/SCHEDULING_ANALYSIS.md) for the design.
 
 A fourth, read-only engine -- the **network troubleshooting engine** --

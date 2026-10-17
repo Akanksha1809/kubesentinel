@@ -1,23 +1,33 @@
 from kubernetes.client import (
     V1Affinity,
+    V1LabelSelector,
+    V1LabelSelectorRequirement,
     V1NodeAffinity,
     V1NodeSelector,
     V1NodeSelectorRequirement,
     V1NodeSelectorTerm,
     V1ObjectMeta,
+    V1PodAffinity,
+    V1PodAffinityTerm,
+    V1PodAntiAffinity,
     V1ResourceQuota,
     V1ResourceQuotaStatus,
     V1Toleration,
+    V1TopologySpreadConstraint,
 )
 
 from kubesentinel.models.optimization import ResourceQuantity
-from kubesentinel.models.scheduling import ConstraintType, NodeSnapshot, NodeTaint
+from kubesentinel.models.scheduling import ConstraintType, NodeSnapshot, NodeTaint, PodLabelSummary
 from kubesentinel.scheduling.constraints import (
     check_namespace_quota,
     check_node_selector,
+    check_pod_affinity,
+    check_pod_anti_affinity,
     check_required_node_affinity,
     check_resource_fit,
     check_taints_tolerations,
+    check_topology_spread_constraints,
+    label_selector_matches,
 )
 
 
@@ -246,3 +256,237 @@ class TestNamespaceQuota:
         result = check_namespace_quota(ResourceQuantity(cpu_millicores=500, memory_bytes=None), [quota])
         assert result.satisfied is False
         assert "compute-quota" in result.reasoning
+
+
+class TestLabelSelectorMatches:
+    def test_null_selector_matches_nothing(self):
+        assert label_selector_matches(None, {"app": "demo"}) is False
+
+    def test_empty_present_selector_matches_everything(self):
+        assert label_selector_matches(V1LabelSelector(), {"app": "demo"}) is True
+
+    def test_match_labels_matches(self):
+        assert label_selector_matches(V1LabelSelector(match_labels={"app": "demo"}), {"app": "demo"}) is True
+
+    def test_match_labels_does_not_match(self):
+        assert label_selector_matches(V1LabelSelector(match_labels={"app": "other"}), {"app": "demo"}) is False
+
+    def test_match_expressions_in_operator(self):
+        selector = V1LabelSelector(match_expressions=[V1LabelSelectorRequirement(key="app", operator="In", values=["demo"])])
+        assert label_selector_matches(selector, {"app": "demo"}) is True
+
+
+def _pod_label_summary(**overrides) -> PodLabelSummary:
+    defaults = dict(uid="pod-uid-1", namespace="default", node_name="node-1", labels={})
+    defaults.update(overrides)
+    return PodLabelSummary(**defaults)
+
+
+def _required_pod_affinity(*terms: V1PodAffinityTerm) -> V1Affinity:
+    return V1Affinity(pod_affinity=V1PodAffinity(required_during_scheduling_ignored_during_execution=list(terms)))
+
+
+def _required_pod_anti_affinity(*terms: V1PodAffinityTerm) -> V1Affinity:
+    return V1Affinity(pod_anti_affinity=V1PodAntiAffinity(required_during_scheduling_ignored_during_execution=list(terms)))
+
+
+class TestCheckPodAffinity:
+    def test_no_affinity_is_satisfied(self):
+        node = _node(labels={"zone": "a"})
+        result = check_pod_affinity(None, candidate_namespace="default", candidate_uid=None, node=node, nodes=[node], pods=[])
+        assert result.constraint_type == ConstraintType.REQUIRED_POD_AFFINITY
+        assert result.satisfied is True
+
+    def test_matching_pod_in_same_domain_satisfies(self):
+        node = _node(name="node-1", labels={"zone": "a"})
+        other_node = _node(name="node-2", labels={"zone": "a"})
+        affinity = _required_pod_affinity(
+            V1PodAffinityTerm(topology_key="zone", label_selector=V1LabelSelector(match_labels={"app": "cache"}))
+        )
+        pods = [_pod_label_summary(uid="other", namespace="default", node_name="node-2", labels={"app": "cache"})]
+        result = check_pod_affinity(
+            affinity, candidate_namespace="default", candidate_uid=None, node=node, nodes=[node, other_node], pods=pods
+        )
+        assert result.satisfied is True
+
+    def test_no_matching_pod_fails(self):
+        node = _node(labels={"zone": "a"})
+        affinity = _required_pod_affinity(
+            V1PodAffinityTerm(topology_key="zone", label_selector=V1LabelSelector(match_labels={"app": "cache"}))
+        )
+        result = check_pod_affinity(affinity, candidate_namespace="default", candidate_uid=None, node=node, nodes=[node], pods=[])
+        assert result.satisfied is False
+
+    def test_multiple_terms_are_anded(self):
+        node = _node(name="node-1", labels={"zone": "a", "rack": "r1"})
+        affinity = _required_pod_affinity(
+            V1PodAffinityTerm(topology_key="zone", label_selector=V1LabelSelector(match_labels={"app": "cache"})),
+            V1PodAffinityTerm(topology_key="rack", label_selector=V1LabelSelector(match_labels={"app": "missing"})),
+        )
+        pods = [_pod_label_summary(uid="other", namespace="default", node_name="node-1", labels={"app": "cache"})]
+        result = check_pod_affinity(affinity, candidate_namespace="default", candidate_uid=None, node=node, nodes=[node], pods=pods)
+        assert result.satisfied is False
+
+    def test_candidate_pod_excluded_from_matching_itself(self):
+        node = _node(labels={"zone": "a"})
+        affinity = _required_pod_affinity(
+            V1PodAffinityTerm(topology_key="zone", label_selector=V1LabelSelector(match_labels={"app": "cache"}))
+        )
+        pods = [_pod_label_summary(uid="self-uid", namespace="default", node_name="node-1", labels={"app": "cache"})]
+        result = check_pod_affinity(
+            affinity, candidate_namespace="default", candidate_uid="self-uid", node=node, nodes=[node], pods=pods
+        )
+        assert result.satisfied is False
+
+    def test_namespace_selector_term_treated_as_not_satisfied(self):
+        node = _node(labels={"zone": "a"})
+        affinity = _required_pod_affinity(
+            V1PodAffinityTerm(topology_key="zone", namespace_selector=V1LabelSelector())
+        )
+        result = check_pod_affinity(affinity, candidate_namespace="default", candidate_uid=None, node=node, nodes=[node], pods=[])
+        assert result.satisfied is False
+        assert "namespaceSelector" in result.reasoning
+
+
+class TestCheckPodAntiAffinity:
+    def test_no_affinity_is_satisfied(self):
+        node = _node(labels={"zone": "a"})
+        result = check_pod_anti_affinity(None, candidate_namespace="default", candidate_uid=None, node=node, nodes=[node], pods=[])
+        assert result.constraint_type == ConstraintType.REQUIRED_POD_ANTI_AFFINITY
+        assert result.satisfied is True
+
+    def test_conflicting_pod_in_same_domain_fails(self):
+        node = _node(labels={"zone": "a"})
+        affinity = _required_pod_anti_affinity(
+            V1PodAffinityTerm(topology_key="zone", label_selector=V1LabelSelector(match_labels={"app": "cache"}))
+        )
+        pods = [_pod_label_summary(uid="other", namespace="default", node_name="node-1", labels={"app": "cache"})]
+        result = check_pod_anti_affinity(
+            affinity, candidate_namespace="default", candidate_uid=None, node=node, nodes=[node], pods=pods
+        )
+        assert result.satisfied is False
+
+    def test_no_conflicting_pod_is_satisfied(self):
+        node = _node(labels={"zone": "a"})
+        affinity = _required_pod_anti_affinity(
+            V1PodAffinityTerm(topology_key="zone", label_selector=V1LabelSelector(match_labels={"app": "cache"}))
+        )
+        result = check_pod_anti_affinity(affinity, candidate_namespace="default", candidate_uid=None, node=node, nodes=[node], pods=[])
+        assert result.satisfied is True
+
+    def test_candidate_pod_excluded_from_matching_itself(self):
+        node = _node(labels={"zone": "a"})
+        affinity = _required_pod_anti_affinity(
+            V1PodAffinityTerm(topology_key="zone", label_selector=V1LabelSelector(match_labels={"app": "cache"}))
+        )
+        pods = [_pod_label_summary(uid="self-uid", namespace="default", node_name="node-1", labels={"app": "cache"})]
+        result = check_pod_anti_affinity(
+            affinity, candidate_namespace="default", candidate_uid="self-uid", node=node, nodes=[node], pods=pods
+        )
+        assert result.satisfied is True
+
+    def test_namespace_selector_term_treated_as_satisfied(self):
+        node = _node(labels={"zone": "a"})
+        affinity = _required_pod_anti_affinity(
+            V1PodAffinityTerm(topology_key="zone", namespace_selector=V1LabelSelector())
+        )
+        result = check_pod_anti_affinity(affinity, candidate_namespace="default", candidate_uid=None, node=node, nodes=[node], pods=[])
+        assert result.satisfied is True
+        assert "namespaceSelector" in result.reasoning
+
+
+class TestCheckTopologySpreadConstraints:
+    def test_no_constraints_is_satisfied(self):
+        node = _node(labels={"zone": "a"})
+        result = check_topology_spread_constraints(None, candidate_namespace="default", candidate_uid=None, node=node, nodes=[node], pods=[])
+        assert result.constraint_type == ConstraintType.TOPOLOGY_SPREAD
+        assert result.satisfied is True
+
+    def test_within_max_skew_is_satisfied(self):
+        node_a = _node(name="node-a", labels={"zone": "a"})
+        node_b = _node(name="node-b", labels={"zone": "b"})
+        constraint = V1TopologySpreadConstraint(
+            max_skew=1,
+            topology_key="zone",
+            when_unsatisfiable="DoNotSchedule",
+            label_selector=V1LabelSelector(match_labels={"app": "web"}),
+        )
+        pods = [_pod_label_summary(uid="p1", namespace="default", node_name="node-a", labels={"app": "web"})]
+        result = check_topology_spread_constraints(
+            [constraint], candidate_namespace="default", candidate_uid=None, node=node_b, nodes=[node_a, node_b], pods=pods
+        )
+        assert result.satisfied is True
+
+    def test_exceeding_max_skew_with_do_not_schedule_blocks(self):
+        node_a = _node(name="node-a", labels={"zone": "a"})
+        node_b = _node(name="node-b", labels={"zone": "b"})
+        constraint = V1TopologySpreadConstraint(
+            max_skew=1,
+            topology_key="zone",
+            when_unsatisfiable="DoNotSchedule",
+            label_selector=V1LabelSelector(match_labels={"app": "web"}),
+        )
+        pods = [
+            _pod_label_summary(uid="p1", namespace="default", node_name="node-a", labels={"app": "web"}),
+            _pod_label_summary(uid="p2", namespace="default", node_name="node-a", labels={"app": "web"}),
+            _pod_label_summary(uid="p3", namespace="default", node_name="node-a", labels={"app": "web"}),
+        ]
+        result = check_topology_spread_constraints(
+            [constraint], candidate_namespace="default", candidate_uid=None, node=node_b, nodes=[node_a, node_b], pods=pods
+        )
+        assert result.satisfied is False
+        assert "zone" in result.reasoning
+
+    def test_exceeding_max_skew_with_schedule_anyway_is_soft(self):
+        node_a = _node(name="node-a", labels={"zone": "a"})
+        node_b = _node(name="node-b", labels={"zone": "b"})
+        constraint = V1TopologySpreadConstraint(
+            max_skew=1,
+            topology_key="zone",
+            when_unsatisfiable="ScheduleAnyway",
+            label_selector=V1LabelSelector(match_labels={"app": "web"}),
+        )
+        pods = [
+            _pod_label_summary(uid="p1", namespace="default", node_name="node-a", labels={"app": "web"}),
+            _pod_label_summary(uid="p2", namespace="default", node_name="node-a", labels={"app": "web"}),
+            _pod_label_summary(uid="p3", namespace="default", node_name="node-a", labels={"app": "web"}),
+        ]
+        result = check_topology_spread_constraints(
+            [constraint], candidate_namespace="default", candidate_uid=None, node=node_b, nodes=[node_a, node_b], pods=pods
+        )
+        assert result.satisfied is True
+        assert "zone" in result.reasoning
+
+    def test_candidate_pod_excluded_from_its_own_count(self):
+        node_a = _node(name="node-a", labels={"zone": "a"})
+        node_b = _node(name="node-b", labels={"zone": "b"})
+        constraint = V1TopologySpreadConstraint(
+            max_skew=1,
+            topology_key="zone",
+            when_unsatisfiable="DoNotSchedule",
+            label_selector=V1LabelSelector(match_labels={"app": "web"}),
+        )
+        pods = [_pod_label_summary(uid="self-uid", namespace="default", node_name="node-b", labels={"app": "web"})]
+        result = check_topology_spread_constraints(
+            [constraint],
+            candidate_namespace="default",
+            candidate_uid="self-uid",
+            node=node_b,
+            nodes=[node_a, node_b],
+            pods=pods,
+        )
+        assert result.satisfied is True
+
+    def test_candidate_node_missing_topology_label_blocks(self):
+        node_a = _node(name="node-a", labels={"zone": "a"})
+        node_b = _node(name="node-b", labels={})
+        constraint = V1TopologySpreadConstraint(
+            max_skew=1,
+            topology_key="zone",
+            when_unsatisfiable="DoNotSchedule",
+            label_selector=V1LabelSelector(match_labels={"app": "web"}),
+        )
+        result = check_topology_spread_constraints(
+            [constraint], candidate_namespace="default", candidate_uid=None, node=node_b, nodes=[node_a, node_b], pods=[]
+        )
+        assert result.satisfied is False

@@ -30,11 +30,23 @@ class ConstraintType(str, Enum):
     NODE_SELECTOR = "NODE_SELECTOR"
     REQUIRED_NODE_AFFINITY = "REQUIRED_NODE_AFFINITY"
     NAMESPACE_QUOTA = "NAMESPACE_QUOTA"
-    # Detected, never evaluated in v1 -- see the design doc.
+    # Added to close docs/SCHEDULING_ANALYSIS.md Section 2's own named
+    # gap -- the same required-vs-preferred split REQUIRED_NODE_AFFINITY/
+    # PREFERRED_NODE_AFFINITY already established, applied here too.
+    # TOPOLOGY_SPREAD has no such split (whenUnsatisfiable is per-constraint,
+    # not a separate preferred list), so every topologySpreadConstraint is
+    # evaluated for real.
+    REQUIRED_POD_AFFINITY = "REQUIRED_POD_AFFINITY"
+    REQUIRED_POD_ANTI_AFFINITY = "REQUIRED_POD_ANTI_AFFINITY"
+    TOPOLOGY_SPREAD = "TOPOLOGY_SPREAD"
+    # Detected, never evaluated in v1 -- see the design doc. POD_AFFINITY/
+    # POD_ANTI_AFFINITY now specifically mean "the preferred half, or a
+    # required term this engine can't evaluate (namespaceSelector)" --
+    # never the required terms that *can* be evaluated, which are
+    # REQUIRED_POD_AFFINITY/REQUIRED_POD_ANTI_AFFINITY above instead.
     PREFERRED_NODE_AFFINITY = "PREFERRED_NODE_AFFINITY"
     POD_AFFINITY = "POD_AFFINITY"
     POD_ANTI_AFFINITY = "POD_ANTI_AFFINITY"
-    TOPOLOGY_SPREAD = "TOPOLOGY_SPREAD"
 
 
 #: Constraints this engine can actually evaluate pass/fail for. Anything
@@ -48,6 +60,9 @@ EVALUATED_CONSTRAINT_TYPES = frozenset(
         ConstraintType.NODE_SELECTOR,
         ConstraintType.REQUIRED_NODE_AFFINITY,
         ConstraintType.NAMESPACE_QUOTA,
+        ConstraintType.REQUIRED_POD_AFFINITY,
+        ConstraintType.REQUIRED_POD_ANTI_AFFINITY,
+        ConstraintType.TOPOLOGY_SPREAD,
     }
 )
 
@@ -71,6 +86,20 @@ class NodeSnapshot(BaseModel):
     taints: list[NodeTaint] = Field(default_factory=list)
     labels: dict[str, str] = Field(default_factory=dict)
     ready: bool = True
+
+
+class PodLabelSummary(BaseModel):
+    """The minimum a pod affinity/anti-affinity or topology-spread check
+    needs about one already-scheduled Pod -- never the full Pod object,
+    since nothing here reads containers/status. `uid` is used only to
+    exclude a real candidate Pod from matching against itself when
+    re-analyzing a Pod that already exists (a hypothetical spec has no
+    `uid` at all, so nothing is excluded for it)."""
+
+    uid: str
+    namespace: str
+    node_name: str
+    labels: dict[str, str] = Field(default_factory=dict)
 
 
 class ConstraintResult(BaseModel):

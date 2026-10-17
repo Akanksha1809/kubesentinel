@@ -2,7 +2,6 @@ from kubernetes.client import (
     V1Deployment,
     V1DeploymentSpec,
     V1LabelSelector,
-    V1LabelSelectorRequirement,
     V1ObjectMeta,
     V1PodDisruptionBudget,
     V1PodDisruptionBudgetSpec,
@@ -11,7 +10,7 @@ from kubernetes.client import (
 
 from kubesentinel.config import Settings
 from kubesentinel.security.inventory import SecurityInventory
-from kubesentinel.security.rules.availability import MissingPdbForMultiReplicaWorkloadRule, _pdb_selector_matches
+from kubesentinel.security.rules.availability import MissingPdbForMultiReplicaWorkloadRule
 
 NAMESPACE = "kubesentinel-lab"
 
@@ -38,24 +37,6 @@ def _pdb(name="pdb", namespace=NAMESPACE, selector=None) -> V1PodDisruptionBudge
         metadata=V1ObjectMeta(name=name, namespace=namespace),
         spec=V1PodDisruptionBudgetSpec(selector=selector if selector is not None else V1LabelSelector(match_labels={"app": "demo"})),
     )
-
-
-class TestPdbSelectorMatches:
-    def test_null_selector_matches_nothing(self):
-        assert _pdb_selector_matches(None, {"app": "demo"}) is False
-
-    def test_empty_present_selector_matches_everything(self):
-        assert _pdb_selector_matches(V1LabelSelector(), {"app": "demo"}) is True
-
-    def test_match_labels_matches(self):
-        assert _pdb_selector_matches(V1LabelSelector(match_labels={"app": "demo"}), {"app": "demo"}) is True
-
-    def test_match_labels_does_not_match(self):
-        assert _pdb_selector_matches(V1LabelSelector(match_labels={"app": "other"}), {"app": "demo"}) is False
-
-    def test_match_expressions_in_operator(self):
-        selector = V1LabelSelector(match_expressions=[V1LabelSelectorRequirement(key="app", operator="In", values=["demo"])])
-        assert _pdb_selector_matches(selector, {"app": "demo"}) is True
 
 
 class TestMissingPdbForMultiReplicaWorkloadRule:

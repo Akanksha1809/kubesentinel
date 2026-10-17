@@ -17,7 +17,7 @@ from kubesentinel.observer.client import ClusterClients
 from kubesentinel.optimization.ownership import resolve_pod_owner
 from kubesentinel.persistence.interface import IncidentRepository, SchedulingRepository
 from kubesentinel.scheduling.analyzer import analyze_pod_scheduling, deserialize_pod_spec
-from kubesentinel.scheduling.node_inventory import build_node_inventory
+from kubesentinel.scheduling.node_inventory import build_node_inventory, build_pod_label_inventory
 
 logger = logging.getLogger(__name__)
 
@@ -78,6 +78,7 @@ class SchedulingService:
                 raise
 
             nodes = build_node_inventory(self._clients)
+            pods = build_pod_label_inventory(self._clients)
             replicasets = self._clients.apps.list_namespaced_replica_set(namespace=namespace).items
             replicasets_by_uid = {rs.metadata.uid: rs for rs in replicasets}
             owner = resolve_pod_owner(pod, replicasets_by_uid)
@@ -91,6 +92,8 @@ class SchedulingService:
                 pod.spec,
                 nodes,
                 namespace=namespace,
+                pods=pods,
+                pod_uid=pod.metadata.uid,
                 check_quota=False,
                 pod_name=pod_name,
                 workload_kind=owner.kind.value if owner else None,
@@ -117,6 +120,7 @@ class SchedulingService:
 
         try:
             nodes = build_node_inventory(self._clients)
+            pods = build_pod_label_inventory(self._clients)
             try:
                 quotas = self._clients.core.list_namespaced_resource_quota(namespace=namespace).items
             except ApiException as exc:
@@ -127,6 +131,8 @@ class SchedulingService:
                 pod_spec,
                 nodes,
                 namespace=namespace,
+                pods=pods,
+                pod_uid=None,
                 quotas=quotas,
                 check_quota=True,
             )

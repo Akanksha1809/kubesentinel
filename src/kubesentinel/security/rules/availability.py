@@ -9,29 +9,9 @@ from uuid import uuid4
 
 from kubesentinel.config import Settings
 from kubesentinel.models.security import SecurityFinding, SecurityResourceRef, SecuritySeverity
-from kubesentinel.scheduling.constraints import requirement_matches
+from kubesentinel.scheduling.constraints import label_selector_matches
 from kubesentinel.security.inventory import SecurityInventory
 from kubesentinel.security.rules.base import SecurityRule
-
-
-def _pdb_selector_matches(selector, labels: dict) -> bool:
-    """Standard Kubernetes LabelSelector semantics (API conventions): "a
-    null label selector matches no objects, while an empty label selector
-    matches all objects." This is the *opposite* of
-    `network/policy_inventory.py`'s own `podSelector` handling, which
-    defensively treats a null selector as "matches all" because
-    NetworkPolicy's own podSelector field is never genuinely optional in
-    valid data -- PodDisruptionBudget's selector has no such guarantee, so
-    this function is deliberately its own, not a reuse of that one."""
-    if selector is None:
-        return False
-    match_labels = selector.match_labels or {}
-    match_expressions = selector.match_expressions or []
-    if not match_labels and not match_expressions:
-        return True
-    if not all(labels.get(k) == v for k, v in match_labels.items()):
-        return False
-    return all(requirement_matches(req, labels) for req in match_expressions)
 
 
 class MissingPdbForMultiReplicaWorkloadRule(SecurityRule):
@@ -50,7 +30,7 @@ class MissingPdbForMultiReplicaWorkloadRule(SecurityRule):
                 labels = (workload.spec.template.metadata.labels or {}) if workload.spec.template.metadata else {}
                 namespace = workload.metadata.namespace
                 covered = any(
-                    pdb.metadata.namespace == namespace and _pdb_selector_matches(pdb.spec.selector, labels)
+                    pdb.metadata.namespace == namespace and label_selector_matches(pdb.spec.selector, labels)
                     for pdb in inventory.pod_disruption_budgets
                 )
                 if covered:

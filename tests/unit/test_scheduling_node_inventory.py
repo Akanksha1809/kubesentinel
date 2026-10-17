@@ -4,7 +4,7 @@ from unittest.mock import MagicMock
 from kubernetes.client import V1Container, V1PodSpec, V1PodStatus, V1ResourceRequirements, V1Taint
 
 from tests.unit.factories import make_node, make_pod, node_condition
-from kubesentinel.scheduling.node_inventory import build_node_inventory
+from kubesentinel.scheduling.node_inventory import build_node_inventory, build_pod_label_inventory
 
 
 def _items(objs):
@@ -124,3 +124,40 @@ class TestBuildNodeInventory:
 
         assert by_name["node-1"].requested.cpu_millicores == 500
         assert by_name["node-2"].requested.cpu_millicores == 300
+
+
+class TestBuildPodLabelInventory:
+    def test_extracts_namespace_node_and_labels_for_bound_pods(self):
+        pod = _pod_with_request("a", "node-1")
+        pod.metadata.labels = {"app": "demo"}
+        clients = _clients(nodes=[], pods=[pod])
+
+        summaries = build_pod_label_inventory(clients)
+
+        assert len(summaries) == 1
+        assert summaries[0].uid == pod.metadata.uid
+        assert summaries[0].namespace == pod.metadata.namespace
+        assert summaries[0].node_name == "node-1"
+        assert summaries[0].labels == {"app": "demo"}
+
+    def test_unbound_pod_excluded(self):
+        pod = make_pod(name="pending-pod", phase="Pending")
+        pod.spec = V1PodSpec(node_name=None, containers=[V1Container(name="app")])
+        clients = _clients(nodes=[], pods=[pod])
+
+        assert build_pod_label_inventory(clients) == []
+
+    def test_terminal_phase_pod_excluded(self):
+        pod = _pod_with_request("done", "node-1", phase="Succeeded")
+        clients = _clients(nodes=[], pods=[pod])
+
+        assert build_pod_label_inventory(clients) == []
+
+    def test_missing_labels_defaults_to_empty_dict(self):
+        pod = _pod_with_request("a", "node-1")
+        pod.metadata.labels = None
+        clients = _clients(nodes=[], pods=[pod])
+
+        summaries = build_pod_label_inventory(clients)
+
+        assert summaries[0].labels == {}

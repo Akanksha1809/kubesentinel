@@ -22,14 +22,18 @@ from kubesentinel.models.scheduling import (
     ConstraintType,
     NodeFitResult,
     NodeSnapshot,
+    PodLabelSummary,
     SchedulingFinding,
 )
 from kubesentinel.scheduling.constraints import (
     check_namespace_quota,
     check_node_selector,
+    check_pod_affinity,
+    check_pod_anti_affinity,
     check_required_node_affinity,
     check_resource_fit,
     check_taints_tolerations,
+    check_topology_spread_constraints,
 )
 from kubesentinel.scheduling.node_inventory import parse_quantity_dict
 
@@ -64,17 +68,39 @@ def _pod_spec_request(pod_spec: k8s_client.V1PodSpec) -> ResourceQuantity:
     )
 
 
+def _has_unevaluatable_required_term(terms: list) -> bool:
+    """A required pod affinity/anti-affinity term this engine can't
+    evaluate -- only `namespaceSelector` (see `constraints.py`'s own
+    `_evaluate_pod_affinity_terms`). `check_pod_affinity`/
+    `check_pod_anti_affinity` already handle these terms conservatively
+    per-node; this just decides whether to *also* surface them in
+    `unevaluated_constraints` so a caller knows the required result for
+    that half may be incomplete."""
+    return any(term.namespace_selector is not None for term in terms)
+
+
 def _detect_unevaluated_constraints(pod_spec: k8s_client.V1PodSpec) -> list[ConstraintType]:
+    """Only the *preferred* half of node/pod affinity, and any *required*
+    pod affinity/anti-affinity term this engine can't evaluate
+    (namespaceSelector) -- the required terms it CAN evaluate are now in
+    `evaluated_constraints` via REQUIRED_POD_AFFINITY/
+    REQUIRED_POD_ANTI_AFFINITY instead, never both lists at once for the
+    same term. TOPOLOGY_SPREAD is no longer detected here at all -- every
+    topologySpreadConstraint is now evaluated for real."""
     found: list[ConstraintType] = []
     affinity = pod_spec.affinity
     if affinity and affinity.node_affinity and affinity.node_affinity.preferred_during_scheduling_ignored_during_execution:
         found.append(ConstraintType.PREFERRED_NODE_AFFINITY)
     if affinity and affinity.pod_affinity:
-        found.append(ConstraintType.POD_AFFINITY)
+        preferred = affinity.pod_affinity.preferred_during_scheduling_ignored_during_execution
+        required = affinity.pod_affinity.required_during_scheduling_ignored_during_execution or []
+        if preferred or _has_unevaluatable_required_term(required):
+            found.append(ConstraintType.POD_AFFINITY)
     if affinity and affinity.pod_anti_affinity:
-        found.append(ConstraintType.POD_ANTI_AFFINITY)
-    if pod_spec.topology_spread_constraints:
-        found.append(ConstraintType.TOPOLOGY_SPREAD)
+        preferred = affinity.pod_anti_affinity.preferred_during_scheduling_ignored_during_execution
+        required = affinity.pod_anti_affinity.required_during_scheduling_ignored_during_execution or []
+        if preferred or _has_unevaluatable_required_term(required):
+            found.append(ConstraintType.POD_ANTI_AFFINITY)
     return found
 
 
@@ -83,6 +109,8 @@ def analyze_pod_scheduling(
     nodes: list[NodeSnapshot],
     *,
     namespace: str,
+    pods: list[PodLabelSummary] | None = None,
+    pod_uid: str | None = None,
     quotas: list | None = None,
     check_quota: bool = False,
     pod_name: str | None = None,
@@ -97,8 +125,17 @@ def analyze_pod_scheduling(
     (or it wouldn't exist), so checking it again doesn't explain why that
     Pod is Pending. It's only meaningful for a *hypothetical* spec, where
     it answers "would creating this Pod even be admitted" ahead of
-    "would it then be schedulable." See docs/SCHEDULING_ANALYSIS.md."""
+    "would it then be schedulable." See docs/SCHEDULING_ANALYSIS.md.
+
+    `pods` is every other already-scheduled Pod's (namespace, node,
+    labels), for pod affinity/anti-affinity/topology-spread -- pass
+    `build_pod_label_inventory(clients)`'s result, or omit (defaults to
+    no other Pods) when the caller has no use for those three checks.
+    `pod_uid` excludes the candidate's own Pod from matching against
+    itself when analyzing a real, already-existing Pod; a hypothetical
+    spec has no UID and passes `None` (nothing to exclude)."""
     now = now or datetime.now(timezone.utc)
+    pods = pods or []
     pod_request = _pod_spec_request(pod_spec)
     tolerations = pod_spec.tolerations or []
     node_selector = pod_spec.node_selector
@@ -126,6 +163,20 @@ def analyze_pod_scheduling(
             check_taints_tolerations(tolerations, node),
             check_node_selector(node_selector, node),
             check_required_node_affinity(affinity, node),
+            check_pod_affinity(
+                affinity, candidate_namespace=namespace, candidate_uid=pod_uid, node=node, nodes=nodes, pods=pods
+            ),
+            check_pod_anti_affinity(
+                affinity, candidate_namespace=namespace, candidate_uid=pod_uid, node=node, nodes=nodes, pods=pods
+            ),
+            check_topology_spread_constraints(
+                pod_spec.topology_spread_constraints,
+                candidate_namespace=namespace,
+                candidate_uid=pod_uid,
+                node=node,
+                nodes=nodes,
+                pods=pods,
+            ),
         ]
         node_results.append(
             NodeFitResult(

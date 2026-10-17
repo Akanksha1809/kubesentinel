@@ -3078,3 +3078,145 @@ explicitly-requested follow-up work, not part of that milestone.
 
 **Full regression suite**: ruff clean, mypy clean, **803 unit tests
 passed** (784 + 19).
+
+## Milestone 31: Pod affinity/anti-affinity and topology spread evaluation -- DONE
+
+The second of the five scope boundaries the user asked to close, per
+the same "safest/most in-pattern first" order as Milestone 30 above.
+Closes `docs/SCHEDULING_ANALYSIS.md` Section 2's own named gap: pod
+affinity/anti-affinity and topology spread constraints were detected
+and reported, never actually evaluated, because doing so needs every
+other already-scheduled Pod's labels across every candidate node --
+more state than the existing per-node checks track. Scoped and written
+up in that same design doc before any code (Section 2's "evaluated for
+real" list, and the `ConstraintType` data model in Section 4).
+
+**Scope decisions, made deliberately rather than assumed**:
+- Only the *required* half of pod affinity/anti-affinity is evaluated
+  (`REQUIRED_POD_AFFINITY`/`REQUIRED_POD_ANTI_AFFINITY`, new
+  `ConstraintType` values) -- the preferred half stays a soft scoring
+  preference, same treatment `PREFERRED_NODE_AFFINITY` already has.
+- Required pod-affinity/anti-affinity terms are **ANDed** (per real
+  Kubernetes semantics for `[]PodAffinityTerm`), unlike node affinity's
+  own OR'd `nodeSelectorTerms` -- verified against the Kubernetes docs
+  before writing the evaluator, not assumed by analogy.
+- A required term using `namespaceSelector` can't be evaluated (would
+  need a separate per-Namespace-labels API call, out of scope) and is
+  never guessed at: an affinity term that can't be proven met is
+  **not satisfied** (never claim a required condition holds without
+  evidence); an anti-affinity term that can't be proven *violated* is
+  **satisfied** (never fabricate a problem it hasn't earned the
+  evidence for). The same unevaluatable term is also surfaced in
+  `unevaluated_constraints` either way, so a caller knows the
+  required-side result may be incomplete.
+- `TOPOLOGY_SPREAD` has no required/preferred split (`whenUnsatisfiable`
+  is per-constraint, not a separate list) -- every
+  `topologySpreadConstraint` is now evaluated for real, with
+  `ScheduleAnyway` treated as soft/non-blocking, mirroring the existing
+  `PreferNoSchedule` taint precedent.
+- `minDomains`, `matchLabelKeys`, `nodeAffinityPolicy`,
+  `nodeTaintsPolicy` (newer, less commonly set topology-spread fields)
+  are not evaluated -- a documented v1 simplification, not an oversight.
+
+**What was added**:
+
+- `models/scheduling.py` -- `REQUIRED_POD_AFFINITY`/
+  `REQUIRED_POD_ANTI_AFFINITY` added to `ConstraintType` and
+  `EVALUATED_CONSTRAINT_TYPES`; `TOPOLOGY_SPREAD` moved into the
+  evaluated set; `POD_AFFINITY`/`POD_ANTI_AFFINITY`'s own meaning
+  refined (not renamed) to mean specifically "the preferred half, or a
+  required term this engine can't evaluate" -- never the required
+  terms that can. New `PodLabelSummary` model (uid/namespace/node_name/
+  labels -- the minimum these checks need about one other Pod).
+- `scheduling/node_inventory.py::build_pod_label_inventory()` (new) --
+  a second, separate `list_pod_for_all_namespaces()` snapshot, kept
+  apart from `build_node_inventory()` (used by 3 callers, pinned by 10
+  existing tests) rather than changing that function's return shape and
+  forcing `optimization/service.py` to receive and discard data it has
+  no use for.
+- `scheduling/constraints.py` -- `label_selector_matches()` (promoted
+  from `security/rules/availability.py::_pdb_selector_matches`, now a
+  third caller; standard "null matches nothing, empty matches
+  everything" LabelSelector semantics -- the *opposite* of
+  `network/policy_inventory.py`'s own deliberately-different
+  NetworkPolicy `podSelector` handling, never to be confused), plus
+  `check_pod_affinity`, `check_pod_anti_affinity`, and
+  `check_topology_spread_constraints` (full skew calculation: per-domain
+  Pod counts across every Node's own topology value, the candidate Pod
+  hypothetically added to its own domain, checked against `maxSkew`).
+- `scheduling/analyzer.py` -- the three new checks wired into
+  `analyze_pod_scheduling`'s per-node loop; `_detect_unevaluated_constraints`
+  rewritten so a required pod-affinity/anti-affinity term the engine
+  *can* evaluate is never also reported as unevaluated (only the
+  preferred half, or a `namespaceSelector` term, is); new `pods`/
+  `pod_uid` parameters.
+- `scheduling/service.py` -- both `analyze_pod` and `analyze_hypothetical`
+  now call `build_pod_label_inventory()` and pass it through, with
+  `pod_uid` set to the real Pod's own UID for `analyze_pod` (so it
+  excludes itself from matching against its own labels) and `None` for
+  a hypothetical spec (nothing to exclude).
+- `security/rules/availability.py` -- its own local
+  `_pdb_selector_matches` removed in favor of importing the promoted
+  `label_selector_matches`, no behavior change.
+
+**Tests**: 24 new unit tests across `test_scheduling_constraints.py`
+(`TestLabelSelectorMatches`, `TestCheckPodAffinity`,
+`TestCheckPodAntiAffinity`, `TestCheckTopologySpreadConstraints` --
+including the namespaceSelector conservative-asymmetry case in both
+directions, ANDed multiple terms, the candidate Pod excluded from
+matching itself, and topology-spread skew both within and exceeding
+`maxSkew` for both `DoNotSchedule` and `ScheduleAnyway`) and
+`test_scheduling_node_inventory.py` (`TestBuildPodLabelInventory`, 4).
+Four existing tests in `test_scheduling_analyzer.py`'s
+`TestUnevaluatedConstraintDetection` needed rewriting, not just
+updating -- they pinned the *old* "always detected, never evaluated"
+behavior this milestone deliberately changes; replaced with tests that
+distinguish an evaluable required term (not in `unevaluated_constraints`
+anymore) from a preferred entry or `namespaceSelector` term (still is).
+The old `TestPdbSelectorMatches` class in
+`test_security_availability_rule.py` (testing the now-deleted
+`_pdb_selector_matches` directly) was removed; its 5 cases now live as
+`TestLabelSelectorMatches` in `test_scheduling_constraints.py` instead,
+testing the promoted public function in its new home.
+
+**Live-verified against the real cluster**: created two real Pods in
+`kubesentinel-lab` -- one plain Pod labeled `app=anti-affinity-demo`,
+and a second with a required `podAntiAffinity` term against that same
+label on `topologyKey=kubernetes.io/hostname`. On this lab's
+single-node cluster, the real `kube-scheduler` genuinely left the
+second Pod Pending with `FailedScheduling: 0/1 nodes are available: 1
+node(s) didn't match pod anti-affinity rules`. `kubesentinel
+schedule-check kubesentinel-lab anti-affinity-demo-b` independently
+reached the same conclusion through its own math, not by reading the
+scheduler's message: `REQUIRED_POD_ANTI_AFFINITY` reported
+`satisfied: false`, `"found 1 matching Pod(s), expected none
+(anti-affinity)"` -- naming the real conflicting Pod's own effect, in
+the engine's own words, alongside (not instead of) the real scheduler
+message it also carries. Test fixture deleted immediately after.
+`REQUIRED_POD_AFFINITY`/`TOPOLOGY_SPREAD` were also exercised on real
+data in the same run (both trivially satisfied -- no podAffinity or
+topologySpreadConstraints on either demo Pod), confirming they run
+without error against the real cluster even though this single-node
+lab (`docs/SCHEDULING_ANALYSIS.md` Section 11) can't demonstrate a
+topology-spread skew violation or a cross-node affinity match on its
+own; that logic is covered by the unit tests above instead.
+
+**Documentation**: `docs/SCHEDULING_ANALYSIS.md` (Section 2's "evaluated
+for real" / "detected, not evaluated" bullets rewritten; Section 4's
+`ConstraintType` snippet updated to match), `docs/IMPLEMENTATION_STATUS.md`
+(Capability C table rows for pod affinity/anti-affinity and topology
+spread updated to Implemented, split into required/preferred rows),
+`README.md` (Capability C's own summary paragraph updated).
+`docs/PLATFORM_ROADMAP.md`'s Milestone 3 section is left unedited, same
+reasoning as Milestone 30's own precedent -- a historical record of
+that milestone's original scope, with this closure recorded as
+separate follow-up work here instead.
+
+**No new RBAC**: `build_pod_label_inventory()` reuses the exact same
+`clients.core.list_pod_for_all_namespaces()` call `build_node_inventory()`
+already makes -- no new permission category introduced by this
+milestone specifically.
+
+**Full regression suite**: ruff clean, mypy clean, **828 unit tests
+passed** (803 + 25, including 1 renamed/relocated from
+`test_security_availability_rule.py`).
