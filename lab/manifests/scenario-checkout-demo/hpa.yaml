@@ -1,0 +1,38 @@
+# Part of the `checkout-demo` scenario (see deployment.yaml's own
+# header). A real HorizontalPodAutoscaler targeting `checkout-service-demo`
+# -- exercises Capability E (capacity planning & autoscaling advisor)
+# against the same object, read-only, same as every other engine here.
+#
+# Deliberately NOT tuned to force a dramatic "at max, scale up" story --
+# this lab has no metrics-server installed (docs/IMPLEMENTATION_STATUS.md
+# Capability B), so there is no real usage signal to drive utilization
+# anywhere at all. Live-verified result: `HPA_AT_MIN`, current replicas
+# at the floor with no observed pressure -- an honest, undramatic
+# finding from real cluster state, not a staged "at max" outcome. See
+# FAILURE_LAB.md's own entry for why that matters: it's the concrete
+# proof this engine reports what's actually true, not what a plausible
+# illustration predicted.
+#
+# Automatic remediation: not applicable -- no code anywhere in this
+# project patches an HPA's bounds or a workload's replica count.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: checkout-hpa-demo
+  namespace: kubesentinel-lab
+  labels:
+    kubesentinel.io/scenario: checkout-demo
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: checkout-service-demo
+  minReplicas: 1
+  maxReplicas: 3
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 50

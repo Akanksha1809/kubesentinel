@@ -1,0 +1,35 @@
+# Part of the `checkout-demo` scenario (see deployment.yaml's own header
+# for the full cross-engine purpose). A Service whose selector is a
+# plausible typo of the real Pod label (`checkout` vs. the Deployment's
+# own `checkout-service-demo`), not the unrelated-nonsense selector
+# `scenario-service-selector-mismatch` already uses -- a second,
+# independently-caused finding on `checkout-service-demo`, nothing to do
+# with its own OOM/security issues.
+#
+# Expected Kubernetes behavior: the Service is created successfully
+# (Services don't validate that a selector matches anything), but its
+# EndpointSlice has zero endpoints.
+#
+# Expected KubeSentinel diagnosis (Capability D, network troubleshooting
+# engine): `kubesentinel network-check` against the real
+# `checkout-service-demo` Pod reports 0 Services select it at all --
+# `checkout-svc-demo` never appears as a matched Service in that Pod's
+# own finding, the evidence-based way this engine expresses "the
+# selector doesn't match," distinct from the Pod-level troubleshooting
+# engine's own, unrelated OOM diagnosis on the same Pod.
+#
+# Automatic remediation: not applicable -- only a human can fix the
+# selector typo or confirm the intended Pods exist.
+apiVersion: v1
+kind: Service
+metadata:
+  name: checkout-svc-demo
+  namespace: kubesentinel-lab
+  labels:
+    kubesentinel.io/scenario: checkout-demo
+spec:
+  selector:
+    app: checkout
+  ports:
+    - port: 80
+      targetPort: 80

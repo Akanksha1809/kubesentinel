@@ -3929,3 +3929,66 @@ suite: ruff clean, mypy clean, **958 unit tests passed** (944 + 14).
 "Deliberately not built" paragraph updated to drop this item, keeping
 only the still-genuinely-unbuilt Node-metrics ClusterRole; a new
 "Live-verified" paragraph added for this closure specifically).
+
+## Milestone 37: Cross-engine lab scenario (`checkout-demo`) -- DONE
+
+Every lab scenario before this one exists to exercise exactly one
+engine's diagnosis cleanly, one failure mechanism per manifest. This
+one is deliberately the exception: a single Deployment combining two
+already-proven techniques (`scenario-oom`'s OOM trigger,
+`scenario-security-findings`'s unhardened container), plus a
+selector-mismatched Service and a real HPA targeting the same
+Deployment -- built to answer, concretely, "how would all six engines
+actually respond to one broken real-world workload," not to teach a
+new failure mode. First run as a live, improvised walkthrough; kept
+here afterward as a permanent, reusable scenario rather than a one-off,
+per explicit request.
+
+**Added**: `lab/manifests/scenario-checkout-demo/` (`deployment.yaml`,
+`service.yaml`, `hpa.yaml`), each reusing an already-live-verified
+technique rather than inventing a new one -- see each file's own header
+for exactly which existing scenario it borrows from and why. A new
+FAILURE_LAB.md entry documents the full six-engine walkthrough with the
+real results captured from the actual run that produced it (below), not
+a hypothetical description written before testing.
+
+**Live-verified against the real cluster, start to finish, via
+`./lab/scripts/run-scenario.sh checkout-demo` and
+`./lab/scripts/cleanup.sh`** (both the generic, already-existing
+scripts -- no changes needed to either):
+
+- **A (troubleshooting)**: `OOM_KILLED`, HIGH confidence, from the real
+  `exitCode: 137`/`reason: OOMKilled` on the live Pod.
+- **B (optimization)**: `MEMORY` recommendation, flags `OOM_HISTORY` +
+  `UNHEALTHY_WORKLOAD`, no number proposed (no metrics-server in this
+  lab, so no usage evidence to size a limit from).
+- **C (scheduling)**: the real, tiny (16Mi/50m) Pod reports
+  schedulable; a `POST /scheduling/simulate` call with a hypothetical
+  100-core/1000Gi replica of the same workload reports blocked, citing
+  the live node's own exact numbers ("4000m allocatable, 970m already
+  requested, short by 96970m").
+- **D (network)**: independently found the Service selects 0 Pods --
+  the selector typo, with zero relationship to the OOM crash on the
+  same Pod.
+- **E (capacity)**: `HPA_AT_MIN` -- **not** the `HPA_AT_MAX` an
+  illustrative, not-yet-verified walkthrough of this same scenario had
+  guessed beforehand. The real cluster has no metrics-server, so there
+  is no usage signal pushing utilization anywhere; the honest live
+  answer was simpler than the plausible-sounding guess made before
+  running it. Recorded here, and in FAILURE_LAB.md, as the concrete
+  argument for why this project live-verifies every scenario rather
+  than trusting a description of expected behavior.
+- **F (security)**: real `PRIVILEGED_CONTAINER` (CRITICAL),
+  `RUN_AS_ROOT` (MEDIUM), `ALLOW_PRIVILEGE_ESCALATION` +
+  `MISSING_READ_ONLY_ROOT_FS` + `MUTABLE_IMAGE_TAG` (LOW).
+
+**Not wired into `./scripts/demo.sh`'s default scenario set** -- same
+reasoning as every post-Milestone-8 capability-specific scenario
+already isn't; that loop was written for the original troubleshooting
+engine's own 8 scenarios and never extended, and extending it is out of
+this milestone's own scope.
+
+**No test changes** -- this milestone adds lab manifests and
+documentation only, no application code. Full regression suite
+unaffected: ruff clean, mypy clean, 958 unit tests passed (unchanged
+from Milestone 36).

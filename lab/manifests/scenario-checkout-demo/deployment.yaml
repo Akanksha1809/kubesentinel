@@ -1,0 +1,60 @@
+# Scenario: `checkout-demo` -- the one scenario in this lab that
+# deliberately combines two already-proven, independently-verified
+# failure techniques onto a single object, instead of isolating one
+# mechanism per manifest the way every other scenario does. Purpose:
+# demonstrate all six engines reacting to the *same* real Deployment
+# from their own distinct angle, not teach a new failure mode -- see
+# FAILURE_LAB.md's own entry for the full cross-engine walkthrough and
+# its real, live-captured results.
+#
+# How the OOM half is created: identical technique to `scenario-oom`'s
+# own deployment.yaml (an unbounded-looking doubling string, bounded in
+# practice by the 16Mi memory limit) -- reused verbatim rather than
+# reinvented, since it's already proven live.
+#
+# How the security half is created: identical technique to
+# `scenario-security-findings`'s own deployment.yaml (privileged,
+# nothing else hardened) -- also reused verbatim.
+#
+# Expected KubeSentinel diagnosis: OOM_KILLED (HIGH confidence, Capability
+# A) and a MEMORY/OOM_HISTORY recommendation (Capability B) from the
+# crash; PRIVILEGED_CONTAINER (CRITICAL) plus RUN_AS_ROOT/
+# ALLOW_PRIVILEGE_ESCALATION/MISSING_READ_ONLY_ROOT_FS/MUTABLE_IMAGE_TAG
+# (Capability F) from the container spec -- two genuinely independent
+# findings on one object, neither caused by the other.
+#
+# Automatic remediation: NOT safe by default, same reasoning as
+# `scenario-oom` -- restarting does not fix an undersized memory limit;
+# KubeSentinel only recommends an adjustment for a human to apply.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: checkout-service-demo
+  namespace: kubesentinel-lab
+  labels:
+    app: checkout-service-demo
+    kubesentinel.io/scenario: checkout-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: checkout-service-demo
+  template:
+    metadata:
+      labels:
+        app: checkout-service-demo
+    spec:
+      containers:
+        - name: app
+          image: busybox:latest
+          imagePullPolicy: IfNotPresent
+          command: ["sh", "-c", "x='a'; while true; do x=\"$x$x\"; done"]
+          securityContext:
+            privileged: true
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 50m
+              memory: 16Mi

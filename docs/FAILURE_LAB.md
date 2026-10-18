@@ -481,6 +481,73 @@ kubectl apply -f lab/manifests/scenario-transient-recovery/pod.yaml
   integration test (`tests/integration/test_scheduling_live.py`) that also
   confirmed zero non-GET HTTP calls during the full analysis pass.
 
+## Scenario: `checkout-demo` (cross-engine walkthrough, all six capabilities)
+
+The one scenario in this lab that doesn't isolate a single failure
+mechanism -- every scenario above exists to exercise exactly one engine's
+diagnosis cleanly. This one deliberately combines two already-proven
+techniques (`scenario-oom`'s OOM trigger, `scenario-security-findings`'s
+unhardened container) onto a single Deployment, plus a selector-mismatched
+Service and a real HPA targeting it, specifically to show all six
+capabilities reacting to the *same* real object from their own distinct
+angle in one sitting. Built for, and first run as, a live walkthrough
+answering "how would all six engines actually respond to one broken
+real-world workload" -- kept here afterward as a reusable, permanent demo
+rather than a one-off.
+
+- **Manifests**: `lab/manifests/scenario-checkout-demo/` (`deployment.yaml`
+  + `service.yaml` + `hpa.yaml`).
+- **How it's built**: `deployment.yaml` reuses `scenario-oom`'s exact
+  doubling-string-under-a-16Mi-limit technique *and*
+  `scenario-security-findings`'s exact privileged-container technique on
+  one container -- two already-independently-verified failure modes,
+  stacked rather than reinvented. `service.yaml`'s selector
+  (`app: checkout`) is a plausible typo of the Deployment's real label
+  (`app: checkout-service-demo`), not the unrelated-nonsense selector
+  `scenario-service-selector-mismatch` uses -- a third, independently-
+  caused finding on the same object. `hpa.yaml` is a real
+  HorizontalPodAutoscaler targeting the Deployment, deliberately left
+  untuned rather than forced toward a dramatic outcome.
+- **Run it**: `./lab/scripts/run-scenario.sh checkout-demo`. Not included
+  in `./scripts/demo.sh`'s default scenario set (same reasoning as every
+  post-Milestone-8 capability-specific scenario already isn't -- that
+  loop was written for the original troubleshooting engine's own 8
+  scenarios and never extended).
+- **Live-verified results, captured from an actual run against
+  `kind-kubesentinel`, not hypothetical**:
+  - **A (troubleshooting)**: `kubesentinel diagnose` -- `OOM_KILLED`,
+    HIGH confidence, from the real `exitCode: 137`/`reason: OOMKilled`.
+  - **B (optimization)**: `kubesentinel recommendations --workload
+    checkout-service-demo` -- a `MEMORY` finding flagged `OOM_HISTORY` +
+    `UNHEALTHY_WORKLOAD`, no number proposed (no metrics-server in this
+    lab, so no usage evidence to size from).
+  - **C (scheduling)**: `kubesentinel schedule-check` on the real
+    (tiny, 16Mi/50m) Pod reports schedulable; a `POST /scheduling/simulate`
+    call with a hypothetical 100-core/1000Gi replica of the same
+    workload reports blocked, with the live node's own exact arithmetic
+    ("4000m allocatable, 970m already requested, short by 96970m").
+  - **D (network)**: `kubesentinel network-check` on the real Pod
+    independently found `checkout-svc-demo` selects 0 Pods -- the
+    selector typo, found with zero relationship to the OOM crash.
+  - **E (capacity)**: the HPA finding came back `HPA_AT_MIN`, **not** a
+    dramatic `HPA_AT_MAX` -- worth stating explicitly, because an
+    illustrative, not-yet-verified walkthrough of this same scenario
+    guessed `AT_MAX` beforehand. The real cluster has no metrics-server,
+    so there is no usage signal pushing utilization anywhere; the honest
+    live answer was simpler than the plausible-sounding guess. This is
+    the concrete argument for why every "Verified live" entry in this
+    file exists rather than trusting a plausible description.
+  - **F (security)**: `kubesentinel security-findings` -- real
+    `PRIVILEGED_CONTAINER` (CRITICAL), `RUN_AS_ROOT` (MEDIUM),
+    `ALLOW_PRIVILEGE_ESCALATION` + `MISSING_READ_ONLY_ROOT_FS` +
+    `MUTABLE_IMAGE_TAG` (LOW).
+- **Automatic remediation**: not applicable to five of the six findings
+  above (only a human can fix a Service selector, an HPA's bounds, a
+  securityContext, or decide a scheduling constraint); the `MEMORY`
+  recommendation from B is the one finding on this path to a real
+  mutation at all, and only via the standard human-approved
+  `recommendation-apply` flow (docs/RESOURCE_OPTIMIZATION_DESIGN.md §14).
+
 ## Image caching
 
 All scenarios use `busybox:latest` with `imagePullPolicy: IfNotPresent` explicitly
