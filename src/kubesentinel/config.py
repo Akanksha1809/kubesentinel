@@ -225,6 +225,11 @@ class Settings(BaseSettings):
     # downloading its own vulnerability database -- a one-time cost this
     # project does not pre-warm or special-case.
     security_image_scan_timeout_seconds: int = 180
+    # Caps the total number of distinct images one audit() call will run
+    # trivy against -- each call is already timeout-bounded, but a
+    # cluster with many distinct images could otherwise make a single
+    # security-audit call run for an unbounded total duration.
+    security_image_scan_max_images: int = 25
 
     # Active connectivity probe (docs/NETWORK_DIAGNOSTICS.md §12) -- this
     # project's first new mutation capability outside the fully

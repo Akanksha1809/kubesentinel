@@ -336,7 +336,13 @@ class OptimizationService:
                 f"recommendation {recommendation_id} carries safety_flags {stored.safety_flags} -- "
                 "a flagged recommendation can never be applied"
             )
-        if stored.proposed_requests is None and stored.proposed_limits is None:
+        requests_has_value = stored.proposed_requests is not None and (
+            stored.proposed_requests.cpu_millicores is not None or stored.proposed_requests.memory_bytes is not None
+        )
+        limits_has_value = stored.proposed_limits is not None and (
+            stored.proposed_limits.cpu_millicores is not None or stored.proposed_limits.memory_bytes is not None
+        )
+        if not requests_has_value and not limits_has_value:
             raise InvalidRecommendationStateError(
                 f"recommendation {recommendation_id} proposes no requests/limits (category="
                 f"{stored.category.value}) -- nothing to apply"

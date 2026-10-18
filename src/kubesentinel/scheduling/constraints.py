@@ -458,7 +458,11 @@ def check_topology_spread_constraints(
         max_skew = constraint.max_skew or 1
         candidate_value = node.labels.get(topology_key)
         if candidate_value is None:
-            blocking.append(f"topologyKey={topology_key!r}: candidate node has no such label")
+            label = f"topologyKey={topology_key!r}: candidate node has no such label"
+            if (constraint.when_unsatisfiable or "DoNotSchedule") == "DoNotSchedule":
+                blocking.append(label)
+            else:
+                soft.append(label)
             continue
 
         # Count matching Pods per topology domain -- every domain any

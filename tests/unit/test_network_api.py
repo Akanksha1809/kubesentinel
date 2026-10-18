@@ -147,6 +147,9 @@ def test_get_finding_not_found_is_404(api_state):
     assert resp.status_code == 404
 
 
+AUTH_HEADERS = {"Authorization": "Bearer test-token"}
+
+
 @pytest.fixture
 def probe_api_state():
     with tempfile.TemporaryDirectory() as d:
@@ -156,14 +159,26 @@ def probe_api_state():
             name="svc", ports=[V1ServicePort(port=80, target_port=8080)], cluster_ip="10.0.0.5"
         )
         clients.batch.list_namespaced_job.return_value = _items([])
-        settings = Settings(network_probe_enabled=True, network_probe_allowed_namespaces=NAMESPACE)
+        settings = Settings(
+            api_token="test-token", network_probe_enabled=True, network_probe_allowed_namespaces=NAMESPACE
+        )
+        app_module.state.settings = settings
         app_module.state.network = NetworkService(clients, repo, settings)
         yield repo
         repo.close()
 
 
-def test_probe_disabled_by_default_is_403(api_state):
+def test_probe_requires_auth_is_401(api_state):
+    app_module.state.settings = Settings(api_token="test-token")
     resp = client.post("/network/probe", json={"namespace": NAMESPACE, "service_name": "svc", "port": 80})
+    assert resp.status_code == 401
+
+
+def test_probe_disabled_by_default_is_403(api_state):
+    app_module.state.settings = Settings(api_token="test-token")
+    resp = client.post(
+        "/network/probe", json={"namespace": NAMESPACE, "service_name": "svc", "port": 80}, headers=AUTH_HEADERS
+    )
     assert resp.status_code == 403
 
 
@@ -177,7 +192,9 @@ def test_probe_success_returns_200_with_result(probe_api_state):
         ),
         patch("kubesentinel.network.service.probe_module.delete_probe_job"),
     ):
-        resp = client.post("/network/probe", json={"namespace": NAMESPACE, "service_name": "svc", "port": 80})
+        resp = client.post(
+            "/network/probe", json={"namespace": NAMESPACE, "service_name": "svc", "port": 80}, headers=AUTH_HEADERS
+        )
 
     assert resp.status_code == 200
     body = resp.json()
@@ -187,7 +204,9 @@ def test_probe_success_returns_200_with_result(probe_api_state):
 
 
 def test_probe_target_not_found_is_404(probe_api_state):
-    resp = client.post("/network/probe", json={"namespace": NAMESPACE, "service_name": "svc", "port": 9999})
+    resp = client.post(
+        "/network/probe", json={"namespace": NAMESPACE, "service_name": "svc", "port": 9999}, headers=AUTH_HEADERS
+    )
     assert resp.status_code == 404
 
 
@@ -198,9 +217,9 @@ def test_probe_results_list_and_get(probe_api_state):
         patch("kubesentinel.network.service.probe_module.read_job_pod_log", return_value=""),
         patch("kubesentinel.network.service.probe_module.delete_probe_job"),
     ):
-        probe_id = client.post("/network/probe", json={"namespace": NAMESPACE, "service_name": "svc", "port": 80}).json()[
-            "probe_id"
-        ]
+        probe_id = client.post(
+            "/network/probe", json={"namespace": NAMESPACE, "service_name": "svc", "port": 80}, headers=AUTH_HEADERS
+        ).json()["probe_id"]
 
     list_resp = client.get("/network/probe-results", params={"namespace": NAMESPACE})
     assert list_resp.status_code == 200

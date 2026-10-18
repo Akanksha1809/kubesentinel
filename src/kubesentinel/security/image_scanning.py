@@ -152,13 +152,31 @@ def _findings_for_image(
 def scan_images(inventory: SecurityInventory, settings: Settings) -> tuple[list[SecurityFinding], list[str]]:
     """Returns (findings, warnings) -- never raises; a scan failure for
     one image is recorded as a warning and skipped, the rest of the
-    audit (and every other image) proceeds unaffected."""
+    audit (and every other image) proceeds unaffected.
+
+    Each individual `trivy` call is already bounded by
+    `security_image_scan_timeout_seconds`, but that alone doesn't bound
+    the *total* runtime of one audit() call across every distinct image
+    in the cluster -- `security_image_scan_max_images` caps that, same
+    "bound every external call's total cost" principle as every other
+    timeout in this feature. Images beyond the cap are reported as a
+    warning, not silently dropped.
+    """
     if not trivy_available():
         return [], ["image vulnerability scanning enabled but 'trivy' binary not found on PATH -- skipped"]
 
     findings: list[SecurityFinding] = []
     warnings: list[str] = []
-    for image, workloads in _images_to_workloads(inventory).items():
+    images_to_workloads = _images_to_workloads(inventory)
+    max_images = settings.security_image_scan_max_images
+    scanned = list(images_to_workloads.items())[:max_images]
+    skipped = list(images_to_workloads.items())[max_images:]
+    if skipped:
+        warnings.append(
+            f"{len(skipped)} image(s) not scanned -- at the security_image_scan_max_images limit of "
+            f"{max_images}: {', '.join(image for image, _ in skipped)}"
+        )
+    for image, workloads in scanned:
         scan_data = _run_trivy(
             image,
             severity_floor=settings.security_image_scan_min_severity,

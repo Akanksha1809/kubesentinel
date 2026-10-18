@@ -14,6 +14,7 @@ guarding it in the same file, rather than split across modules.
 
 from __future__ import annotations
 
+import threading
 from datetime import datetime, timezone
 
 from kubernetes.client.rest import ApiException
@@ -66,6 +67,12 @@ class NetworkService:
         self._repo = repo
         self._settings = settings
         self._incident_repo = incident_repo
+        # Holds for the entire cooldown-check -> concurrency-check -> create-Job
+        # sequence in run_probe() -- without it, two concurrent calls can both
+        # read "no active probe yet" before either creates one, exceeding
+        # network_probe_max_concurrent_per_namespace. Same bug class
+        # RemediationService._propose_lock already closes for propose().
+        self._probe_lock = threading.Lock()
 
     def _open_incident_ids_for(self, *uids: str) -> list[str]:
         """Same dual-UID, deduped lookup `OptimizationService`/
@@ -171,46 +178,51 @@ class NetworkService:
             network_probe_total.labels(result="denied").inc()
             raise ProbeTargetError(f"port {port!r} does not resolve against any of {namespace}/{service_name}'s ports")
 
-        recent = self._repo.list_probe_results(namespace=namespace, service_name=service_name, port=resolved_port)
-        if recent:
-            elapsed = (datetime.now(timezone.utc) - recent[0].requested_at).total_seconds()
-            if elapsed < self._settings.network_probe_cooldown_seconds:
+        # Holds `_probe_lock` for the entire cooldown-check -> concurrency-check
+        # -> create-Job sequence -- see the lock's own docstring in __init__ for
+        # the concurrency bug this closes (same class RemediationService's own
+        # `_propose_lock` already closes for propose()).
+        with self._probe_lock:
+            recent = self._repo.list_probe_results(namespace=namespace, service_name=service_name, port=resolved_port)
+            if recent:
+                elapsed = (datetime.now(timezone.utc) - recent[0].requested_at).total_seconds()
+                if elapsed < self._settings.network_probe_cooldown_seconds:
+                    network_probe_total.labels(result="denied").inc()
+                    raise ProbeDeniedError(
+                        f"cooldown active: this target was last probed {elapsed:.0f}s ago, cooldown is "
+                        f"{self._settings.network_probe_cooldown_seconds}s"
+                    )
+
+            active = probe_module.count_active_probe_jobs(self._clients, namespace, api_timeout_seconds=api_timeout)
+            if active >= self._settings.network_probe_max_concurrent_per_namespace:
                 network_probe_total.labels(result="denied").inc()
                 raise ProbeDeniedError(
-                    f"cooldown active: this target was last probed {elapsed:.0f}s ago, cooldown is "
-                    f"{self._settings.network_probe_cooldown_seconds}s"
+                    f"{active} probe(s) already active in namespace '{namespace}', at or above the limit of "
+                    f"{self._settings.network_probe_max_concurrent_per_namespace}"
                 )
 
-        active = probe_module.count_active_probe_jobs(self._clients, namespace, api_timeout_seconds=api_timeout)
-        if active >= self._settings.network_probe_max_concurrent_per_namespace:
-            network_probe_total.labels(result="denied").inc()
-            raise ProbeDeniedError(
-                f"{active} probe(s) already active in namespace '{namespace}', at or above the limit of "
-                f"{self._settings.network_probe_max_concurrent_per_namespace}"
+            cluster_ip = service.spec.cluster_ip
+            tcp_applicable = cluster_ip not in (None, "", "None")
+            requested_at = datetime.now(timezone.utc)
+            job_name = probe_module.new_probe_job_name()
+            # The Service's full in-namespace FQDN, never the bare short name
+            # -- see Settings.network_probe_cluster_domain's own docstring for
+            # why (a live-caught BusyBox nslookup exit-code quirk).
+            fqdn = f"{service_name}.{namespace}.svc.{self._settings.network_probe_cluster_domain}"
+            job = probe_module.build_probe_job(
+                job_name=job_name,
+                host=fqdn,
+                cluster_ip=cluster_ip if tcp_applicable else None,
+                port=resolved_port,
+                timeout_seconds=self._settings.network_probe_tcp_timeout_seconds,
+                active_deadline_seconds=self._settings.network_probe_job_timeout_seconds,
+                ttl_seconds=self._settings.network_probe_job_ttl_seconds,
             )
-
-        cluster_ip = service.spec.cluster_ip
-        tcp_applicable = cluster_ip not in (None, "", "None")
-        requested_at = datetime.now(timezone.utc)
-        job_name = probe_module.new_probe_job_name()
-        # The Service's full in-namespace FQDN, never the bare short name
-        # -- see Settings.network_probe_cluster_domain's own docstring for
-        # why (a live-caught BusyBox nslookup exit-code quirk).
-        fqdn = f"{service_name}.{namespace}.svc.{self._settings.network_probe_cluster_domain}"
-        job = probe_module.build_probe_job(
-            job_name=job_name,
-            host=fqdn,
-            cluster_ip=cluster_ip if tcp_applicable else None,
-            port=resolved_port,
-            timeout_seconds=self._settings.network_probe_tcp_timeout_seconds,
-            active_deadline_seconds=self._settings.network_probe_job_timeout_seconds,
-            ttl_seconds=self._settings.network_probe_job_ttl_seconds,
-        )
+            probe_module.create_probe_job(self._clients, namespace, job, api_timeout_seconds=api_timeout)
 
         error: str | None = None
         log = ""
         try:
-            probe_module.create_probe_job(self._clients, namespace, job, api_timeout_seconds=api_timeout)
             completed = probe_module.wait_for_job_completion(
                 self._clients,
                 namespace,

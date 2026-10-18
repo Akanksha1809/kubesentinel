@@ -153,9 +153,22 @@ class RemediationExecutor:
         key (only the named container is touched), and `resources.requests`/
         `resources.limits` are plain maps, deep-merged key-by-key (setting
         `cpu` leaves an existing `memory` key, if any, untouched).
+
+        `container_name` is checked against the live Deployment before
+        patching: the merge key only merges into an *existing* entry, so a
+        stale name (renamed/removed since the recommendation was created)
+        would otherwise make Kubernetes append a new, invalid container
+        instead of failing with a clear reason.
         """
         deployment = self._verify_identity(target)
         container_name = parameters["container_name"]
+        containers = deployment.spec.template.spec.containers or []
+        if not any(c.name == container_name for c in containers):
+            raise ValueError(
+                f"container '{container_name}' not found on Deployment "
+                f"'{target.namespace}/{target.resource_name}' -- it may have been renamed or removed "
+                "since this action was proposed; refusing to act on it"
+            )
         resources: dict = {}
         if parameters.get("requests"):
             resources["requests"] = parameters["requests"]

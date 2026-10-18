@@ -490,3 +490,17 @@ class TestCheckTopologySpreadConstraints:
             [constraint], candidate_namespace="default", candidate_uid=None, node=node_b, nodes=[node_a, node_b], pods=[]
         )
         assert result.satisfied is False
+
+    def test_candidate_node_missing_topology_label_schedule_anyway_is_non_blocking(self):
+        node_a = _node(name="node-a", labels={"zone": "a"})
+        node_b = _node(name="node-b", labels={})
+        constraint = V1TopologySpreadConstraint(
+            max_skew=1,
+            topology_key="zone",
+            when_unsatisfiable="ScheduleAnyway",
+            label_selector=V1LabelSelector(match_labels={"app": "web"}),
+        )
+        result = check_topology_spread_constraints(
+            [constraint], candidate_namespace="default", candidate_uid=None, node=node_b, nodes=[node_a, node_b], pods=[]
+        )
+        assert result.satisfied is True

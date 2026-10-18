@@ -12,10 +12,10 @@ other two routers already avoid.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from kubesentinel.api.state import state
+from kubesentinel.api.state import require_api_token, state
 from kubesentinel.models.network import NetworkFindingClassification
 from kubesentinel.network.service import (
     FindingNotFoundError,
@@ -82,12 +82,15 @@ def get_finding(finding_id: str) -> dict:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
-@router.post("/probe")
+@router.post("/probe", dependencies=[Depends(require_api_token)])
 def run_probe(body: ProbeRequest) -> dict:
     """Creates, waits on, and deletes one short-lived diagnostic Job
     testing DNS resolution and a raw TCP connect against a real Service.
     403 (not 503) means the feature is off or this specific request was
-    denied -- distinct from the cluster being unreachable."""
+    denied -- distinct from the cluster being unreachable. Gated by
+    `require_api_token`, same as every other mutating endpoint in this
+    project (see app.py's own module docstring) -- this creates a real
+    Job in the cluster, it is not read-only like the routes above it."""
     service = _require_network_service()
     try:
         result = service.run_probe(
