@@ -21,7 +21,7 @@ fi
 
 if [[ "$SCENARIO" == "all" ]]; then
   for s in crashloop oom imagepull pvc-binding service-selector-mismatch \
-           pending-resources readiness-probe-failure failed-rollout; do
+           pending-resources readiness-probe-failure failed-rollout checkout-demo; do
     ./lab/scripts/run-scenario.sh "$s"
   done
   kubectl apply -f lab/manifests/scenario-transient-recovery/pod.yaml

@@ -3982,11 +3982,15 @@ scripts -- no changes needed to either):
   `RUN_AS_ROOT` (MEDIUM), `ALLOW_PRIVILEGE_ESCALATION` +
   `MISSING_READ_ONLY_ROOT_FS` + `MUTABLE_IMAGE_TAG` (LOW).
 
-**Not wired into `./scripts/demo.sh`'s default scenario set** -- same
-reasoning as every post-Milestone-8 capability-specific scenario
-already isn't; that loop was written for the original troubleshooting
-engine's own 8 scenarios and never extended, and extending it is out of
-this milestone's own scope.
+**Wired into `./scripts/demo.sh`'s default scenario set** -- added
+there by explicit follow-up request in the same session, immediately
+after this milestone's own initial close (which had deliberately left
+it out, for the same reason every post-Milestone-8 capability-specific
+scenario still isn't: that loop was written for the original
+troubleshooting engine's own 8 scenarios and never extended as a
+general backfill). This one addition is scoped to `checkout-demo`
+alone, not a backfill of the other five capability-specific scenarios
+that loop still doesn't cover.
 
 **No test changes** -- this milestone adds lab manifests and
 documentation only, no application code. Full regression suite

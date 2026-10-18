@@ -508,11 +508,11 @@ rather than a one-off.
   caused finding on the same object. `hpa.yaml` is a real
   HorizontalPodAutoscaler targeting the Deployment, deliberately left
   untuned rather than forced toward a dramatic outcome.
-- **Run it**: `./lab/scripts/run-scenario.sh checkout-demo`. Not included
-  in `./scripts/demo.sh`'s default scenario set (same reasoning as every
-  post-Milestone-8 capability-specific scenario already isn't -- that
-  loop was written for the original troubleshooting engine's own 8
-  scenarios and never extended).
+- **Run it**: `./lab/scripts/run-scenario.sh checkout-demo`, or
+  `./scripts/demo.sh all` (included in that default set by explicit
+  request -- unlike every post-Milestone-8 capability-specific scenario,
+  which that loop still doesn't cover; this one was added on its own,
+  not as part of a broader backfill).
 - **Live-verified results, captured from an actual run against
   `kind-kubesentinel`, not hypothetical**:
   - **A (troubleshooting)**: `kubesentinel diagnose` -- `OOM_KILLED`,
