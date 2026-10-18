@@ -235,6 +235,136 @@ class RemediationService:
         self._repo.save(incident)
         return action
 
+    # -- Standalone actions: no owning Incident at all (docs/
+    # RESOURCE_OPTIMIZATION_DESIGN.md Section 14.1) -- e.g. applying a
+    # ResourceRecommendation, which usually has no incident. Same
+    # propose -> policy -> maybe-execute shape as propose() above, same
+    # PolicyEngine/RemediationExecutor/RecoveryVerifier underneath, just
+    # persisted independently (save_standalone_action) rather than nested
+    # inside an Incident's own .actions list, and with no diagnosis to
+    # draw hypothesis_confidence/auto_remediation_permitted from -- both
+    # are fixed at their most conservative values (INCONCLUSIVE/False),
+    # which already makes CONTROLLED_AUTO's unattended path unreachable
+    # for any standalone action, before even considering
+    # _ALWAYS_REQUIRES_APPROVAL.
+
+    def propose_standalone(
+        self,
+        *,
+        target: ActionTarget,
+        action_type: ActionType,
+        rationale: str,
+        category: str,
+        parameters: dict | None = None,
+        target_desired_replicas: int | None = None,
+    ) -> RemediationAction:
+        with self._propose_lock:
+            action = RemediationAction(
+                action_id=str(uuid4()),
+                incident_id=None,
+                action_type=action_type,
+                target=target,
+                rationale=rationale,
+                parameters=parameters or {},
+                proposed_at=datetime.now(timezone.utc),
+            )
+            now = action.proposed_at
+            request = PolicyRequest(
+                action_type=action_type,
+                target=target,
+                incident_id=None,
+                incident_severity=None,
+                hypothesis_confidence=Confidence.INCONCLUSIVE,
+                hypothesis_auto_remediation_permitted=False,
+                now=now,
+                target_desired_replicas=target_desired_replicas,
+                recent_actions=self._repo.list_actions_since(
+                    now - timedelta(seconds=self._settings.action_window_seconds)
+                ),
+            )
+            decision = self._policy.evaluate(request)
+            remediation_attempts_total.labels(action_type=action_type.value).inc()
+
+            if decision.outcome == PolicyOutcome.DENIED:
+                action.status = ActionStatus.REJECTED
+                action.execution_error = f"denied by policy: {decision.reason}"
+                remediation_failures_total.labels(action_type=action_type.value, reason="policy_denied").inc()
+            elif decision.outcome == PolicyOutcome.REQUIRES_APPROVAL:
+                action.status = ActionStatus.PENDING_APPROVAL
+                actions_requiring_approval.labels(action_type=action_type.value).inc()
+            else:  # ALLOWED
+                action.status = ActionStatus.APPROVED
+                action.approved_at = now
+                action.approved_by = "policy-engine(CONTROLLED_AUTO)"
+                self._run(action, category)
+
+            self._repo.save_standalone_action(action)
+            return action
+
+    def dry_run_standalone(
+        self,
+        *,
+        target: ActionTarget,
+        action_type: ActionType,
+        target_desired_replicas: int | None = None,
+    ) -> PolicyDecision:
+        """Preview, zero side effects -- mirrors `dry_run()` above."""
+        now = datetime.now(timezone.utc)
+        request = PolicyRequest(
+            action_type=action_type,
+            target=target,
+            incident_id=None,
+            incident_severity=None,
+            hypothesis_confidence=Confidence.INCONCLUSIVE,
+            hypothesis_auto_remediation_permitted=False,
+            now=now,
+            target_desired_replicas=target_desired_replicas,
+            recent_actions=self._repo.list_actions_since(now - timedelta(seconds=self._settings.action_window_seconds)),
+        )
+        return self._policy.evaluate(request)
+
+    def approve_standalone(self, action_id: str, approved_by: str) -> RemediationAction:
+        action = self._find_standalone_action(action_id)
+        if action.status != ActionStatus.PENDING_APPROVAL:
+            raise InvalidActionStateError(
+                f"action {action_id} is {action.status.value}, not PENDING_APPROVAL -- cannot approve"
+            )
+        action.status = ActionStatus.APPROVED
+        action.approved_at = datetime.now(timezone.utc)
+        action.approved_by = approved_by
+        self._repo.save_standalone_action(action)
+        return action
+
+    def execute_standalone(self, action_id: str, category: str) -> RemediationAction:
+        action = self._find_standalone_action(action_id)
+        if action.status != ActionStatus.APPROVED:
+            raise InvalidActionStateError(
+                f"action {action_id} is {action.status.value}, not APPROVED -- cannot execute"
+            )
+        self._run(action, category)
+        self._repo.save_standalone_action(action)
+        return action
+
+    def reject_standalone(self, action_id: str, rejected_by: str, reason: str) -> RemediationAction:
+        action = self._find_standalone_action(action_id)
+        if action.status != ActionStatus.PENDING_APPROVAL:
+            raise InvalidActionStateError(
+                f"action {action_id} is {action.status.value}, not PENDING_APPROVAL -- cannot reject"
+            )
+        action.status = ActionStatus.REJECTED
+        action.execution_error = f"rejected by {rejected_by}: {reason}"
+        self._repo.save_standalone_action(action)
+        return action
+
+    def get_standalone_action(self, action_id: str) -> RemediationAction:
+        return self._find_standalone_action(action_id)
+
+    def _find_standalone_action(self, action_id: str) -> RemediationAction:
+        action = self._repo.get_standalone_action(action_id)
+        if action is None:
+            raise ActionNotFoundError(f"no standalone action {action_id}")
+        return action
+
     def _run(self, action: RemediationAction, incident_category: str) -> None:
         action.status = ActionStatus.EXECUTING
         self._executor.execute(action)  # mutates action's status/result/error in place

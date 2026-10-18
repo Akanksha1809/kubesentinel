@@ -18,10 +18,12 @@ from kubesentinel.metrics.registry import (
     optimization_metrics_data_available,
     optimization_recommendations_total,
 )
+from kubesentinel.models.action import ActionStatus, ActionTarget, ActionType, RemediationAction
 from kubesentinel.models.optimization import (
     AnalysisRunSummary,
     RecommendationStatus,
     ResourceRecommendation,
+    WorkloadKind,
     WorkloadSnapshot,
 )
 from kubesentinel.observer.client import ClusterClients
@@ -36,6 +38,7 @@ from kubesentinel.optimization.metrics_providers import (
 )
 from kubesentinel.optimization.safety import apply_safety_checks
 from kubesentinel.persistence.interface import IncidentRepository, OptimizationRepository
+from kubesentinel.remediation.service import RemediationService
 from kubesentinel.scheduling.node_inventory import build_node_inventory
 
 logger = logging.getLogger(__name__)
@@ -45,6 +48,12 @@ _REVIEW_DECISIONS = (RecommendationStatus.REVIEWED, RecommendationStatus.APPROVE
 
 class RecommendationNotFoundError(Exception):
     pass
+
+
+class RemediationNotConfiguredError(Exception):
+    """Raised by `apply_recommendation` when no `RemediationService` was
+    wired up at construction time -- analyze/review work fine without
+    one; only applying needs it."""
 
 
 class InvalidRecommendationStateError(Exception):
@@ -74,11 +83,18 @@ class OptimizationService:
         repo: OptimizationRepository,
         settings: Settings,
         incident_repo: IncidentRepository | None = None,
+        remediation: RemediationService | None = None,
     ):
         self._clients = clients
         self._repo = repo
         self._settings = settings
         self._incident_repo = incident_repo
+        # None means "analyze/review only, no apply path wired up" -- the
+        # same optional-dependency shape incident_repo already has.
+        # apply_recommendation() raises a clear error rather than silently
+        # no-op'ing if a caller invokes it without one configured (see
+        # docs/RESOURCE_OPTIMIZATION_DESIGN.md Section 14).
+        self._remediation = remediation
         self._sample_store = InMemorySampleStore(max_samples_per_key=settings.optimization_sample_store_max_samples)
         self._metrics_provider = MetricsApiProvider(clients.custom_objects, settings.optimization_metrics_timeout_seconds)
 
@@ -285,3 +301,93 @@ class OptimizationService:
         stored.review_notes = notes
         self._repo.save_recommendation(stored)
         return stored
+
+    def apply_recommendation(self, recommendation_id: str, rationale: str) -> RemediationAction:
+        """Creates a standalone RemediationAction applying this
+        recommendation's own proposed requests/limits -- see
+        docs/RESOURCE_OPTIMIZATION_DESIGN.md Section 14.2 for the full list
+        of preconditions checked here, each raising its own specific,
+        named reason. Always ends up PENDING_APPROVAL in practice
+        (ADJUST_RESOURCES is in PolicyEngine._ALWAYS_REQUIRES_APPROVAL) --
+        a human still calls the usual approve/execute on the returned
+        action's own ID, exactly like any other action."""
+        if self._remediation is None:
+            raise RemediationNotConfiguredError(
+                "no RemediationService configured -- this OptimizationService can analyze/review but not apply"
+            )
+        stored = self._repo.get_recommendation(recommendation_id)
+        if stored is None:
+            raise RecommendationNotFoundError(f"no recommendation {recommendation_id}")
+
+        now = datetime.now(timezone.utc)
+        effective = _with_effective_status(stored, now)
+        if effective.status == RecommendationStatus.EXPIRED:
+            raise InvalidRecommendationStateError(
+                f"recommendation {recommendation_id} is EXPIRED (as of {stored.expires_at.isoformat()}) -- "
+                "re-run analyze() to get a current one before applying it; never act on stale evidence"
+            )
+        if stored.status != RecommendationStatus.APPROVED:
+            raise InvalidRecommendationStateError(
+                f"recommendation {recommendation_id} is {stored.status.value}, not APPROVED -- "
+                "a human must approve this exact number before it can be applied"
+            )
+        if stored.safety_flags:
+            raise InvalidRecommendationStateError(
+                f"recommendation {recommendation_id} carries safety_flags {stored.safety_flags} -- "
+                "a flagged recommendation can never be applied"
+            )
+        if stored.proposed_requests is None and stored.proposed_limits is None:
+            raise InvalidRecommendationStateError(
+                f"recommendation {recommendation_id} proposes no requests/limits (category="
+                f"{stored.category.value}) -- nothing to apply"
+            )
+        if stored.workload_kind != WorkloadKind.DEPLOYMENT:
+            raise InvalidRecommendationStateError(
+                f"recommendation {recommendation_id} targets a {stored.workload_kind.value}, not a Deployment -- "
+                "applying a resource adjustment is only supported for Deployments"
+            )
+        if stored.applied_action_id is not None:
+            raise InvalidRecommendationStateError(
+                f"recommendation {recommendation_id} already has an application in flight/done -- "
+                f"see action {stored.applied_action_id}; re-run analyze() for a fresh recommendation to try again"
+            )
+
+        target = ActionTarget(
+            namespace=stored.namespace,
+            resource_type=stored.workload_kind.value,
+            resource_name=stored.workload_name,
+            resource_uid=stored.workload_uid,
+        )
+        requests: dict[str, str] = {}
+        if stored.proposed_requests is not None:
+            if stored.proposed_requests.cpu_millicores is not None:
+                requests["cpu"] = f"{stored.proposed_requests.cpu_millicores}m"
+            if stored.proposed_requests.memory_bytes is not None:
+                requests["memory"] = str(stored.proposed_requests.memory_bytes)
+        limits: dict[str, str] = {}
+        if stored.proposed_limits is not None:
+            if stored.proposed_limits.cpu_millicores is not None:
+                limits["cpu"] = f"{stored.proposed_limits.cpu_millicores}m"
+            if stored.proposed_limits.memory_bytes is not None:
+                limits["memory"] = str(stored.proposed_limits.memory_bytes)
+
+        action = self._remediation.propose_standalone(
+            target=target,
+            action_type=ActionType.ADJUST_RESOURCES,
+            rationale=rationale,
+            category="RESOURCE_OPTIMIZATION",
+            parameters={"container_name": stored.container_name, "requests": requests, "limits": limits},
+        )
+        # A REJECTED action never touched the cluster (e.g. denied by
+        # policy_mode=OBSERVE, or a namespace/cooldown/budget denial) --
+        # caught live: without this check, a single policy-denied attempt
+        # permanently locked this recommendation out of ever being
+        # retried, even after the operator fixed whatever caused the
+        # denial. Mirrors the exact same "a REJECTED action never counts"
+        # discipline policy/engine.py's own cooldown/budget checks already
+        # apply -- this is that same principle, applied here too, not a
+        # new one.
+        if action.status != ActionStatus.REJECTED:
+            stored.applied_action_id = action.action_id
+            self._repo.save_recommendation(stored)
+        return action

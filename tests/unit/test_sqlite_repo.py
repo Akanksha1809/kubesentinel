@@ -5,7 +5,7 @@ from uuid import uuid4
 
 import pytest
 
-from kubesentinel.models.action import ActionTarget, ActionType, RemediationAction
+from kubesentinel.models.action import ActionStatus, ActionTarget, ActionType, RemediationAction
 from kubesentinel.models.incident import Incident, IncidentStatus, ResourceRef
 from kubesentinel.persistence.sqlite_repo import SQLiteIncidentRepository
 
@@ -107,3 +107,58 @@ def test_list_actions_since_spans_incidents_and_filters_by_time(repo):
 def test_list_actions_since_returns_empty_when_none_match(repo):
     repo.save(_incident("uid-9"))
     assert repo.list_actions_since(datetime.now(timezone.utc)) == []
+
+
+def _standalone_action(proposed_at: datetime) -> RemediationAction:
+    return RemediationAction(
+        action_id=str(uuid4()),
+        incident_id=None,
+        action_type=ActionType.ADJUST_RESOURCES,
+        target=ActionTarget(namespace="kubesentinel-lab", resource_type="Deployment", resource_name="demo"),
+        rationale="test",
+        proposed_at=proposed_at,
+    )
+
+
+class TestStandaloneActions:
+    def test_save_and_get_roundtrip(self, repo):
+        action = _standalone_action(datetime.now(timezone.utc))
+        repo.save_standalone_action(action)
+
+        loaded = repo.get_standalone_action(action.action_id)
+        assert loaded is not None
+        assert loaded.action_id == action.action_id
+        assert loaded.incident_id is None
+
+    def test_get_missing_returns_none(self, repo):
+        assert repo.get_standalone_action("does-not-exist") is None
+
+    def test_save_is_an_upsert(self, repo):
+        action = _standalone_action(datetime.now(timezone.utc))
+        repo.save_standalone_action(action)
+
+        action.status = ActionStatus.EXECUTED
+        repo.save_standalone_action(action)
+
+        loaded = repo.get_standalone_action(action.action_id)
+        assert loaded.status == ActionStatus.EXECUTED
+
+    def test_list_actions_since_includes_standalone_actions_alongside_incident_ones(self, repo):
+        now = datetime.now(timezone.utc)
+        incident = _incident("uid-10")
+        incident.actions = [_action(incident.incident_id, now - timedelta(seconds=10))]
+        repo.save(incident)
+
+        standalone = _standalone_action(now - timedelta(seconds=5))
+        repo.save_standalone_action(standalone)
+
+        results = repo.list_actions_since(now - timedelta(seconds=60))
+        assert len(results) == 2
+        assert any(a.incident_id is None for a in results)
+        assert any(a.incident_id == incident.incident_id for a in results)
+
+    def test_list_actions_since_filters_standalone_actions_by_time(self, repo):
+        now = datetime.now(timezone.utc)
+        repo.save_standalone_action(_standalone_action(now - timedelta(seconds=9999)))
+
+        assert repo.list_actions_since(now - timedelta(seconds=60)) == []

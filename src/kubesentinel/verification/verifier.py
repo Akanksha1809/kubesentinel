@@ -39,7 +39,11 @@ _ADVISORY_ACTION_TYPES = {ActionType.RECOMMEND_RESOURCE_ADJUSTMENT, ActionType.R
 # completed -- updatedReplicas caught up to desired too -- the same thing
 # `kubectl rollout status` waits for. SCALE_DEPLOYMENT doesn't start a new
 # rollout, so the simpler aggregate check is the correct one for it.
-_ROLLOUT_AWARE_ACTION_TYPES = {ActionType.RESTART_DEPLOYMENT, ActionType.ROLLBACK_DEPLOYMENT}
+# ADJUST_RESOURCES (docs/RESOURCE_OPTIMIZATION_DESIGN.md Section 14.4) also
+# patches spec.template.spec.containers[].resources -- the same template
+# change, the same new-rollout behavior, so it belongs in this set for
+# exactly the same reason RESTART/ROLLBACK are, not a new reason.
+_ROLLOUT_AWARE_ACTION_TYPES = {ActionType.RESTART_DEPLOYMENT, ActionType.ROLLBACK_DEPLOYMENT, ActionType.ADJUST_RESOURCES}
 
 
 def _rollout_complete(evidence: list[Evidence]) -> bool:

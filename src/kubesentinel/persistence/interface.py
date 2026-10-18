@@ -40,15 +40,30 @@ class IncidentRepository(ABC):
 
     @abstractmethod
     def list_actions_since(self, since: datetime) -> builtins.list[RemediationAction]:
-        """Every RemediationAction proposed at or after `since`, across all incidents.
-
-        Used for the policy engine's per-window action budget -- a global rate
-        limit independent of which incident each action belongs to.
+        """Every RemediationAction proposed at or after `since`, across all
+        incidents *and* every standalone action (see
+        `save_standalone_action` below) -- the policy engine's per-window
+        budget must bound every mutation this project ever makes, not just
+        the incident-driven ones.
 
         Return type is spelled `builtins.list[...]` rather than `list[...]` --
         this class already defines a method named `list` above, which shadows the
         builtin name within this class body's annotation scope.
         """
+        ...
+
+    @abstractmethod
+    def get_standalone_action(self, action_id: str) -> RemediationAction | None:
+        """A RemediationAction with no owning Incident (`incident_id is
+        None`) -- e.g. one created by `RemediationService.
+        propose_standalone()` to apply a ResourceRecommendation. Stored
+        independently, never nested inside an Incident's own `.actions`
+        list (see docs/RESOURCE_OPTIMIZATION_DESIGN.md Section 14.1)."""
+        ...
+
+    @abstractmethod
+    def save_standalone_action(self, action: RemediationAction) -> None:
+        """Upsert by `action_id`."""
         ...
 
 

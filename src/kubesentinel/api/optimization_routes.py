@@ -1,9 +1,10 @@
-"""Optimization engine API routes: read-only analysis, recommendations, and
-human review. No apply endpoint exists -- see
-RESOURCE_OPTIMIZATION_DESIGN.md §6 for why that's deliberate, not an
-oversight: there is no code in this project that patches a workload's
-resources, so exposing an endpoint that implied there was would be exactly
-the "misleading endpoint for unimplemented behavior" the spec warns against.
+"""Optimization engine API routes: read-only analysis, recommendations,
+human review, and -- as of docs/RESOURCE_OPTIMIZATION_DESIGN.md Section
+14 -- applying an already-approved recommendation. `review` still never
+touches the cluster; `apply` creates a standalone, policy-gated
+RemediationAction (reachable afterward through the sibling
+`/actions/{action_id}/...` routes in `app.py`, never a parallel approval
+system of its own).
 
 A separate `APIRouter` (this project's first) rather than appending ~150
 more lines directly into `app.py`, which was already long -- `include_router`
@@ -24,6 +25,7 @@ from kubesentinel.optimization.service import (
     InvalidRecommendationStateError,
     OptimizationService,
     RecommendationNotFoundError,
+    RemediationNotConfiguredError,
 )
 
 router = APIRouter(prefix="/optimization", tags=["optimization"])
@@ -128,3 +130,28 @@ def review_recommendation(recommendation_id: str, body: ReviewRequest) -> dict:
     except InvalidRecommendationStateError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return recommendation.model_dump(mode="json")
+
+
+class ApplyRequest(BaseModel):
+    rationale: str
+
+
+@router.post("/recommendations/{recommendation_id}/apply", dependencies=[Depends(require_api_token)])
+def apply_recommendation(recommendation_id: str, body: ApplyRequest) -> dict:
+    """Creates a standalone RemediationAction applying this recommendation's
+    own proposed requests/limits -- see docs/RESOURCE_OPTIMIZATION_DESIGN.md
+    Section 14.2 for every precondition this can 409 on (not yet APPROVED,
+    EXPIRED, carries safety_flags, nothing proposed, not a Deployment,
+    already applied). The returned action is always PENDING_APPROVAL in
+    practice (ADJUST_RESOURCES never auto-executes) -- a human still calls
+    the usual `/actions/{action_id}/approve` + `/execute` on it."""
+    service = _require_optimization_service()
+    try:
+        action = service.apply_recommendation(recommendation_id, body.rationale)
+    except RecommendationNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except InvalidRecommendationStateError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except RemediationNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return action.model_dump(mode="json")

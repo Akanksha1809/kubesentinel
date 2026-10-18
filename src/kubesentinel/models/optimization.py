@@ -50,10 +50,13 @@ class RecommendationStatus(str, Enum):
     APPROVED = "APPROVED"
     REJECTED = "REJECTED"
     EXPIRED = "EXPIRED"
-    # Deliberately no APPLIED/FAILED here -- there is no apply path in this
-    # phase (see RESOURCE_OPTIMIZATION_DESIGN.md §6). Adding those statuses
-    # ahead of the code that would set them would be exactly the kind of
-    # premature scaffolding this project avoids elsewhere.
+    # Still deliberately no APPLIED/FAILED here, even though an apply path
+    # now exists (RESOURCE_OPTIMIZATION_DESIGN.md Section 14): this status
+    # describes a human's own review judgment ("is this number sound"),
+    # kept cleanly separate from whether applying it succeeded -- that's
+    # answered by following ResourceRecommendation.applied_action_id to
+    # the RemediationAction's own status instead, never by overloading
+    # this enum with a second, unrelated kind of state.
 
 
 class WorkloadKind(str, Enum):
@@ -196,6 +199,15 @@ class ResourceRecommendation(BaseModel):
     namespace: str
     workload_kind: WorkloadKind
     workload_name: str
+    # The WorkloadSnapshot's own UID this recommendation was derived from --
+    # None only for hand-built recommendations (e.g. test fixtures) that
+    # never went through the real inventory; every recommendation a real
+    # analyze() pass produces always sets this. Used by
+    # OptimizationService.apply_recommendation() as the ActionTarget's own
+    # resource_uid, the same "has this resource changed since proposal"
+    # identity check every other action type already gets from
+    # incident.resource.uid (see RESOURCE_OPTIMIZATION_DESIGN.md Section 14.2).
+    workload_uid: str | None = None
     container_name: str
     category: RecommendationCategory
 
@@ -221,6 +233,16 @@ class ResourceRecommendation(BaseModel):
     status: RecommendationStatus = RecommendationStatus.NEW
     created_at: datetime
     expires_at: datetime
+
+    # Set once OptimizationService.apply_recommendation() successfully
+    # creates a standalone RemediationAction for this recommendation --
+    # None means "never applied." Same ID-only link pattern as
+    # related_incident_ids: never a live object reference, and this
+    # recommendation's own `status` is never overloaded to also mean
+    # "application succeeded/failed" (see RecommendationStatus's own
+    # docstring above) -- follow this ID to the action's own status for
+    # that instead.
+    applied_action_id: str | None = None
 
     reviewed_by: str | None = None
     reviewed_at: datetime | None = None

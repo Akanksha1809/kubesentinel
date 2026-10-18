@@ -56,6 +56,8 @@ class RemediationExecutor:
                 result = self._rollback(action.target, action.parameters.get("revision"))
             elif action.action_type == ActionType.SCALE_DEPLOYMENT:
                 result = self._scale(action.target, action.parameters["replicas"])
+            elif action.action_type == ActionType.ADJUST_RESOURCES:
+                result = self._adjust_resources(action.target, action.parameters)
             elif action.action_type == ActionType.RECOMMEND_RESOURCE_ADJUSTMENT:
                 result = self._recommend_resource_adjustment(action.parameters)
             elif action.action_type == ActionType.RECOMMEND_CONFIG_FIX:
@@ -134,6 +136,50 @@ class RemediationExecutor:
             _request_timeout=self._timeout,
         )
         return {"previous_replicas": previous_replicas, "new_replicas": replicas}
+
+    def _adjust_resources(self, target: ActionTarget, parameters: dict) -> dict:
+        """Applies a ResourceRecommendation's own proposed requests/limits
+        to one container (docs/RESOURCE_OPTIMIZATION_DESIGN.md Section
+        14.3). A merge PATCH, like `_restart`, never a REPLACE like
+        `_rollback` -- this never needs to *clear* an existing field, only
+        set the specific ones the recommendation proposed a number for.
+
+        Every value in this patch body is a plain `dict`/`str` -- never a
+        typed client object nested inside a dict, so the `.to_dict()`
+        footgun `_rollback`'s own comment warns about (TODO.md #11)
+        cannot recur here: there's no typed object anywhere in this body
+        to misserialize. Kubernetes' own strategic-merge-patch semantics
+        do the rest correctly: `containers` merges by its `name` patch-merge
+        key (only the named container is touched), and `resources.requests`/
+        `resources.limits` are plain maps, deep-merged key-by-key (setting
+        `cpu` leaves an existing `memory` key, if any, untouched).
+        """
+        deployment = self._verify_identity(target)
+        container_name = parameters["container_name"]
+        resources: dict = {}
+        if parameters.get("requests"):
+            resources["requests"] = parameters["requests"]
+        if parameters.get("limits"):
+            resources["limits"] = parameters["limits"]
+        patch = {
+            "spec": {
+                "template": {
+                    "spec": {"containers": [{"name": container_name, "resources": resources}]}
+                }
+            }
+        }
+        updated = self._apps.patch_namespaced_deployment(
+            name=target.resource_name,
+            namespace=target.namespace,
+            body=patch,
+            _request_timeout=self._timeout,
+        )
+        return {
+            "container_name": container_name,
+            "applied": resources,
+            "previous_resource_version": deployment.metadata.resource_version,
+            "new_resource_version": updated.metadata.resource_version,
+        }
 
     def _rollback(self, target: ActionTarget, requested_revision: int | None) -> dict:
         deployment = self._verify_identity(target)

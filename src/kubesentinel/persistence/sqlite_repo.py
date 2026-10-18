@@ -11,7 +11,7 @@ from __future__ import annotations
 import builtins
 import sqlite3
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 
 from kubesentinel.models.action import RemediationAction
 from kubesentinel.models.incident import Incident
@@ -30,6 +30,17 @@ CREATE TABLE IF NOT EXISTS incidents (
 CREATE INDEX IF NOT EXISTS idx_incidents_resource_uid ON incidents(resource_uid);
 CREATE INDEX IF NOT EXISTS idx_incidents_status ON incidents(status);
 CREATE INDEX IF NOT EXISTS idx_incidents_namespace ON incidents(namespace);
+
+-- RemediationActions with no owning Incident (docs/RESOURCE_OPTIMIZATION_DESIGN.md
+-- Section 14.1/14.5) -- a sibling table in the same file, not a new
+-- repository interface: this repository is already the action-history
+-- authority for the policy engine's per-window budget.
+CREATE TABLE IF NOT EXISTS standalone_actions (
+    action_id TEXT PRIMARY KEY,
+    data TEXT NOT NULL,
+    proposed_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 """
 
 _RESOLVED_STATUSES = {"RESOLVED"}
@@ -111,13 +122,44 @@ class SQLiteIncidentRepository(IncidentRepository):
 
     def list_actions_since(self, since: datetime) -> builtins.list[RemediationAction]:
         # Simple, not indexed on action.proposed_at: scans every incident's own
-        # actions list. Correct and fast enough for a local, single-process tool
-        # with a bounded number of incidents -- matches this project's existing
-        # SQLite design philosophy (see DESIGN_DECISIONS.md).
+        # actions list, plus every standalone action. Correct and fast enough
+        # for a local, single-process tool with a bounded number of incidents
+        # -- matches this project's existing SQLite design philosophy (see
+        # DESIGN_DECISIONS.md).
         actions: list[RemediationAction] = []
         for incident in self.list():
             actions.extend(a for a in incident.actions if a.proposed_at >= since)
+        with self._lock:
+            rows = self._conn.execute("SELECT data FROM standalone_actions").fetchall()
+        actions.extend(
+            action
+            for action in (RemediationAction.model_validate_json(r[0]) for r in rows)
+            if action.proposed_at >= since
+        )
         return actions
+
+    def get_standalone_action(self, action_id: str) -> RemediationAction | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT data FROM standalone_actions WHERE action_id = ?", (action_id,)
+            ).fetchone()
+        return RemediationAction.model_validate_json(row[0]) if row else None
+
+    def save_standalone_action(self, action: RemediationAction) -> None:
+        data = action.model_dump_json()
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO standalone_actions (action_id, data, proposed_at, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(action_id) DO UPDATE SET
+                    data=excluded.data,
+                    updated_at=excluded.updated_at
+                """,
+                (action.action_id, data, action.proposed_at.isoformat(), now),
+            )
+            self._conn.commit()
 
     def close(self) -> None:
         with self._lock:

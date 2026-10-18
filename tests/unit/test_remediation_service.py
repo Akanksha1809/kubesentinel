@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from kubesentinel.config import PolicyMode, Settings
-from kubesentinel.models.action import ActionStatus, ActionType
+from kubesentinel.models.action import ActionStatus, ActionTarget, ActionType
 from kubesentinel.policy.decision import PolicyOutcome
 from kubesentinel.models.diagnosis import Confidence, DiagnosisResult, Hypothesis, ReasonCode
 from kubesentinel.models.incident import Incident, IncidentSeverity, IncidentStatus, ResourceRef
@@ -373,3 +373,107 @@ def test_concurrent_proposals_never_exceed_the_per_incident_budget(repo):
     accepted = [s for s in results if s != ActionStatus.REJECTED]
     assert len(results) == concurrency
     assert len(accepted) == budget, f"expected exactly {budget} accepted under the budget, got {results}"
+
+
+def _target() -> ActionTarget:
+    return ActionTarget(
+        namespace="kubesentinel-lab", resource_type="Deployment", resource_name="test-deployment",
+        resource_uid="deploy-uid-1234",
+    )
+
+
+class TestStandaloneActions:
+    """No owning Incident at all (docs/RESOURCE_OPTIMIZATION_DESIGN.md
+    Section 14.1) -- e.g. applying a ResourceRecommendation."""
+
+    def test_propose_standalone_persists_independently_of_any_incident(self, repo):
+        service, _apps = _service(repo, _settings(policy_mode=PolicyMode.APPROVAL_REQUIRED))
+
+        action = service.propose_standalone(
+            target=_target(),
+            action_type=ActionType.ADJUST_RESOURCES,
+            rationale="right-size",
+            category="RESOURCE_OPTIMIZATION",
+            parameters={"container_name": "app", "requests": {"cpu": "500m"}, "limits": {}},
+        )
+
+        assert action.incident_id is None
+        assert action.status == ActionStatus.PENDING_APPROVAL
+        assert repo.get_standalone_action(action.action_id) is not None
+
+    def test_propose_standalone_denied_by_namespace_allowlist(self, repo):
+        service, _apps = _service(
+            repo, _settings(policy_mode=PolicyMode.APPROVAL_REQUIRED, action_allowed_namespaces="some-other-ns")
+        )
+
+        action = service.propose_standalone(
+            target=_target(), action_type=ActionType.ADJUST_RESOURCES, rationale="test", category="RESOURCE_OPTIMIZATION"
+        )
+
+        assert action.status == ActionStatus.REJECTED
+
+    def test_approve_then_execute_standalone_runs_through_executor_and_verifier(self, repo):
+        service, apps = _service(repo, _settings(policy_mode=PolicyMode.APPROVAL_REQUIRED))
+        action = service.propose_standalone(
+            target=_target(),
+            action_type=ActionType.ADJUST_RESOURCES,
+            rationale="right-size",
+            category="RESOURCE_OPTIMIZATION",
+            parameters={"container_name": "app", "requests": {"cpu": "500m"}, "limits": {}},
+        )
+        assert action.status == ActionStatus.PENDING_APPROVAL
+
+        approved = service.approve_standalone(action.action_id, approved_by="alice")
+        assert approved.status == ActionStatus.APPROVED
+
+        executed = service.execute_standalone(action.action_id, category="RESOURCE_OPTIMIZATION")
+        assert executed.status == ActionStatus.VERIFIED_RECOVERED
+        apps.patch_namespaced_deployment.assert_called_once()
+
+    def test_reject_standalone(self, repo):
+        service, _apps = _service(repo, _settings(policy_mode=PolicyMode.APPROVAL_REQUIRED))
+        action = service.propose_standalone(
+            target=_target(), action_type=ActionType.ADJUST_RESOURCES, rationale="test", category="RESOURCE_OPTIMIZATION"
+        )
+
+        rejected = service.reject_standalone(action.action_id, rejected_by="bob", reason="not needed")
+        assert rejected.status == ActionStatus.REJECTED
+        assert "bob" in rejected.execution_error
+
+    def test_approve_standalone_requires_pending_approval_state(self, repo):
+        service, _apps = _service(repo, _settings(policy_mode=PolicyMode.APPROVAL_REQUIRED))
+        action = service.propose_standalone(
+            target=_target(), action_type=ActionType.ADJUST_RESOURCES, rationale="test", category="RESOURCE_OPTIMIZATION"
+        )
+        service.approve_standalone(action.action_id, approved_by="alice")
+
+        with pytest.raises(InvalidActionStateError):
+            service.approve_standalone(action.action_id, approved_by="alice")
+
+    def test_get_standalone_action_not_found_raises(self, repo):
+        service, _apps = _service(repo, _settings())
+        with pytest.raises(ActionNotFoundError):
+            service.get_standalone_action("does-not-exist")
+
+    def test_dry_run_standalone_has_zero_side_effects(self, repo):
+        service, _apps = _service(repo, _settings(policy_mode=PolicyMode.APPROVAL_REQUIRED))
+
+        decision = service.dry_run_standalone(target=_target(), action_type=ActionType.ADJUST_RESOURCES)
+
+        assert decision.outcome == PolicyOutcome.REQUIRES_APPROVAL
+        assert repo.list_actions_since(datetime.now(timezone.utc).replace(year=2000)) == []
+
+    def test_standalone_and_incident_driven_actions_share_the_same_budget(self, repo):
+        # The per-window budget must bound every mutation this project makes,
+        # not just the incident-driven ones -- list_actions_since unions both.
+        service, _apps = _service(repo, _settings(max_actions_per_window=1, action_window_seconds=600))
+        incident = _incident()
+
+        first = service.propose_standalone(
+            target=_target(), action_type=ActionType.ADJUST_RESOURCES, rationale="first", category="RESOURCE_OPTIMIZATION"
+        )
+        assert first.status != ActionStatus.REJECTED
+
+        second = service.propose(incident, ActionType.RESTART_DEPLOYMENT, rationale="second")
+        assert second.status == ActionStatus.REJECTED
+        assert "per-window budget" in second.execution_error

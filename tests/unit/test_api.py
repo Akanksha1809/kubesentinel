@@ -225,7 +225,84 @@ def test_reject_sets_rejected_status(api_state):
         headers=headers,
     )
     assert resp.status_code == 200
+
+
+# -- Standalone action routes (no owning incident at all) -- same sibling
+# shape as the /incidents/{id}/actions/... routes above, reached via
+# /actions/{action_id}/... instead. docs/RESOURCE_OPTIMIZATION_DESIGN.md
+# Section 14.5.
+
+
+def _propose_standalone(target_uid: str = "deploy-uid-1234"):
+    from kubesentinel.models.action import ActionTarget, ActionType
+
+    return app_module.state.remediation.propose_standalone(
+        target=ActionTarget(
+            namespace="kubesentinel-lab", resource_type="Deployment", resource_name="test-deployment",
+            resource_uid=target_uid,
+        ),
+        action_type=ActionType.ADJUST_RESOURCES,
+        rationale="right-size",
+        category="RESOURCE_OPTIMIZATION",
+        parameters={"container_name": "app", "requests": {"cpu": "500m"}, "limits": {}},
+    )
+
+
+def test_full_standalone_approve_execute_flow(api_state):
+    _repo, apps = api_state
+    action = _propose_standalone()
+    assert action.status.value == "PENDING_APPROVAL"
+    headers = {"Authorization": "Bearer test-token"}
+
+    get_resp = client.get(f"/actions/{action.action_id}")
+    assert get_resp.status_code == 200
+    assert get_resp.json()["incident_id"] is None
+
+    approved = client.post(
+        f"/actions/{action.action_id}/approve", json={"approved_by": "akanksha"}, headers=headers
+    ).json()
+    assert approved["status"] == "APPROVED"
+    apps.patch_namespaced_deployment.assert_not_called()
+
+    executed = client.post(f"/actions/{action.action_id}/execute", headers=headers).json()
+    assert executed["status"] == "VERIFIED_RECOVERED"
+    apps.patch_namespaced_deployment.assert_called_once()
+
+
+def test_standalone_get_unknown_action_is_404(api_state):
+    resp = client.get("/actions/does-not-exist")
+    assert resp.status_code == 404
+
+
+def test_standalone_approve_unknown_action_is_404(api_state):
+    resp = client.post(
+        "/actions/does-not-exist/approve", json={"approved_by": "akanksha"},
+        headers={"Authorization": "Bearer test-token"},
+    )
+    assert resp.status_code == 404
+
+
+def test_standalone_execute_before_approve_is_409(api_state):
+    action = _propose_standalone()
+    resp = client.post(f"/actions/{action.action_id}/execute", headers={"Authorization": "Bearer test-token"})
+    assert resp.status_code == 409
+
+
+def test_standalone_reject_sets_rejected_status(api_state):
+    action = _propose_standalone()
+    resp = client.post(
+        f"/actions/{action.action_id}/reject",
+        json={"rejected_by": "akanksha", "reason": "not needed"},
+        headers={"Authorization": "Bearer test-token"},
+    )
+    assert resp.status_code == 200
     assert resp.json()["status"] == "REJECTED"
+
+
+def test_standalone_approve_without_token_is_401(api_state):
+    action = _propose_standalone()
+    resp = client.post(f"/actions/{action.action_id}/approve", json={"approved_by": "akanksha"})
+    assert resp.status_code == 401
 
 
 def test_metrics_endpoint_serves_prometheus_text(api_state):

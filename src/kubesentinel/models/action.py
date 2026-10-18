@@ -19,6 +19,13 @@ class ActionType(str, Enum):
     SCALE_DEPLOYMENT = "SCALE_DEPLOYMENT"
     RECOMMEND_RESOURCE_ADJUSTMENT = "RECOMMEND_RESOURCE_ADJUSTMENT"
     RECOMMEND_CONFIG_FIX = "RECOMMEND_CONFIG_FIX"
+    # Applies a ResourceRecommendation's own proposed requests/limits to its
+    # Deployment (docs/RESOURCE_OPTIMIZATION_DESIGN.md Section 14) -- the
+    # resource optimizer's first mutation capability. Always requires
+    # approval (see policy/engine.py's own _ALWAYS_REQUIRES_APPROVAL), and
+    # is the first action type this project ever proposes with no owning
+    # Incident at all (see RemediationAction.incident_id below).
+    ADJUST_RESOURCES = "ADJUST_RESOURCES"
 
 
 class ActionStatus(str, Enum):
@@ -70,7 +77,12 @@ class VerificationOutcome(BaseModel):
 
 class RemediationAction(BaseModel):
     action_id: str
-    incident_id: str
+    # None for a standalone action with no owning Incident -- e.g. applying
+    # a ResourceRecommendation, which usually has no incident at all (see
+    # docs/RESOURCE_OPTIMIZATION_DESIGN.md Section 14.1). Every existing
+    # incident-driven action still always sets this to a real string;
+    # nothing about that path changes.
+    incident_id: str | None
     action_type: ActionType
     target: ActionTarget
     status: ActionStatus = ActionStatus.PROPOSED

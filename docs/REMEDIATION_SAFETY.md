@@ -30,30 +30,44 @@ needs, exactly like `DiagnosticEngine` only ever sees the evidence it's handed.
    optional, empty = no extra restriction) -- `DENIED` if configured and the
    target name isn't listed.
 5. **Resource-type consistency** -- `RESTART_DEPLOYMENT`/`ROLLBACK_DEPLOYMENT`/
-   `SCALE_DEPLOYMENT` only apply to `Deployment` targets. This project's reading of
-   the spec's "whether the resource is managed by a controller" criterion: there's
-   no controller to recreate a bare Pod from, so none of these actions make sense
-   against one.
+   `SCALE_DEPLOYMENT`/`ADJUST_RESOURCES` only apply to `Deployment` targets. This
+   project's reading of the spec's "whether the resource is managed by a
+   controller" criterion: there's no controller to recreate a bare Pod from, so
+   none of these actions make sense against one. `ADJUST_RESOURCES`
+   (RESOURCE_OPTIMIZATION_DESIGN.md §14) reuses this exact check rather than
+   relaxing it for StatefulSet/DaemonSet/Job/standalone-Pod recommendations.
 6. **Cooldown** (`KUBESENTINEL_ACTION_COOLDOWN_SECONDS`) -- `DENIED` if the same
    action type was already proposed against the same `resource_uid` more recently
    than the cooldown window. Excludes previously `REJECTED` attempts (see
    TODO.md #12 -- found live, a rejected action never touched the cluster and must
    not block a later legitimate one).
 7. **Per-incident budget** (`KUBESENTINEL_MAX_ACTIONS_PER_INCIDENT`) -- `DENIED` if
-   this incident already has that many non-`REJECTED` actions recorded.
+   this incident already has that many non-`REJECTED` actions recorded. Skipped
+   entirely (never denies) when `incident_id` is `None` -- a standalone action
+   (no owning Incident at all; see "Standalone actions" below) has no incident to
+   bound against. The per-window budget and the cooldown above both still apply
+   unconditionally either way.
 8. **Per-window budget** (`KUBESENTINEL_MAX_ACTIONS_PER_WINDOW` /
    `KUBESENTINEL_ACTION_WINDOW_SECONDS`) -- `DENIED` if too many non-`REJECTED`
-   actions (across any incident) have been proposed within the rolling window.
+   actions (across any incident, *and* every standalone action) have been
+   proposed within the rolling window.
 9. **Mode-based outcome** (only reached if nothing above denied it):
    - `APPROVAL_REQUIRED` -> `REQUIRES_APPROVAL` for everything.
-   - `CONTROLLED_AUTO` + `ROLLBACK_DEPLOYMENT`/`SCALE_DEPLOYMENT` ->
-     `REQUIRES_APPROVAL` always, even here -- higher-impact than a restart, matching
-     the spec's explicit "approval-gated scaling."
+   - `CONTROLLED_AUTO` + `ROLLBACK_DEPLOYMENT`/`SCALE_DEPLOYMENT`/
+     `ADJUST_RESOURCES` -> `REQUIRES_APPROVAL` always, even here -- higher-impact
+     than a restart, matching the spec's explicit "approval-gated scaling."
+     `ADJUST_RESOURCES` joins this list for the same reason: it changes running
+     Pods' resource allocation, and this project has no correctness evidence yet
+     strong enough to let it run unattended.
    - `CONTROLLED_AUTO` + `RESTART_DEPLOYMENT` -> `ALLOWED` only if **the diagnosing
      hypothesis itself says `auto_remediation_permitted=True`**, the incident is
      `HIGH`+ severity, the triggering hypothesis was `HIGH` confidence, *and* the
      target's desired replica count is known and greater than 1 -- otherwise
-     `REQUIRES_APPROVAL`.
+     `REQUIRES_APPROVAL`. A standalone action (no incident, so no hypothesis at
+     all) can never satisfy this -- `hypothesis_confidence` is fixed at
+     `INCONCLUSIVE` and `hypothesis_auto_remediation_permitted` at `False` for
+     every one, so it always falls through to `REQUIRES_APPROVAL` regardless of
+     action type.
 
 ### Why the hypothesis's own belief gates auto-execution
 
@@ -102,6 +116,18 @@ correctly roll back to a template that *lacks* a field the current one has (e.g.
 an added annotation), because an absent field in the patch body means "no change"
 under merge semantics, not "clear it." Only a full replace actually removes it.
 
+**`ADJUST_RESOURCES`** (RESOURCE_OPTIMIZATION_DESIGN.md §14): a merge PATCH,
+like `RESTART_DEPLOYMENT` -- never a full replace like `ROLLBACK_DEPLOYMENT`,
+since this never needs to *clear* a field, only set the specific ones a
+recommendation proposed a number for. Every value in the patch body is a
+plain `dict`/`str`, never a typed client object nested inside a dict, so
+the `.to_dict()` footgun ROLLBACK's own history (TODO.md #11) warns about
+cannot recur here. Kubernetes' own strategic-merge-patch semantics handle
+the rest: `containers` merges by its `name` key (only the named container is
+touched), and `resources.requests`/`resources.limits` are plain maps,
+deep-merged key-by-key (setting `cpu` leaves an existing `memory` key, if
+any, untouched).
+
 **`RECOMMEND_RESOURCE_ADJUSTMENT` / `RECOMMEND_CONFIG_FIX`**: never call the
 Kubernetes API. `remediation/recommendations.py::build_recommendation` maps a
 hypothesis's `reason_code` to one of these two types and reuses its `explanation`
@@ -143,9 +169,13 @@ check for "is this Deployment healthy *right now*, regardless of why" (the
 passive incident-manager use case it was built for), but the wrong one for "did
 *this specific restart* actually complete."
 
-Fixed with a separate `_rollout_complete()` check, used only for
-`RESTART_DEPLOYMENT`/`ROLLBACK_DEPLOYMENT` (both start a new rollout to a new
-template): also requires `updatedReplicas >= desired`, confirming the *new*
+Fixed with a separate `_rollout_complete()` check, used for
+`RESTART_DEPLOYMENT`/`ROLLBACK_DEPLOYMENT`/`ADJUST_RESOURCES` (all three start a
+new rollout to a new template -- patching
+`spec.template.spec.containers[].resources` is the same kind of template
+change as a restart annotation or a rolled-back template, so
+`ADJUST_RESOURCES` was added to this set for the same reason, not a new
+one): also requires `updatedReplicas >= desired`, confirming the *new*
 ReplicaSet -- not just any Pods -- caught up. This is exactly what `kubectl
 rollout status` waits for. `SCALE_DEPLOYMENT` starts no new rollout, so it keeps
 the simpler shared check. Re-verified live after the fix: took 11.5s, and the
@@ -179,14 +209,38 @@ lifecycle rather than collapsing any of them together:
   effects, not just "skips the executor."
 - **`reject()`**: marks a `PENDING_APPROVAL` action `REJECTED` with a reason.
 
-Every method takes an `Incident` object and plain arguments and is otherwise
-API/CLI-agnostic -- both `api/app.py`'s `/actions/plan|approve|execute|reject`
-endpoints and the CLI's `plan`/`approve`/`execute`/`reject`/`dry-run` commands
-call these directly, as plumbing, not new logic. `approve()`/`execute()`/
-`propose()` (when it executes inline) block the caller synchronously for up to
-the verification deadline (this project has no background job queue) -- a
-deliberate, documented tradeoff for a synchronous, portfolio-scoped tool, not a
-hidden surprise.
+### Standalone actions (no owning Incident at all)
+
+`propose_standalone()`/`approve_standalone()`/`execute_standalone()`/
+`reject_standalone()`/`dry_run_standalone()` (RESOURCE_OPTIMIZATION_DESIGN.md
+§14.1) mirror the five operations above exactly -- same policy evaluation,
+same executor, same verifier -- for an action with no backing `Incident`
+object, the common case for applying a `ResourceRecommendation` (most
+recommendations have no incident at all; proactive right-sizing is the
+primary value of that engine, not firefighting). `RemediationAction.
+incident_id`/`PolicyRequest.incident_id`/`incident_severity` are `Optional`
+specifically to make this possible without duplicating the state machine:
+every existing incident-driven call site is unaffected (they already
+always pass a real string). Persisted independently
+(`IncidentRepository.save_standalone_action`/`get_standalone_action`, a
+sibling table in the same SQLite file) rather than nested in an `Incident`'s
+own `.actions` list -- there's no incident to nest it in. `list_actions_since`
+unions both kinds, so the per-window budget genuinely bounds every mutation
+this project makes, not just the incident-driven half of them.
+
+Every one of the five incident-driven methods above takes an `Incident`
+object and plain arguments and is otherwise API/CLI-agnostic -- both
+`api/app.py`'s `/incidents/{id}/actions/plan|approve|execute|reject`
+endpoints and the CLI's `plan`/`approve`/`execute`/`reject`/`dry-run`
+commands call these directly, as plumbing, not new logic. The five
+standalone siblings are reached the same way through their own
+`/actions/{action_id}/...` routes and `recommendation-apply`/`action`/
+`action-approve`/`action-execute`/`action-reject` CLI commands instead.
+`approve()`/`execute()`/`propose()` (when it executes inline) block the
+caller synchronously for up to the verification deadline (this project
+has no background job queue) -- a deliberate, documented tradeoff for a
+synchronous, portfolio-scoped tool, not a hidden surprise. Same for their
+standalone counterparts.
 
 ## The API and CLI surfaces (Milestone 6)
 
@@ -243,9 +297,32 @@ only for this):
   cluster, exercising the same split-lifecycle service methods the API uses.
   This is also where the click/typer crash (TODO.md #16) and the transient
   `Available=False` false-FAILED (TODO.md #17) were both found and fixed.
+- **`ADJUST_RESOURCES` standalone apply (RESOURCE_OPTIMIZATION_DESIGN.md
+  §14), via the real CLI against a real throwaway Deployment**: with
+  `policy_mode=OBSERVE` (this project's own default), `recommendation-apply`
+  correctly came back `REJECTED` ("policy mode is OBSERVE"), confirming
+  the new action type is gated by the same default every other action type
+  already is. Switching to `APPROVAL_REQUIRED`: `recommendation-apply` ->
+  `PENDING_APPROVAL`; `action-approve` -> `APPROVED` (confirmed the real
+  Deployment's resources were still untouched at this point); `action-execute`
+  -> `VERIFIED_RECOVERED`, and a fresh `kubectl get deployment` confirmed only
+  the proposed `requests.cpu` (50m -> 80m) had changed -- `requests.memory`,
+  `limits.cpu`, `limits.memory`, the image, and the command were all
+  byte-for-byte untouched, confirming the merge-patch isolation claim for
+  real, not just in a mocked unit test. A second `action-execute` on the same
+  (now-`VERIFIED_RECOVERED`) action correctly refused ("not APPROVED -- cannot
+  execute"). **A real bug caught in this exact run, not by any unit test**:
+  the first (policy-denied) attempt had set `applied_action_id` on the
+  recommendation even though the resulting action was `REJECTED` and never
+  touched the cluster -- permanently locking that recommendation out of ever
+  being retried. Fixed immediately (`applied_action_id` is now only set when
+  the action is not `REJECTED`, mirroring the exact "a REJECTED action never
+  counts" discipline `policy/engine.py`'s own cooldown/budget checks already
+  apply) and covered by a new regression test, not just patched and moved on.
 
 215 unit tests cover every branch of the policy engine, executor, service,
-verifier, and the API's auth dependency.
+verifier, and the API's auth dependency (942 after this milestone's own
+additions -- see TODO.md's own entry for the exact count).
 
 ## What already exists
 

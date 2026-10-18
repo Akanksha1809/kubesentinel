@@ -3550,3 +3550,240 @@ instead.
 
 **Full regression suite**: ruff clean, mypy clean, **895 unit tests
 passed** (849 + 46).
+
+## Milestone 34: The resource optimizer applies its own recommendations -- DONE
+
+The fifth and last of the five scope boundaries the user asked to close,
+and the one named from the start as riskiest -- not because the change
+itself is exotic, but because it's the first new mutation surface built
+on top of this project's **oldest** one (`PolicyEngine`/
+`RemediationAction`/`RemediationExecutor`/`RemediationService`, the
+troubleshooting engine's own incident-driven remediation lifecycle) rather
+than an isolated, self-contained addition. Closes
+`RESOURCE_OPTIMIZATION_DESIGN.md` Section 6's own long-named gap, written
+up as new Section 14 in that doc before any code, with its own dedicated
+safety review -- explicitly the "generalize, don't duplicate" interpretation
+of that section's own forward-looking note ("the existing PolicyEngine/
+RemediationService lifecycle... not a parallel approval system").
+
+**The one real architectural fork, decided explicitly, not picked
+silently**: every existing `RemediationAction` was required to carry an
+`incident_id` and was physically stored *nested inside* its owning
+`Incident`'s own `.actions` list -- there was no independent action
+storage anywhere in this project. But the common case for a
+`ResourceRecommendation` is **no incident at all** (proactive right-
+sizing is the primary value of that engine, not firefighting). Three
+options were weighed and presented to the user before writing any code:
+(1) generalize `incident_id` to `Optional` across `RemediationAction`/
+`PolicyRequest`, with `RemediationService` growing a standalone sibling
+family of methods that call through the *exact same* `PolicyEngine`/
+`RemediationExecutor`/`RecoveryVerifier`; (2) a separate, parallel apply
+service reusing only the lower-level pieces; (3) only allow applying a
+recommendation already linked to a real incident. The user chose (1) --
+additive to the existing incident-driven path (zero changes to any of
+its 20+ existing call sites), and the more faithful reading of "one
+lifecycle, not a parallel system" even though it touches the project's
+most heavily-tested mutation code.
+
+**What was added**:
+
+- `models/action.py` -- `ActionType.ADJUST_RESOURCES` (new);
+  `RemediationAction.incident_id` widened to `str | None` (every existing
+  caller already always passes a real string, so this changes nothing
+  for them).
+- `models/optimization.py` -- `ResourceRecommendation.workload_uid` (new,
+  populated from the `WorkloadSnapshot` it was derived from, the same
+  identity data every other action type already gets from
+  `incident.resource.uid`) and `.applied_action_id` (new, ID-only link,
+  same pattern as `related_incident_ids`). `RecommendationStatus`'s own
+  docstring updated: still deliberately no `APPLIED`/`FAILED` status --
+  that's answered by following `applied_action_id` to the action's own
+  status instead, never by overloading the review-decision enum with a
+  second, unrelated kind of state.
+- `policy/engine.py` -- `PolicyRequest.incident_id`/`incident_severity`
+  widened to `Optional`; `_check_per_incident_budget` skips (never
+  denies) when `incident_id is None` -- the per-window budget and
+  per-target cooldown both still apply unconditionally either way, so a
+  standalone action is never *less* bounded, only missing the one check
+  that has no meaning without an incident. `ADJUST_RESOURCES` added to
+  `_DEPLOYMENT_ONLY_ACTION_TYPES` (reusing the exact existing "no
+  controller to recreate a bare Pod from" reasoning, not relaxing it)
+  and to `_ALWAYS_REQUIRES_APPROVAL` (same reasoning as
+  `ROLLBACK_DEPLOYMENT`/`SCALE_DEPLOYMENT` -- higher blast radius than a
+  restart, no correctness evidence yet strong enough for unattended
+  execution). In practice this is doubly guaranteed: a standalone
+  request's own `hypothesis_confidence=INCONCLUSIVE`/
+  `hypothesis_auto_remediation_permitted=False` already make
+  `CONTROLLED_AUTO`'s unattended path unreachable before even reaching
+  the explicit always-requires-approval check.
+- `remediation/executor.py::_adjust_resources` -- a merge PATCH, like
+  `_restart`, never a full replace like `_rollback` (this never needs to
+  *clear* a field, only set the specific ones proposed). Every value in
+  the patch body is a plain `dict`/`str` -- never a typed client object
+  nested inside a dict, so the `.to_dict()` footgun `_rollback`'s own
+  history (#11 above) warns about cannot recur here. Relies on
+  Kubernetes' own strategic-merge-patch semantics to merge `containers`
+  by its `name` key and `resources.requests`/`.limits` key-by-key,
+  rather than reimplementing that merge logic in Python.
+- `verification/verifier.py` -- `ADJUST_RESOURCES` added to
+  `_ROLLOUT_AWARE_ACTION_TYPES` (it patches `spec.template`, starting a
+  new rollout exactly like `RESTART_DEPLOYMENT`/`ROLLBACK_DEPLOYMENT`
+  already do -- the same stricter `updatedReplicas`-aware check applies
+  for the same reason, not a new one).
+- `remediation/service.py` -- `propose_standalone`/`approve_standalone`/
+  `execute_standalone`/`reject_standalone`/`dry_run_standalone`, mirroring
+  the five existing incident-driven methods exactly, persisted via two
+  new `IncidentRepository` methods (`save_standalone_action`/
+  `get_standalone_action`, a sibling SQLite table); `list_actions_since`
+  now unions incident-nested and standalone actions, so the per-window
+  budget genuinely bounds every mutation this project makes.
+- `optimization/service.py::apply_recommendation` -- the new orchestration
+  entry point. Six preconditions, each with its own specific, named
+  refusal reason: not `EXPIRED`; `status == APPROVED` exactly (not just
+  `REVIEWED`); `safety_flags` empty; at least one of
+  `proposed_requests`/`proposed_limits` non-`None`; `workload_kind ==
+  DEPLOYMENT` (StatefulSet/DaemonSet/Job/standalone-Pod are out of scope
+  for the same "no controller to recreate it from" reasoning as every
+  other action type, not relaxed for this one); not already applied
+  (`applied_action_id is None`). Builds a parameters dict containing
+  **only** the specific `cpu`/`memory` keys the recommendation actually
+  proposed a number for, never both dimensions, never a key the
+  recommendation left unproposed. New optional `remediation:
+  RemediationService | None = None` constructor parameter (matching
+  `incident_repo`'s own optional-dependency shape) -- every one of the
+  30+ existing `OptimizationService(...)` call sites across production
+  code and tests is unaffected.
+- New API routes: `POST /optimization/recommendations/{id}/apply` (409,
+  not 500, for every precondition above; 503 if no `RemediationService`
+  configured), plus sibling `GET /actions/{action_id}` /
+  `POST /actions/{action_id}/approve|execute|reject` routes in `app.py`
+  alongside the existing `/incidents/{id}/actions/{action_id}/...` ones
+  -- a sibling path, never a replacement.
+- New CLI commands: `recommendation-apply`, `action`, `action-approve`,
+  `action-execute`, `action-reject`, mirroring `plan`/`approve`/
+  `execute`/`reject`'s own shape, one argument shorter (no `incident_id`).
+- **No new RBAC.** `rbac/remediation-role.yaml` already grants
+  `patch`/`update` on `apps/deployments` -- the exact verb/resource this
+  feature's own `patch_namespaced_deployment` call uses, already granted
+  for `_restart`.
+
+**Tests**: 47 new unit tests across `test_remediation_executor.py` (4:
+`_adjust_resources` patches only proposed keys, both dimensions when
+both proposed, no typed object anywhere in the patch body, aborts on UID
+mismatch), `test_policy_engine.py` (9: `ADJUST_RESOURCES` always-
+requires-approval and Deployment-only, plus a dedicated
+`TestStandaloneActionsWithNoIncident` class covering the per-incident-
+budget no-op, per-window-budget/cooldown still applying, and never
+auto-execution-eligible), `test_recovery_verifier.py` (2: mid-rollout
+`INCONCLUSIVE`, recovers once `updatedReplicas` catches up -- the exact
+restart/rollback regression tests, mirrored for the new action type),
+`test_remediation_service.py` (9: standalone propose persists
+independently, denied by namespace allowlist, approve-then-execute runs
+the real executor/verifier, reject, double-approve refused,
+not-found, `dry_run_standalone` has zero side effects, and standalone +
+incident-driven actions share the same per-window budget),
+`test_sqlite_repo.py` (5: standalone save/get roundtrip, upsert, missing
+returns `None`, `list_actions_since` unions both kinds and still filters
+by time), `test_optimization_service.py` (14: every one of
+`apply_recommendation`'s six preconditions individually, the success
+path asserting only proposed keys are sent and `applied_action_id` is
+linked, only-one-dimension-included, and the live-caught
+policy-rejection-doesn't-lock-the-recommendation regression -- see
+below), `test_optimization_api.py` (9: `/apply`'s own 401/404/409/503/200
+paths against a real saved recommendation and a mocked
+`RemediationService`), `test_api.py` (7: the new sibling `/actions/...`
+routes' full approve-execute flow and every error path, mirroring the
+existing incident-driven route tests exactly).
+
+**Live-verified against the real cluster, via the real CLI, end to
+end**: applied a real, throwaway Deployment (`cpu: 50m` request, `100m`
+limit) and inserted a real, `APPROVED` CPU-category recommendation
+(proposing `cpu: 80m`, deliberately kept under the existing limit so a
+real admission check wouldn't reject it) pointed at the Deployment's
+real UID. With this project's own default `policy_mode=OBSERVE`,
+`recommendation-apply` correctly came back `REJECTED` ("policy mode is
+OBSERVE"), confirming the new action type is gated by the same default
+every other action type already is -- this is also what caught the bug
+below. Switching to `APPROVAL_REQUIRED`: `recommendation-apply` ->
+`PENDING_APPROVAL`; `action-approve` -> `APPROVED` (confirmed via
+`kubectl get deployment` that the real Deployment's resources were still
+untouched at this point -- approve alone must never execute);
+`action-execute` -> `VERIFIED_RECOVERED`, and a fresh `kubectl get
+deployment` confirmed **only** `requests.cpu` had changed (50m -> 80m)
+-- `requests.memory`, `limits.cpu`, `limits.memory`, the image, and the
+command were all byte-for-byte untouched, confirming the merge-patch
+isolation claim for real, not just in a mocked unit test. A second
+`action-execute` on the same action correctly refused ("not APPROVED --
+cannot execute").
+
+**A real bug caught in this exact run, not by any unit test (every one
+of which mocks `RemediationService` or the Kubernetes client)**: the
+first, policy-rejected attempt had already set
+`applied_action_id` on the recommendation even though the resulting
+action was `REJECTED` and never touched the cluster -- permanently
+locking that recommendation out of ever being retried, even after the
+operator fixed whatever caused the denial (switching `policy_mode`, in
+this exact case). This violates a principle this project already
+established elsewhere: `policy/engine.py`'s own cooldown/budget checks
+already exclude `REJECTED` actions for exactly this reason ("a rejected
+action never touched the cluster, so it must not count against..."),
+and `apply_recommendation` had simply never applied that same principle
+to its own one-shot `applied_action_id` lock. Fixed immediately
+(`applied_action_id` is now only set when `action.status !=
+ActionStatus.REJECTED`) and confirmed by both a new regression test and
+a live retry in the same session, which correctly produced a fresh,
+non-locked `PENDING_APPROVAL` action the second time.
+
+**Live cluster housekeeping, incidental to this item but worth
+recording**: live verification for this milestone (and the probe
+milestone immediately before it) was repeatedly blocked by a severely
+overloaded Colima VM (300%+ CPU, host load average 9-20, confirmed via
+`ps`/`uptime`) that had been silently destabilizing `kube-scheduler`/
+`kube-controller-manager` for the entire session. Restarting Colima
+(`colima restart`) fixed the CPU contention but exposed a second,
+unrelated problem: the kind node container's own `kube-proxy`
+crash-looped with "too many open files" after the cold restart forced
+it to re-read days of accumulated iptables state against a 1024
+open-file soft limit baked into the container at its original creation
+time -- not fixable by restarting pods, only by recreating the
+container. Recreated the kind cluster entirely (`lab/delete-cluster.sh`
++ `lab/create-cluster.sh`), reapplied every `rbac/*.yaml`, and confirmed
+every control-plane component came up `1/1` with zero restarts on the
+fresh cluster before any of this milestone's own live verification
+began. Neither finding is specific to this milestone's own code --
+recorded here because this is where the investigation happened, and
+because it's the reason both of the last two milestones took
+meaningfully longer to live-verify than the first three.
+
+**Documentation**: `RESOURCE_OPTIMIZATION_DESIGN.md` (new Section 14;
+Section 6's own forward-looking note updated to point to it).
+`docs/IMPLEMENTATION_STATUS.md` (Capability B's "Preserve original
+config" row updated to Implemented with the new "no automated undo"
+boundary named explicitly; the "Deliberately not built" apply/execute
+mention updated to point to the closure; the "Shared policy, approval,
+and remediation layer" section's own prediction -- "when Capability B
+eventually grows an apply path, that path must be built to go through
+PolicyEngine explicitly" -- updated to say that it did, exactly as
+predicted, and its own stale "no subprocess calls anywhere" claim fixed
+in the same pass, a leftover from Milestone 32's own Trivy addition that
+had never been corrected here). `README.md` (the optimization engine's
+own paragraph updated). `docs/REMEDIATION_SAFETY.md` (the policy-check
+list, the executor-method list, the rollout-aware verifier set, and a
+new "Standalone actions" subsection all updated to describe the new
+action type and lifecycle alongside the existing ones; a new "Verified
+live" bullet recording this milestone's own live run and the bug it
+caught). `docs/PLATFORM_ROADMAP.md`'s own Milestone 2 section is left
+unedited, same reasoning as every prior closure's own precedent this
+session -- a historical record of that milestone's original,
+deliberately-scoped-out decision, with this closure recorded as separate
+follow-up work here instead.
+
+**This closes all five of the scope boundaries the user asked to fix
+together**, in the order explicitly chosen (safest/most in-pattern
+first): RBAC effective-permission resolution (Milestone 30), scheduling
+pod affinity/anti-affinity/topology-spread (Milestone 31), CVE/image
+vulnerability scanning (Milestone 32), the network engine's active
+connectivity probe (Milestone 33), and this one.
+
+**Full regression suite**: ruff clean, mypy clean, **942 unit tests
+passed** (895 + 47).

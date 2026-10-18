@@ -224,3 +224,84 @@ def test_request_timeout_is_passed_to_the_api_call():
 
     assert apps.read_namespaced_deployment.call_args.kwargs["_request_timeout"] == 7
     assert apps.patch_namespaced_deployment.call_args.kwargs["_request_timeout"] == 7
+
+
+class TestAdjustResources:
+    def test_patches_only_the_proposed_resource_keys(self):
+        apps = MagicMock()
+        apps.read_namespaced_deployment.return_value = make_deployment(uid="deploy-uid-1234")
+        apps.patch_namespaced_deployment.return_value = make_deployment(uid="deploy-uid-1234")
+        executor = RemediationExecutor(apps)
+
+        action = _action(
+            ActionType.ADJUST_RESOURCES,
+            parameters={"container_name": "app", "requests": {"cpu": "500m"}, "limits": {}},
+        )
+        result = executor.execute(action)
+
+        assert result.status == ActionStatus.EXECUTED
+        patch_body = apps.patch_namespaced_deployment.call_args.kwargs["body"]
+        container_patch = patch_body["spec"]["template"]["spec"]["containers"][0]
+        assert container_patch["name"] == "app"
+        assert container_patch["resources"] == {"requests": {"cpu": "500m"}}
+
+    def test_patches_both_requests_and_limits_when_both_proposed(self):
+        apps = MagicMock()
+        apps.read_namespaced_deployment.return_value = make_deployment(uid="deploy-uid-1234")
+        apps.patch_namespaced_deployment.return_value = make_deployment(uid="deploy-uid-1234")
+        executor = RemediationExecutor(apps)
+
+        action = _action(
+            ActionType.ADJUST_RESOURCES,
+            parameters={
+                "container_name": "app",
+                "requests": {"cpu": "500m", "memory": "256Mi"},
+                "limits": {"memory": "512Mi"},
+            },
+        )
+        executor.execute(action)
+
+        resources = apps.patch_namespaced_deployment.call_args.kwargs["body"]["spec"]["template"]["spec"]["containers"][0]["resources"]
+        assert resources["requests"] == {"cpu": "500m", "memory": "256Mi"}
+        assert resources["limits"] == {"memory": "512Mi"}
+
+    def test_no_typed_object_anywhere_in_the_patch_body(self):
+        """The `.to_dict()` footgun TODO.md #11 caught for a different
+        patch body cannot recur here if every value in this body is a
+        plain dict/str/list -- confirmed directly rather than assumed."""
+        apps = MagicMock()
+        apps.read_namespaced_deployment.return_value = make_deployment(uid="deploy-uid-1234")
+        apps.patch_namespaced_deployment.return_value = make_deployment(uid="deploy-uid-1234")
+        executor = RemediationExecutor(apps)
+
+        action = _action(
+            ActionType.ADJUST_RESOURCES,
+            parameters={"container_name": "app", "requests": {"cpu": "500m"}, "limits": {}},
+        )
+        executor.execute(action)
+
+        def _assert_plain(value):
+            assert isinstance(value, (dict, str, list)), f"unexpected typed object in patch body: {type(value)}"
+            if isinstance(value, dict):
+                for v in value.values():
+                    _assert_plain(v)
+            elif isinstance(value, list):
+                for v in value:
+                    _assert_plain(v)
+
+        _assert_plain(apps.patch_namespaced_deployment.call_args.kwargs["body"])
+
+    def test_aborts_when_uid_changed(self):
+        apps = MagicMock()
+        apps.read_namespaced_deployment.return_value = make_deployment(uid="a-different-uid")
+        executor = RemediationExecutor(apps)
+
+        action = _action(
+            ActionType.ADJUST_RESOURCES,
+            target=_target(resource_uid="deploy-uid-1234"),
+            parameters={"container_name": "app", "requests": {"cpu": "500m"}, "limits": {}},
+        )
+        result = executor.execute(action)
+
+        assert result.status == ActionStatus.EXECUTION_FAILED
+        apps.patch_namespaced_deployment.assert_not_called()

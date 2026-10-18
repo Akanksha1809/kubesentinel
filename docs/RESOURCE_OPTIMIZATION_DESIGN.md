@@ -264,19 +264,23 @@ code can misinterpret `"1"` vs `"1m"` vs `"1Gi"`.
   integration test suite (Milestone 7) asserts the mocked write-capable
   methods on the Kubernetes clients (`patch_*`, `replace_*`, `delete_*`) are
   never called during a full analyze pass.
-- No `apply` endpoint exists. `POST /optimization/recommendations/{id}/review`
-  only accepts `{"decision": "approved"|"rejected"|"reviewed", "notes": "..."}`
-  and transitions status accordingly -- it never touches the cluster. This
-  matches the spec's explicit instruction not to expose a misleadingly-named
-  endpoint for unimplemented behavior.
-- A future "apply" milestone (not part of this one) would need: a new
-  `ActionType.PATCH_RESOURCES` (or similar) in `models/action.py`, a new
+- `POST /optimization/recommendations/{id}/review` only ever accepts
+  `{"decision": "approved"|"rejected"|"reviewed", "notes": "..."}` and
+  transitions status accordingly -- it never touches the cluster, in
+  this milestone or the later one that added an apply path (§14): the
+  two are deliberately kept separate, "a human endorses the number" vs.
+  "the number gets applied," never collapsed into one call.
+- An apply path was deliberately not built in this milestone -- see §14
+  for the later, separate closure, which needed its own safety review
+  (this project's first mutation surface for the optimization engine)
+  before being added: a new `ActionType` in `models/action.py`, a new
   `RemediationExecutor` method that patches
-  `spec.template.spec.containers[].resources` via a **typed** patch body (not
-  `.to_dict()` -- see TODO.md #11 for why that's a real, previously-caught
-  footgun), and the *existing* `PolicyEngine`/`RemediationService` lifecycle
-  (`propose -> approve -> execute -> verify`) -- not a parallel approval
-  system. This design deliberately does not build that executor yet.
+  `spec.template.spec.containers[].resources` via a **typed** patch body
+  (not `.to_dict()` -- see TODO.md #11 for why that's a real,
+  previously-caught footgun), and the *existing* `PolicyEngine`/
+  `RemediationService` lifecycle (`propose -> approve -> execute ->
+  verify`), generalized to work without an owning Incident rather than
+  duplicated as a parallel system.
 - `safety.py` flags, never silently excludes, workloads it won't recommend
   changes for: an active non-resolved incident on the same resource UID (via
   `IncidentRepository.find_open_by_resource_uid`, walked up through the owner
@@ -479,3 +483,241 @@ optimization_metrics_data_available = Gauge(..., ["provider"])  # 1/0, provider 
 Each milestone: explain the files touched, implement, run the real test
 suite, report actual results, fix regressions before proceeding -- the same
 discipline this project has followed since its first milestone.
+
+## 14. Applying recommendations
+
+The fifth and last of the five scope boundaries requested together --
+deliberately sequenced last, by the user's own explicit choice, as the
+riskiest: the resource optimizer's first mutation capability, closing
+§6's own long-named gap. The other four closures this round (RBAC
+effective-permission resolution, scheduling affinity/topology-spread,
+CVE scanning, the network engine's active probe) each got narrower,
+more self-contained treatment; this one is the most load-bearing,
+because it touches the project's **oldest** mutation surface
+(`PolicyEngine`/`RemediationAction`/`RemediationExecutor`/
+`RemediationService`, built for the troubleshooting engine's own
+incident-driven remediation) rather than adding a new, isolated one.
+
+### 14.1 The one real architectural fork, and why this side of it
+
+Every existing `RemediationAction` is required to carry an
+`incident_id` and is physically stored *nested inside* its owning
+`Incident`'s own `.actions` list -- there is no independent action
+storage anywhere in this project. But the common case for a
+`ResourceRecommendation` is **no incident at all**: proactive
+right-sizing is the primary value of this capability, not firefighting,
+so most recommendations this engine produces have an empty
+`related_incident_ids`.
+
+Three ways to resolve that conflict were weighed:
+
+1. **Generalize the incident coupling to optional** -- `incident_id`
+   becomes `str | None` on `RemediationAction` and `PolicyRequest`;
+   `RemediationService` grows a second, standalone family of entry
+   points (`propose_standalone`/`approve_standalone`/
+   `execute_standalone`/`reject_standalone`/`dry_run_standalone`) that
+   persist independently rather than nested in an `Incident`, but call
+   through the exact same `PolicyEngine.evaluate()`, the exact same
+   `RemediationExecutor.execute()`, and the exact same
+   `RecoveryVerifier.verify()` every incident-driven action already
+   uses. **Chosen.**
+2. A separate, parallel apply service reusing only the lower-level
+   pieces (`PolicyEngine`, `RemediationExecutor`) but with its own,
+   different-shaped orchestration/persistence. Rejected: this is
+   functionally what §6's own forward-looking note explicitly said not
+   to build ("not a parallel approval system"), even though every
+   individual safety control would still be reused -- the *shape* of
+   the thing a reviewer has to understand would still be duplicated.
+3. Only allow applying a recommendation already linked to a real
+   incident (`related_incident_ids` non-empty). Rejected: excludes the
+   single most common, most valuable case this feature exists for.
+
+Option 1 is additive, not disruptive, to the existing incident-driven
+path: `incident_id: str` becoming `str | None` changes nothing for any
+caller that already always supplies a real string (every existing
+restart/rollback/scale call site, untouched); `propose()`/`approve()`/
+`execute()`/`reject()` keep their exact existing signatures and
+call-site shape (20+ call sites across production code and three test
+tiers), unmodified. `_check_per_incident_budget` (policy/engine.py)
+simply has nothing to check when `incident_id is None` -- there is no
+"this incident's" budget to bound against, so that one check is skipped
+for a standalone action; the per-window budget and the per-target
+cooldown both still apply unconditionally, so a standalone action is
+never *less* bounded than an incident-driven one, only missing the one
+check that has no meaning without an incident.
+
+### 14.2 What it does, and the one scope fence that matters most
+
+`OptimizationService.apply_recommendation(recommendation_id, rationale,
+...)` -- requires, in order, each refusal carrying its own specific,
+named reason (never a generic "cannot apply"):
+
+1. The recommendation exists and isn't `EXPIRED` (same lazily-computed
+   effective-status check `review()` already makes -- never act on
+   stale evidence).
+2. `status == APPROVED` exactly -- `REVIEWED` is not enough. A human
+   must have actively endorsed this specific number, not merely looked
+   at it.
+3. `safety_flags` is empty. A recommendation `safety.py` flagged
+   (`ACTIVE_INCIDENT`, `UNHEALTHY_WORKLOAD`, `SYSTEM_NAMESPACE`,
+   `JOB_EXCLUDED`, `OOM_HISTORY`, ...) can never be applied, full stop
+   -- the exact evidence that made this engine cautious about
+   *proposing* a number is reused, unchanged, as the reason it refuses
+   to *apply* one too.
+4. At least one of `proposed_requests`/`proposed_limits` is non-`None`
+   -- `SCHEDULING`/`CAPACITY`/`DATA_QUALITY` categories never carry a
+   proposed number at all and are therefore never applicable, by
+   construction, not by a special-cased check.
+5. **`workload_kind == DEPLOYMENT`, and nothing else** -- the same
+   constraint `PolicyEngine._DEPLOYMENT_ONLY_ACTION_TYPES` already
+   enforces for restart/rollback/scale, extended to this new action
+   type rather than relaxed for it. `StatefulSet`/`DaemonSet` have no
+   principled difference in how a resources patch would work, but
+   `Job` is a template that (mostly) can't be patched once running, and
+   a standalone `Pod` has no owning controller to patch at all -- "only
+   ever applies to a resource type with a controller to recreate it
+   from" is this project's own already-established reading of the
+   spec's policy criterion, reused rather than re-derived for the
+   fourth time.
+6. This recommendation hasn't already been applied
+   (`applied_action_id is None`) -- never a second action for the same
+   recommendation row; a caller wanting to try again re-runs `analyze()`
+   for a fresh recommendation instead.
+
+On success, builds `ActionTarget(namespace, resource_type="Deployment",
+resource_name=workload_name, resource_uid=workload_uid)` -- `
+workload_uid` is a new field on `ResourceRecommendation` (populated at
+creation time from the `WorkloadSnapshot` it was derived from, the same
+identity data every other action type already gets from
+`incident.resource.uid`), and `parameters={"container_name":
+..., "requests": {...}, "limits": {...}}`, containing **only** the
+specific resource keys (`cpu`/`memory`) the recommendation actually
+proposed a number for -- never both, never a key the recommendation
+left unproposed, so the executor's own merge-patch (§14.3) can never
+accidentally overwrite a dimension this recommendation had no opinion
+about. Calls `RemediationService.propose_standalone(...)` with
+`category="RESOURCE_OPTIMIZATION"`, stores the resulting action's ID
+back onto the recommendation as `applied_action_id`, and returns the
+action -- exactly the same `RemediationAction` shape (and the same
+`PENDING_APPROVAL`/`APPROVED`/`EXECUTING`/`VERIFYING`/
+`VERIFIED_RECOVERED`/... status machine) every other action already
+has, inspectable through the same `GET /actions/{id}`-style endpoint
+(§14.5), never a bespoke "recommendation application" status of its
+own.
+
+**`ADJUST_RESOURCES` always requires approval, in every `policy_mode`,
+with no unattended auto-execution path at all** -- added to
+`PolicyEngine._ALWAYS_REQUIRES_APPROVAL` alongside
+`ROLLBACK_DEPLOYMENT`/`SCALE_DEPLOYMENT`, for the same reason those two
+are there: this changes running Pods' resource allocation (higher
+blast radius than a plain restart) and this project has no correctness
+evidence yet strong enough to let it run unattended, even in
+`CONTROLLED_AUTO`. In practice this is also automatic: a standalone
+action has no diagnosis, so `hypothesis_confidence` is always
+`Confidence.INCONCLUSIVE` and `hypothesis_auto_remediation_permitted`
+is always `False` -- `_auto_execution_eligible` would already refuse
+unattended execution on those grounds alone, even before the explicit
+`_ALWAYS_REQUIRES_APPROVAL` entry is reached. Stated explicitly anyway,
+not left as an emergent property of unrelated checks.
+
+### 14.3 The executor: a merge-patch, never a replace, never `.to_dict()`
+
+`RemediationExecutor._adjust_resources(target, parameters)` mirrors
+`_restart`'s own shape exactly (read-verify-identity, one scoped PATCH
+call, typed return dict) -- never `_rollback`'s full-REPLACE shape,
+because resources patching never needs to *clear* a field the way
+rolling back to an older template does (§6 already names that distinct
+failure mode and why REPLACE, not PATCH, is the only correct tool for
+it). The patch body:
+
+```python
+resources: dict = {}
+if parameters.get("requests"):
+    resources["requests"] = parameters["requests"]   # e.g. {"cpu": "500m"}
+if parameters.get("limits"):
+    resources["limits"] = parameters["limits"]
+patch = {
+    "spec": {"template": {"spec": {"containers": [
+        {"name": parameters["container_name"], "resources": resources}
+    ]}}}
+}
+```
+
+Every value here is a plain `dict`/`str` -- never a typed client
+object nested inside a dict, so the `.to_dict()` footgun TODO.md #11
+already caught for a different patch body simply cannot recur here;
+there is no typed object anywhere in this body to misserialize.
+Kubernetes' own strategic-merge-patch semantics do the rest correctly
+without any extra code: `containers` merges by its `name` patch-merge
+key (only the named container is touched, every other container on the
+Pod is untouched), and `resources.requests`/`resources.limits` are
+plain maps, which strategic-merge-patch deep-merges key-by-key (setting
+`cpu` leaves an existing `memory` key, if any, completely alone) --
+exactly the "only touch what was explicitly proposed" property §14.2
+point 6 already relies on from the caller's side, now also true at the
+wire-protocol level, not just in this project's own code.
+
+### 14.4 Verification: this is a rollout, not a scale
+
+Patching `spec.template.spec.containers[].resources` changes the Pod
+template, which starts a new rollout to a new ReplicaSet -- exactly
+like `RESTART_DEPLOYMENT`/`ROLLBACK_DEPLOYMENT` already do, and
+unlike `SCALE_DEPLOYMENT`, which only changes replica count with no new
+ReplicaSet at all. `ADJUST_RESOURCES` is added to
+`verification/verifier.py`'s existing `_ROLLOUT_AWARE_ACTION_TYPES` set
+for the same reason restart/rollback are already there (§4's own
+comment on that set, read closely before assuming the simpler
+aggregate-health check would do): checking only aggregate
+ready/available counts can report `RECOVERED` while the *old*
+ReplicaSet is still what's actually serving, well before the new one
+(with the new resource values) has actually come up -- confirmed
+previously, live, for restart. No new verification logic is written;
+this is reusing an existing, already-correct distinction for a fourth
+action type, not inventing a new one.
+
+### 14.5 API, CLI, persistence
+
+- `POST /optimization/recommendations/{id}/apply` -- body
+  `{"rationale": str}`. 409 (not 500) when any of §14.2's own
+  preconditions fail, each with the specific reason named above, never
+  a generic error.
+- `GET /actions/{action_id}` / `POST /actions/{action_id}/approve` /
+  `POST /actions/{action_id}/execute` / `POST /actions/{action_id}/reject`
+  -- new, incident-agnostic routes alongside the *existing*
+  `/incidents/{id}/actions/{action_id}/...` ones, dispatching to
+  `RemediationService`'s new standalone methods. Deliberately a
+  *sibling* path, not a replacement: an incident-driven action is still
+  only ever reached through its owning incident, exactly as before.
+- CLI: `kubesentinel recommendation-apply <recommendation-id>
+  --rationale ...`, `kubesentinel action <action-id>`, `kubesentinel
+  action-approve/-execute/-reject <action-id> ...` -- mirroring
+  `plan`/`approve`/`execute`/`reject`'s own existing shape exactly, one
+  argument shorter (no `incident_id`).
+- `IncidentRepository` gains a second table,
+  `standalone_actions` (one row per action, JSON blob, upsert by
+  `action_id`) -- a sibling table in the same file, not a new
+  repository interface (this repository is already the action-history
+  authority for the policy engine's per-window budget query, via
+  `list_actions_since`; that method now unions both incident-nested and
+  standalone actions, so the global budget genuinely bounds every
+  mutation this project makes, not just the incident-driven ones).
+
+**No new RBAC.** `rbac/remediation-role.yaml` already grants
+`patch`/`update` on `apps/deployments` -- the exact verb/resource this
+feature's own `patch_namespaced_deployment` call uses, already granted
+for `_restart`. Nothing new to add, nothing new to audit.
+
+### 14.6 Known limitations, stated once here
+
+`StatefulSet`/`DaemonSet`/`Job`/standalone-`Pod` recommendations can
+never be applied (§14.2 point 5) -- named explicitly as a v1 scope
+fence, the same one every other action type in this project already
+has, not a gap specific to this feature. A recommendation whose
+`proposed_requests`/`proposed_limits` includes a dimension the
+*current* Deployment has no value for at all (adding a brand-new
+`cpu` limit where none existed) works correctly (the merge patch adds
+the key); a recommendation that would need to *remove* an existing key
+entirely (e.g. "this limit shouldn't exist") is not supported -- this
+project's analyzer never proposes that shape today, so it is an honest
+non-issue, not a silently-handled one, named here in case that ever
+changes.

@@ -47,23 +47,32 @@ milestone plan and current limitations (nothing yet triggers remediation from
 the live diagnosis pipeline without a human or an explicit policy-engine
 decision in the loop).
 
-A second, read-only **resource optimization engine** sits alongside the
-troubleshooting pipeline above, sharing its cluster client, SQLite file, and
-`/metrics` endpoint without duplicating any of it: a workload inventory with
-correct owner-reference resolution (Pod -> ReplicaSet -> Deployment,
+A second **resource optimization engine** sits alongside the troubleshooting
+pipeline above, sharing its cluster client, SQLite file, and `/metrics`
+endpoint without duplicating any of it: a workload inventory with correct
+owner-reference resolution (Pod -> ReplicaSet -> Deployment,
 StatefulSet/DaemonSet/Job, or standalone Pod), current usage from the
 Kubernetes Metrics API (with an optional Prometheus upgrade for real
 historical percentiles), and deterministic CPU/memory right-sizing --
 percentile-based for CPU, peak-based for memory, never from a single sample,
 never silently skipping an unhealthy workload (it's flagged instead). An open
 troubleshooting incident on the same workload blocks a proposed number and
-links back to it. There is deliberately no apply/execute endpoint: every
-recommendation is a reviewable record (`new -> reviewed/approved/rejected ->
-expired`), and analysis never mutates the cluster -- confirmed live with an
-HTTP-transport-level check that an entire `analyze()` pass issues nothing but
-GET requests. See [RESOURCE_OPTIMIZATION_DESIGN.md](docs/RESOURCE_OPTIMIZATION_DESIGN.md)
-for the full design and TODO.md's Milestones 12-19 for the build and
-live-verification history.
+links back to it. Analysis itself never mutates the cluster -- confirmed live
+with an HTTP-transport-level check that an entire `analyze()` pass issues
+nothing but GET requests -- and every recommendation is still a reviewable
+record (`new -> reviewed/approved/rejected -> expired`) before anything
+happens to it. Applying one is a separate, later, explicitly-requested
+closure: a standalone, policy-gated `RemediationAction` (the exact same
+`ActionType`/`PolicyEngine`/`RemediationExecutor`/`RecoveryVerifier`
+machinery the troubleshooting engine's own restart/rollback/scale actions
+already use, generalized to work without an owning incident rather than
+duplicated as a parallel system) that always requires human approval, patches
+only the specific resource keys a recommendation actually proposed via a
+merge PATCH, and is verified against a real rollout the same way a restart
+already is. See [RESOURCE_OPTIMIZATION_DESIGN.md](docs/RESOURCE_OPTIMIZATION_DESIGN.md)
+for the full design (Section 14 for the apply path specifically) and
+TODO.md's Milestones 12-19 for the original build and live-verification
+history.
 
 A third, read-only engine -- the **scheduling & placement advisor** --
 follows the same shared-infrastructure pattern again: given a real Pending

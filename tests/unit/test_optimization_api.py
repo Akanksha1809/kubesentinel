@@ -4,6 +4,7 @@ set state directly" pattern as test_api.py."""
 from __future__ import annotations
 
 import tempfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -15,6 +16,14 @@ from kubernetes.client.rest import ApiException
 
 from kubesentinel.api import app as app_module
 from kubesentinel.config import Settings
+from kubesentinel.models.optimization import (
+    EvidenceQuality,
+    RecommendationStatus,
+    ResourceQuantity,
+    ResourceRecommendation,
+    UsageSummary,
+    WorkloadKind,
+)
 from kubesentinel.optimization.service import OptimizationService
 from kubesentinel.persistence.optimization_repo import SQLiteOptimizationRepository
 from tests.unit.factories import make_pod
@@ -213,3 +222,99 @@ def test_review_missing_recommendation_is_404(api_state):
         headers={"Authorization": "Bearer test-token"},
     )
     assert resp.status_code == 404
+
+
+@pytest.fixture
+def apply_api_state():
+    """Separate from `api_state`: that fixture's own bare Pod only ever
+    produces a DATA_QUALITY recommendation (no proposed_requests/limits,
+    so it can never be applied). This one saves a real CPU-category
+    recommendation directly and wires a mocked RemediationService, to
+    test `/apply`'s own routing/error-mapping without needing a real
+    cluster or a real propose_standalone() call."""
+    with tempfile.TemporaryDirectory() as d:
+        settings = Settings(api_token="test-token", db_path=str(Path(d) / "test.db"))
+        repo = SQLiteOptimizationRepository(str(Path(d) / "opt.db"))
+        now_ = datetime.now(timezone.utc)
+        recommendation = ResourceRecommendation(
+            recommendation_id="rec-1",
+            namespace=NAMESPACE,
+            workload_kind=WorkloadKind.DEPLOYMENT,
+            workload_name="demo",
+            workload_uid="deploy-uid-1234",
+            container_name="app",
+            category="CPU",
+            usage=UsageSummary(evidence_quality=EvidenceQuality.HISTORICAL, observed_at=now_),
+            proposed_requests=ResourceQuantity(cpu_millicores=500),
+            reasoning="test",
+            status=RecommendationStatus.APPROVED,
+            created_at=now_,
+            expires_at=now_ + timedelta(hours=1),
+        )
+        repo.save_recommendation(recommendation)
+
+        remediation = MagicMock()
+        remediation.propose_standalone.return_value = SimpleNamespace(
+            action_id="action-1", status="PENDING_APPROVAL", model_dump=lambda mode: {"action_id": "action-1", "status": "PENDING_APPROVAL"}
+        )
+        app_module.state.settings = settings
+        app_module.state.optimization = OptimizationService(MagicMock(), repo, settings, remediation=remediation)
+
+        yield repo, remediation
+        repo.close()
+
+
+def test_apply_without_remediation_configured_is_503(api_state):
+    client.post("/optimization/analyze", json={"namespaces": [NAMESPACE]})
+    rec_id = client.get("/optimization/recommendations").json()[0]["recommendation_id"]
+
+    resp = client.post(
+        f"/optimization/recommendations/{rec_id}/apply",
+        json={"rationale": "right-size"},
+        headers={"Authorization": "Bearer test-token"},
+    )
+
+    assert resp.status_code == 503
+
+
+def test_apply_without_authorization_header_is_401(apply_api_state):
+    resp = client.post("/optimization/recommendations/rec-1/apply", json={"rationale": "right-size"})
+    assert resp.status_code == 401
+
+
+def test_apply_missing_recommendation_is_404(apply_api_state):
+    resp = client.post(
+        "/optimization/recommendations/does-not-exist/apply",
+        json={"rationale": "right-size"},
+        headers={"Authorization": "Bearer test-token"},
+    )
+    assert resp.status_code == 404
+
+
+def test_apply_not_approved_is_409(apply_api_state):
+    repo, _remediation = apply_api_state
+    stored = repo.get_recommendation("rec-1")
+    stored.status = RecommendationStatus.NEW
+    repo.save_recommendation(stored)
+
+    resp = client.post(
+        "/optimization/recommendations/rec-1/apply",
+        json={"rationale": "right-size"},
+        headers={"Authorization": "Bearer test-token"},
+    )
+
+    assert resp.status_code == 409
+
+
+def test_apply_success_calls_remediation_and_returns_action(apply_api_state):
+    _repo, remediation = apply_api_state
+
+    resp = client.post(
+        "/optimization/recommendations/rec-1/apply",
+        json={"rationale": "right-size"},
+        headers={"Authorization": "Bearer test-token"},
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["action_id"] == "action-1"
+    remediation.propose_standalone.assert_called_once()

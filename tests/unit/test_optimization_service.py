@@ -3,6 +3,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
+from uuid import uuid4
 
 import pytest
 from kubernetes.client import (
@@ -25,12 +26,22 @@ from kubesentinel.metrics.registry import (
     optimization_metrics_data_available,
     optimization_recommendations_total,
 )
+from kubesentinel.models.action import ActionStatus
 from kubesentinel.models.incident import Incident, IncidentStatus, ResourceRef
-from kubesentinel.models.optimization import RecommendationCategory, RecommendationStatus
+from kubesentinel.models.optimization import (
+    EvidenceQuality,
+    RecommendationCategory,
+    RecommendationStatus,
+    ResourceQuantity,
+    ResourceRecommendation,
+    UsageSummary,
+    WorkloadKind,
+)
 from kubesentinel.optimization.service import (
     InvalidRecommendationStateError,
     OptimizationService,
     RecommendationNotFoundError,
+    RemediationNotConfiguredError,
 )
 from kubesentinel.persistence.optimization_repo import SQLiteOptimizationRepository
 from tests.unit.factories import make_pod
@@ -503,3 +514,183 @@ class TestOptimizationMetrics:
         service.analyze(namespaces=[NAMESPACE])
 
         assert optimization_metrics_data_available.labels(provider="prometheus")._value.get() == 0
+
+
+_UNSET = object()  # distinguishes "not passed" from an explicit None, for proposed_requests below
+
+
+def _recommendation(
+    *,
+    status: RecommendationStatus = RecommendationStatus.APPROVED,
+    category: RecommendationCategory = RecommendationCategory.CPU,
+    proposed_requests: ResourceQuantity | None | object = _UNSET,
+    proposed_limits: ResourceQuantity | None = None,
+    safety_flags: list[str] | None = None,
+    workload_kind: WorkloadKind = WorkloadKind.DEPLOYMENT,
+    workload_uid: str | None = "deploy-uid-1234",
+    applied_action_id: str | None = None,
+    expires_at: datetime | None = None,
+) -> ResourceRecommendation:
+    now = datetime.now(timezone.utc)
+    if proposed_requests is _UNSET:
+        proposed_requests = ResourceQuantity(cpu_millicores=500)
+    return ResourceRecommendation(
+        recommendation_id=str(uuid4()),
+        namespace=NAMESPACE,
+        workload_kind=workload_kind,
+        workload_name="demo",
+        workload_uid=workload_uid,
+        container_name="app",
+        category=category,
+        usage=UsageSummary(evidence_quality=EvidenceQuality.HISTORICAL, observed_at=now),
+        proposed_requests=proposed_requests,
+        proposed_limits=proposed_limits,
+        reasoning="test",
+        safety_flags=safety_flags or [],
+        status=status,
+        applied_action_id=applied_action_id,
+        created_at=now,
+        expires_at=expires_at or now + timedelta(hours=1),
+    )
+
+
+class TestApplyRecommendation:
+    def _service_with_remediation(self, repo, remediation=None):
+        clients = _clients()
+        remediation = remediation or MagicMock()
+        service = OptimizationService(clients, repo, _settings(), remediation=remediation)
+        return service, remediation
+
+    def test_raises_when_no_remediation_service_configured(self, repo):
+        service = OptimizationService(_clients(), repo, _settings())
+        repo.save_recommendation(_recommendation())
+        rec_id = repo.list_recommendations()[0].recommendation_id
+
+        with pytest.raises(RemediationNotConfiguredError):
+            service.apply_recommendation(rec_id, rationale="right-size")
+
+    def test_not_found_raises(self, repo):
+        service, _remediation = self._service_with_remediation(repo)
+        with pytest.raises(RecommendationNotFoundError):
+            service.apply_recommendation("does-not-exist", rationale="test")
+
+    def test_requires_approved_status(self, repo):
+        service, _remediation = self._service_with_remediation(repo)
+        repo.save_recommendation(_recommendation(status=RecommendationStatus.NEW))
+        rec_id = repo.list_recommendations()[0].recommendation_id
+
+        with pytest.raises(InvalidRecommendationStateError, match="not APPROVED"):
+            service.apply_recommendation(rec_id, rationale="test")
+
+    def test_rejects_an_expired_recommendation(self, repo):
+        service, _remediation = self._service_with_remediation(repo)
+        repo.save_recommendation(
+            _recommendation(expires_at=datetime.now(timezone.utc) - timedelta(seconds=1))
+        )
+        rec_id = repo.list_recommendations()[0].recommendation_id
+
+        with pytest.raises(InvalidRecommendationStateError, match="EXPIRED"):
+            service.apply_recommendation(rec_id, rationale="test")
+
+    def test_refuses_a_flagged_recommendation(self, repo):
+        service, _remediation = self._service_with_remediation(repo)
+        repo.save_recommendation(_recommendation(safety_flags=["ACTIVE_INCIDENT"]))
+        rec_id = repo.list_recommendations()[0].recommendation_id
+
+        with pytest.raises(InvalidRecommendationStateError, match="safety_flags"):
+            service.apply_recommendation(rec_id, rationale="test")
+
+    def test_refuses_a_recommendation_with_nothing_proposed(self, repo):
+        service, _remediation = self._service_with_remediation(repo)
+        repo.save_recommendation(
+            _recommendation(category=RecommendationCategory.DATA_QUALITY, proposed_requests=None, proposed_limits=None)
+        )
+        rec_id = repo.list_recommendations()[0].recommendation_id
+
+        with pytest.raises(InvalidRecommendationStateError, match="nothing to apply"):
+            service.apply_recommendation(rec_id, rationale="test")
+
+    def test_refuses_a_non_deployment_workload(self, repo):
+        service, _remediation = self._service_with_remediation(repo)
+        repo.save_recommendation(_recommendation(workload_kind=WorkloadKind.STATEFULSET))
+        rec_id = repo.list_recommendations()[0].recommendation_id
+
+        with pytest.raises(InvalidRecommendationStateError, match="not a Deployment"):
+            service.apply_recommendation(rec_id, rationale="test")
+
+    def test_refuses_a_recommendation_already_applied(self, repo):
+        service, _remediation = self._service_with_remediation(repo)
+        repo.save_recommendation(_recommendation(applied_action_id="action-already-there"))
+        rec_id = repo.list_recommendations()[0].recommendation_id
+
+        with pytest.raises(InvalidRecommendationStateError, match="already has an application"):
+            service.apply_recommendation(rec_id, rationale="test")
+
+    def test_success_calls_propose_standalone_with_only_proposed_keys_and_links_action_id(self, repo):
+        fake_action = SimpleNamespace(action_id="action-123", status=ActionStatus.PENDING_APPROVAL)
+        remediation = MagicMock()
+        remediation.propose_standalone.return_value = fake_action
+        service, _remediation = self._service_with_remediation(repo, remediation=remediation)
+        repo.save_recommendation(
+            _recommendation(
+                proposed_requests=ResourceQuantity(cpu_millicores=500),
+                proposed_limits=ResourceQuantity(memory_bytes=268435456),
+            )
+        )
+        rec_id = repo.list_recommendations()[0].recommendation_id
+
+        action = service.apply_recommendation(rec_id, rationale="right-size")
+
+        assert action is fake_action
+        call_kwargs = remediation.propose_standalone.call_args.kwargs
+        assert call_kwargs["parameters"]["requests"] == {"cpu": "500m"}
+        assert call_kwargs["parameters"]["limits"] == {"memory": "268435456"}
+        assert call_kwargs["target"].resource_uid == "deploy-uid-1234"
+        assert call_kwargs["category"] == "RESOURCE_OPTIMIZATION"
+
+        updated = repo.get_recommendation(rec_id)
+        assert updated.applied_action_id == "action-123"
+
+    def test_a_policy_rejected_action_does_not_lock_the_recommendation(self, repo):
+        # Caught live: policy_mode=OBSERVE denies ADJUST_RESOURCES like
+        # every other action type, returning a REJECTED action that never
+        # touched the cluster -- that must not permanently consume this
+        # recommendation's one-shot apply, the same "a REJECTED action
+        # never counts" discipline policy/engine.py's own cooldown/budget
+        # checks already apply.
+        rejected_action = SimpleNamespace(action_id="action-789", status=ActionStatus.REJECTED)
+        remediation = MagicMock()
+        remediation.propose_standalone.return_value = rejected_action
+        service, _remediation = self._service_with_remediation(repo, remediation=remediation)
+        repo.save_recommendation(_recommendation())
+        rec_id = repo.list_recommendations()[0].recommendation_id
+
+        action = service.apply_recommendation(rec_id, rationale="test")
+
+        assert action is rejected_action
+        updated = repo.get_recommendation(rec_id)
+        assert updated.applied_action_id is None
+
+        # A second attempt must still be possible -- not blocked by
+        # "already has an application in flight/done".
+        remediation.propose_standalone.return_value = SimpleNamespace(
+            action_id="action-999", status=ActionStatus.PENDING_APPROVAL
+        )
+        retried = service.apply_recommendation(rec_id, rationale="retry")
+        assert retried.action_id == "action-999"
+
+    def test_only_proposed_dimension_is_included_never_both(self, repo):
+        fake_action = SimpleNamespace(action_id="action-456", status=ActionStatus.PENDING_APPROVAL)
+        remediation = MagicMock()
+        remediation.propose_standalone.return_value = fake_action
+        service, _remediation = self._service_with_remediation(repo, remediation=remediation)
+        repo.save_recommendation(
+            _recommendation(proposed_requests=ResourceQuantity(cpu_millicores=250), proposed_limits=None)
+        )
+        rec_id = repo.list_recommendations()[0].recommendation_id
+
+        service.apply_recommendation(rec_id, rationale="test")
+
+        call_kwargs = remediation.propose_standalone.call_args.kwargs
+        assert call_kwargs["parameters"]["requests"] == {"cpu": "250m"}
+        assert call_kwargs["parameters"]["limits"] == {}

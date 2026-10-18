@@ -115,7 +115,7 @@ async def lifespan(app: FastAPI):
             )
             state.remediation = RemediationService(PolicyEngine(settings), executor, verifier, state.repo, settings)
             state.optimization = OptimizationService(
-                clients, state.optimization_repo, settings, incident_repo=state.repo
+                clients, state.optimization_repo, settings, incident_repo=state.repo, remediation=state.remediation
             )
             state.scheduling = SchedulingService(clients, state.scheduling_repo, incident_repo=state.repo)
             state.network = NetworkService(clients, state.network_repo, settings, incident_repo=state.repo)
@@ -299,6 +299,59 @@ def reject_action(incident_id: str, action_id: str, body: RejectRequest) -> dict
     service = _require_remediation_service()
     try:
         action = service.reject(incident, action_id, body.rejected_by, body.reason)
+    except ActionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except InvalidActionStateError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return action.model_dump(mode="json")
+
+
+# -- Standalone actions: no owning incident at all (docs/
+# RESOURCE_OPTIMIZATION_DESIGN.md Section 14.5) -- e.g. one created by
+# POST /optimization/recommendations/{id}/apply. A sibling path, never a
+# replacement: an incident-driven action is still only ever reached
+# through its own /incidents/{id}/actions/{action_id}/... routes above.
+
+
+@app.get("/actions/{action_id}")
+def get_standalone_action(action_id: str) -> dict:
+    service = _require_remediation_service()
+    try:
+        action = service.get_standalone_action(action_id)
+    except ActionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return action.model_dump(mode="json")
+
+
+@app.post("/actions/{action_id}/approve", dependencies=[Depends(require_api_token)])
+def approve_standalone_action(action_id: str, body: ApproveRequest) -> dict:
+    service = _require_remediation_service()
+    try:
+        action = service.approve_standalone(action_id, body.approved_by)
+    except ActionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except InvalidActionStateError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return action.model_dump(mode="json")
+
+
+@app.post("/actions/{action_id}/execute", dependencies=[Depends(require_api_token)])
+def execute_standalone_action(action_id: str) -> dict:
+    service = _require_remediation_service()
+    try:
+        action = service.execute_standalone(action_id, category="RESOURCE_OPTIMIZATION")
+    except ActionNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except InvalidActionStateError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return action.model_dump(mode="json")
+
+
+@app.post("/actions/{action_id}/reject", dependencies=[Depends(require_api_token)])
+def reject_standalone_action(action_id: str, body: RejectRequest) -> dict:
+    service = _require_remediation_service()
+    try:
+        action = service.reject_standalone(action_id, body.rejected_by, body.reason)
     except ActionNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except InvalidActionStateError as exc:

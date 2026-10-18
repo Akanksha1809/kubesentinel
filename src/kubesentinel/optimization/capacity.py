@@ -414,6 +414,7 @@ def analyze_capacity(
         namespace=workload.namespace,
         workload_kind=workload.workload_kind,
         workload_name=workload.workload_name,
+        workload_uid=workload.workload_uid,
         container_name=container_name,
         category=RecommendationCategory.CAPACITY,
         current_requests=requests,

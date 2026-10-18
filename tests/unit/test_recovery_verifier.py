@@ -134,6 +134,33 @@ def test_scale_does_not_require_updated_replicas():
     assert outcome.status == VerificationStatus.RECOVERED
 
 
+def test_adjust_resources_requires_updated_replicas_like_restart_and_rollback():
+    # ADJUST_RESOURCES patches spec.template.spec.containers[].resources --
+    # the same template change RESTART/ROLLBACK make, starting a new
+    # rollout the same way. Mid-rollout (ready/available satisfied via the
+    # *old* ReplicaSet, updated_replicas lagging) must not report RECOVERED.
+    apps = MagicMock()
+    mid_rollout = make_deployment(desired_replicas=2, ready_replicas=2, available_replicas=2, updated_replicas=1)
+    apps.read_namespaced_deployment.return_value = mid_rollout
+    verifier = RecoveryVerifier(apps, deadline_seconds=0.05, poll_interval_seconds=0.01)
+
+    outcome = verifier.verify(_action(action_type=ActionType.ADJUST_RESOURCES))
+
+    assert outcome.status == VerificationStatus.INCONCLUSIVE
+
+
+def test_adjust_resources_recovers_once_updated_replicas_catches_up():
+    apps = MagicMock()
+    mid_rollout = make_deployment(desired_replicas=2, ready_replicas=2, available_replicas=2, updated_replicas=1)
+    rollout_complete = make_deployment(desired_replicas=2, ready_replicas=2, available_replicas=2, updated_replicas=2)
+    apps.read_namespaced_deployment.side_effect = [mid_rollout, rollout_complete]
+    verifier = RecoveryVerifier(apps, deadline_seconds=1.0, poll_interval_seconds=0.01)
+
+    outcome = verifier.verify(_action(action_type=ActionType.ADJUST_RESOURCES))
+
+    assert outcome.status == VerificationStatus.RECOVERED
+
+
 def test_inconclusive_when_deadline_exceeded_with_no_clear_signal():
     apps = MagicMock()
     # Not fully ready, but no confirmed failure signal either -- genuinely ambiguous.

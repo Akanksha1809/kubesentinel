@@ -39,6 +39,7 @@ from kubesentinel.optimization.service import (
     InvalidRecommendationStateError,
     OptimizationService,
     RecommendationNotFoundError,
+    RemediationNotConfiguredError,
 )
 from kubesentinel.models.optimization import RecommendationStatus
 from kubesentinel.network.service import (
@@ -397,7 +398,17 @@ def _build_optimization_service(settings: Settings) -> tuple[OptimizationService
     clients = build_clients(settings)
     repo = SQLiteOptimizationRepository(settings.db_path)
     incident_repo = SQLiteIncidentRepository(settings.db_path)
-    return OptimizationService(clients, repo, settings, incident_repo=incident_repo), repo
+    executor = RemediationExecutor(clients.apps, timeout_seconds=settings.action_execution_timeout_seconds)
+    verifier = RecoveryVerifier(
+        clients.apps,
+        deadline_seconds=settings.verification_deadline_seconds,
+        poll_interval_seconds=settings.verification_poll_interval_seconds,
+    )
+    remediation = RemediationService(PolicyEngine(settings), executor, verifier, incident_repo, settings)
+    return (
+        OptimizationService(clients, repo, settings, incident_repo=incident_repo, remediation=remediation),
+        repo,
+    )
 
 
 @app.command("optimize")
@@ -521,8 +532,9 @@ def review_recommendation(
     json_output: bool = typer.Option(False, "--json"),
 ) -> None:
     """Record a human review decision on a recommendation. Never applies
-    anything to the cluster -- there is no apply path in this project yet;
-    see docs/RESOURCE_OPTIMIZATION_DESIGN.md."""
+    anything to the cluster on its own -- see `recommendation-apply` for
+    that, a separate, explicit step (docs/RESOURCE_OPTIMIZATION_DESIGN.md
+    Section 14)."""
     settings = get_settings()
     service, _repo = _build_optimization_service(settings)
     try:
@@ -535,6 +547,144 @@ def review_recommendation(
         print(json_module.dumps(recommendation.model_dump(mode="json"), indent=2))
         return
     console.print(f"status: [bold]{recommendation.status.value}[/bold]")
+
+
+@app.command("recommendation-apply")
+def apply_recommendation_cmd(
+    recommendation_id: str = typer.Argument(..., help="Recommendation to apply"),
+    rationale: str = typer.Option(..., "--rationale", help="Why this is being applied"),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """Creates a standalone, policy-gated RemediationAction applying an
+    already-APPROVED recommendation's own proposed requests/limits.
+    Always ends up PENDING_APPROVAL -- use `action-approve` then
+    `action-execute` on the printed action_id next. See
+    docs/RESOURCE_OPTIMIZATION_DESIGN.md Section 14 for every precondition
+    this can refuse on."""
+    settings = get_settings()
+    configure_logging(settings.log_level)
+    service, _repo = _build_optimization_service(settings)
+    try:
+        action = service.apply_recommendation(recommendation_id, rationale)
+    except (RecommendationNotFoundError, InvalidRecommendationStateError, RemediationNotConfiguredError) as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from exc
+
+    if json_output:
+        print(json_module.dumps(action.model_dump(mode="json"), indent=2))
+        return
+    console.print(f"action_id: {action.action_id}")
+    console.print(f"status: [bold]{action.status.value}[/bold]")
+
+
+def _build_standalone_remediation_service(settings: Settings) -> RemediationService:
+    clients = build_clients(settings)
+    incident_repo = SQLiteIncidentRepository(settings.db_path)
+    executor = RemediationExecutor(clients.apps, timeout_seconds=settings.action_execution_timeout_seconds)
+    verifier = RecoveryVerifier(
+        clients.apps,
+        deadline_seconds=settings.verification_deadline_seconds,
+        poll_interval_seconds=settings.verification_poll_interval_seconds,
+    )
+    return RemediationService(PolicyEngine(settings), executor, verifier, incident_repo, settings)
+
+
+@app.command("action")
+def show_standalone_action(
+    action_id: str = typer.Argument(..., help="Standalone action to show"),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """Show one standalone action (no owning incident) in full -- e.g. one
+    created by `recommendation-apply`."""
+    settings = get_settings()
+    service = _build_standalone_remediation_service(settings)
+    try:
+        action = service.get_standalone_action(action_id)
+    except ActionNotFoundError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from exc
+
+    if json_output:
+        print(json_module.dumps(action.model_dump(mode="json"), indent=2))
+        return
+    console.print(f"action_id: {action.action_id}")
+    console.print(f"status: [bold]{action.status.value}[/bold]")
+    if action.execution_error:
+        console.print(f"error: {action.execution_error}")
+    if action.verification:
+        console.print(f"verification: {action.verification.status.value} -- {action.verification.reason}")
+
+
+@app.command("action-approve")
+def approve_standalone_action_cmd(
+    action_id: str = typer.Argument(...),
+    approved_by: str = typer.Option(..., "--approved-by"),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """Approve a PENDING_APPROVAL standalone action. Does not execute it --
+    run `action-execute` next."""
+    settings = get_settings()
+    configure_logging(settings.log_level)
+    service = _build_standalone_remediation_service(settings)
+    try:
+        action = service.approve_standalone(action_id, approved_by)
+    except (ActionNotFoundError, InvalidActionStateError) as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from exc
+
+    if json_output:
+        print(json_module.dumps(action.model_dump(mode="json"), indent=2))
+        return
+    console.print(f"status: [bold]{action.status.value}[/bold]")
+
+
+@app.command("action-execute")
+def execute_standalone_action_cmd(
+    action_id: str = typer.Argument(...),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """Execute an APPROVED standalone action and verify the outcome. Blocks
+    up to the verification deadline."""
+    settings = get_settings()
+    configure_logging(settings.log_level)
+    service = _build_standalone_remediation_service(settings)
+    try:
+        action = service.execute_standalone(action_id, category="RESOURCE_OPTIMIZATION")
+    except (ActionNotFoundError, InvalidActionStateError) as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from exc
+
+    if json_output:
+        print(json_module.dumps(action.model_dump(mode="json"), indent=2))
+        return
+    console.print(f"status: [bold]{action.status.value}[/bold]")
+    if action.execution_error:
+        console.print(f"error: {action.execution_error}")
+    if action.verification:
+        console.print(f"verification: {action.verification.status.value} -- {action.verification.reason}")
+
+
+@app.command("action-reject")
+def reject_standalone_action_cmd(
+    action_id: str = typer.Argument(...),
+    rejected_by: str = typer.Option(..., "--rejected-by"),
+    reason: str = typer.Option(..., "--reason"),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """Reject a PENDING_APPROVAL standalone action."""
+    settings = get_settings()
+    configure_logging(settings.log_level)
+    service = _build_standalone_remediation_service(settings)
+    try:
+        action = service.reject_standalone(action_id, rejected_by, reason)
+    except (ActionNotFoundError, InvalidActionStateError) as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from exc
+
+    if json_output:
+        print(json_module.dumps(action.model_dump(mode="json"), indent=2))
+        return
+    console.print(f"status: [bold]{action.status.value}[/bold]")
 
 
 def _build_scheduling_service(settings: Settings) -> tuple[SchedulingService, SQLiteSchedulingRepository]:

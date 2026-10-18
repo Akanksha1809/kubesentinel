@@ -90,7 +90,7 @@ evidence.
 | Resource-related scheduling problems | Implemented | `SCHEDULING` category, reusing `diagnostics/rules/scheduling.py`'s message classification |
 | Distinguish inefficiency from spikes/defects | Implemented | peak-not-average for memory, percentile-not-max for CPU, `LIMITED_HISTORY` threshold before any number |
 | Explain every recommendation | Implemented | `reasoning` is always populated with the actual observed statistic vs. the actual configured value |
-| Preserve original config | Implemented, trivially -- there is no apply path | Analysis never mutates `spec.template.spec.containers[].resources`; a future apply milestone would need to snapshot the original explicitly, not yet built |
+| Preserve original config | Implemented | `ResourceRecommendation.current_requests`/`current_limits` already record the pre-change values as evidence; the apply path itself (docs/RESOURCE_OPTIMIZATION_DESIGN.md §14) patches only the specific keys actually proposed via a merge PATCH, never touching an untouched dimension. No automated undo/rollback for `ADJUST_RESOURCES` specifically (unlike `ROLLBACK_DEPLOYMENT`'s real revision history) -- a human reverting would re-apply the recorded `current_requests`/`current_limits` manually or via a fresh recommendation, named here as a real v1 boundary, not silently assumed covered |
 | Read-only by default | Implemented, checked not just asserted | A live integration test patches the HTTP transport itself and asserts a full `analyze()` pass (inventory + metrics-server + persistence) issues only `GET` |
 | No aggressive downsizing from one sample | Implemented | `EvidenceQuality` gating, unit- and live-tested against real metrics-server data (Milestone 18) |
 | No automatic limit increase from one OOM event | Implemented | `OOM_HISTORY` flags and vetoes a *decrease*; it never proposes an *increase* either -- the row simply carries no safe proposed number either direction until there's enough evidence |
@@ -105,8 +105,12 @@ cluster-level overcommitment analysis (needs Node allocatable capacity
 aggregated across every workload -- doesn't fit today's per-container
 `ResourceRecommendation` shape); a Node-metrics ClusterRole (nothing calls
 `MetricsApiProvider.get_current_node_usage()`, which has existed since this
-engine's own Milestone 2 but has no caller); any apply/execute path (see
-"Shared policy layer" below).
+engine's own Milestone 2 but has no caller). The apply/execute path named
+here as deferred in this milestone's own original scope is closed now, as
+later, separate, explicitly-requested follow-up work -- see
+`RESOURCE_OPTIMIZATION_DESIGN.md` §14, TODO.md's own later milestone entry
+for it, and "Shared policy layer" below for how it fits that layer rather
+than duplicating it.
 
 ## Capability C: Kubernetes Scheduling & Placement Advisor
 
@@ -404,8 +408,9 @@ itself and confirms a full `audit()` pass issues only `GET`.
 
 ## Shared policy, approval, and remediation layer
 
-**Implemented for Capability A only; Capability B deliberately bypasses it
-in a way worth naming precisely before C/D/E/F are built.**
+**Implemented for Capability A from the start; now also for Capability B's
+own apply path (§14 of its design doc) -- this section's own forward-looking
+prediction, below, closed exactly as it anticipated, not bypassed.**
 
 `policy/engine.py::PolicyEngine` gates every troubleshooting-engine
 mutation (`propose()` -> `evaluate()` before anything is built or
@@ -414,26 +419,46 @@ namespace/resource-name allowlists, cooldowns, and per-incident/per-window
 budgets -- see REMEDIATION_SAFETY.md for the full, live-verified list.
 
 The resource optimization engine's `review()` (approve/reject/mark-reviewed
-a recommendation) does **not** go through `PolicyEngine` at all -- it has
-no `ActionType`, no mode check, no cooldown, no budget. This was a
-deliberate Milestone 16 design choice (a review is a decision *record*,
-never a cluster mutation, so the troubleshooting engine's mutation-specific
-gates don't apply) but it means **when Capability B eventually grows an
-apply path**, that path must be built to go through `PolicyEngine`
-explicitly -- it will not inherit any policy enforcement automatically just
-by existing in this codebase. The same will be true for whatever
-remediation surface C/D/E/F eventually need (if any): nothing about
-`PolicyEngine`'s current shape auto-applies to a new `ActionType` without
-each new executor method explicitly calling into it, the same way
-`RemediationExecutor` does today.
+a recommendation) still does **not** go through `PolicyEngine` -- it has
+no `ActionType`, no mode check, no cooldown, no budget, by the same
+deliberate Milestone 16 design choice as always (a review is a decision
+*record*, never a cluster mutation). `apply_recommendation()`
+(`RESOURCE_OPTIMIZATION_DESIGN.md` §14) is a different call, and does go
+through `PolicyEngine` explicitly, exactly as this section originally
+predicted it would have to: a new `ActionType.ADJUST_RESOURCES`, gated by
+the same mode/allowlist/cooldown/budget checks every other action type
+already gets, generalized (`incident_id`/`incident_severity` now
+`Optional`) rather than duplicated so a standalone action -- one with no
+owning Incident, the common case for a recommendation -- fits the exact
+same lifecycle instead of a parallel one.
+
+The network engine's active connectivity probe
+(`NETWORK_DIAGNOSTICS.md` §12) is the one new mutation surface that
+*deliberately does not* route through `PolicyEngine` -- not an oversight,
+a reasoned exception named in its own design doc: `PolicyEngine`/
+`ActionType`/`RemediationAction` model "mutate an existing Deployment,"
+and don't fit "create and delete a throwaway diagnostic Job" at all. It
+gets its own small, dedicated, equally-rigorous gate instead (its own
+enable flag, namespace allowlist, cooldown, and concurrency limit).
+Nothing about `PolicyEngine`'s current shape auto-applies to a new
+`ActionType` without each new executor method explicitly calling into
+it, the same way `RemediationExecutor` does today -- Capability B's own
+`_adjust_resources` method is the second proof of that, not the first.
 
 Already satisfied for *any* future mutation by construction, not by
 policy alone: no cluster-admin RBAC anywhere (`rbac/*.yaml` is entirely
-least-privilege, additive, and today 100% read-only outside the one
-`remediation-role.yaml`); no arbitrary shell/command execution anywhere in
-this codebase (confirmed by the complete absence of `subprocess`/`os.system`
-calls outside test fixtures and the one `kubectl create token` test helper);
-AI output has no path back to any decision (confirmed above).
+least-privilege, additive, and 100% read-only outside
+`remediation-role.yaml` and `network-probe-role.yaml`); AI output has no
+path back to any decision (confirmed above). The "no arbitrary shell/
+command execution anywhere in this codebase" claim this line used to make
+no longer holds unconditionally -- `security/image_scanning.py` (Trivy,
+opt-in, off by default) is a real, new `subprocess` call, named
+explicitly in its own design doc's own safety section rather than
+silently breaking this claim; every *other* code path in this project
+still has zero `subprocess`/`os.system` calls outside test fixtures and
+the one `kubectl create token` test helper. (`network/probe.py`'s own
+mutation is a Kubernetes API call, same mechanism as every other
+executor method in this project, not a new shell-out.)
 
 ## Shared observation, storage, and API
 

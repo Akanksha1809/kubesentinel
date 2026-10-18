@@ -241,6 +241,98 @@ def test_scale_always_requires_approval_even_in_controlled_auto():
     assert decision.outcome == PolicyOutcome.REQUIRES_APPROVAL
 
 
+class TestAdjustResources:
+    def test_always_requires_approval_even_in_controlled_auto(self):
+        engine = PolicyEngine(_settings(policy_mode=PolicyMode.CONTROLLED_AUTO))
+        decision = engine.evaluate(
+            _request(
+                action_type=ActionType.ADJUST_RESOURCES,
+                incident_id=None,
+                incident_severity=None,
+                hypothesis_confidence=Confidence.INCONCLUSIVE,
+                hypothesis_auto_remediation_permitted=False,
+            )
+        )
+        assert decision.outcome == PolicyOutcome.REQUIRES_APPROVAL
+
+    def test_against_a_pod_target_is_denied(self):
+        engine = PolicyEngine(_settings())
+        decision = engine.evaluate(
+            _request(action_type=ActionType.ADJUST_RESOURCES, target=_target(resource_type="Pod"))
+        )
+        assert decision.outcome == PolicyOutcome.DENIED
+        assert "only applies to Deployment" in decision.reason
+
+
+class TestStandaloneActionsWithNoIncident:
+    """PolicyRequest.incident_id/incident_severity are None for a
+    standalone action (docs/RESOURCE_OPTIMIZATION_DESIGN.md Section
+    14.1) -- e.g. applying a ResourceRecommendation."""
+
+    def test_per_incident_budget_check_is_a_no_op_without_an_incident(self):
+        # Even with an absurdly low budget, a request with no incident_id
+        # must never be denied by the per-incident check specifically --
+        # there is no incident to bound against.
+        engine = PolicyEngine(_settings(max_actions_per_incident=0, policy_mode=PolicyMode.APPROVAL_REQUIRED))
+        decision = engine.evaluate(
+            _request(
+                action_type=ActionType.ADJUST_RESOURCES,
+                incident_id=None,
+                incident_severity=None,
+            )
+        )
+        assert "per-incident budget" not in decision.reason
+
+    def test_per_window_budget_still_applies_without_an_incident(self):
+        engine = PolicyEngine(_settings(max_actions_per_window=1, action_window_seconds=600))
+        recent = [_action(incident_id=None, proposed_at=NOW - timedelta(seconds=100))]
+        decision = engine.evaluate(
+            _request(
+                action_type=ActionType.ADJUST_RESOURCES,
+                incident_id=None,
+                incident_severity=None,
+                recent_actions=recent,
+            )
+        )
+        assert decision.outcome == PolicyOutcome.DENIED
+        assert "per-window budget" in decision.reason
+
+    def test_cooldown_still_applies_without_an_incident(self):
+        engine = PolicyEngine(_settings(action_cooldown_seconds=60))
+        recent = [
+            _action(
+                action_type=ActionType.ADJUST_RESOURCES, incident_id=None, proposed_at=NOW - timedelta(seconds=10)
+            )
+        ]
+        decision = engine.evaluate(
+            _request(
+                action_type=ActionType.ADJUST_RESOURCES,
+                incident_id=None,
+                incident_severity=None,
+                recent_actions=recent,
+            )
+        )
+        assert decision.outcome == PolicyOutcome.DENIED
+        assert "cooldown" in decision.reason
+
+    def test_never_auto_execution_eligible_regardless_of_mode(self):
+        # Even in CONTROLLED_AUTO with every DENY-capable check passing,
+        # a standalone request's own INCONCLUSIVE confidence/False
+        # auto_remediation_permitted already make it ineligible, before
+        # even reaching the explicit _ALWAYS_REQUIRES_APPROVAL entry.
+        engine = PolicyEngine(_settings(policy_mode=PolicyMode.CONTROLLED_AUTO))
+        decision = engine.evaluate(
+            _request(
+                action_type=ActionType.RESTART_DEPLOYMENT,
+                incident_id=None,
+                incident_severity=None,
+                hypothesis_confidence=Confidence.INCONCLUSIVE,
+                hypothesis_auto_remediation_permitted=False,
+            )
+        )
+        assert decision.outcome == PolicyOutcome.REQUIRES_APPROVAL
+
+
 def test_controlled_auto_allows_restart_when_fully_eligible():
     engine = PolicyEngine(_settings(policy_mode=PolicyMode.CONTROLLED_AUTO))
     decision = engine.evaluate(

@@ -34,25 +34,43 @@ _ADVISORY_ACTION_TYPES = {ActionType.RECOMMEND_RESOURCE_ADJUSTMENT, ActionType.R
 # back/scaling a bare Pod isn't a coherent operation this project defines -- there's
 # no controller to recreate it from, which is this project's reading of the spec's
 # "whether the resource is managed by a controller" policy criterion.
+# ADJUST_RESOURCES (docs/RESOURCE_OPTIMIZATION_DESIGN.md Section 14.2 point 5)
+# reuses this exact same reasoning rather than relaxing it: StatefulSet/
+# DaemonSet would work the same way in principle, but Job can't be patched
+# once running and a standalone Pod has no controller to patch at all --
+# scoped to Deployment only, like every action type already here.
 _DEPLOYMENT_ONLY_ACTION_TYPES = {
     ActionType.RESTART_DEPLOYMENT,
     ActionType.ROLLBACK_DEPLOYMENT,
     ActionType.SCALE_DEPLOYMENT,
+    ActionType.ADJUST_RESOURCES,
 }
 
 # Action types the spec treats as higher-impact than a plain restart (rollback
 # changes the running code; scaling changes capacity) -- these always require a
 # human, even in CONTROLLED_AUTO mode, matching the spec's explicit "approval-gated
-# scaling."
-_ALWAYS_REQUIRES_APPROVAL = {ActionType.ROLLBACK_DEPLOYMENT, ActionType.SCALE_DEPLOYMENT}
+# scaling." ADJUST_RESOURCES joins them for the same reason: it changes running
+# Pods' resource allocation, a higher blast radius than a plain restart, and this
+# project has no correctness evidence yet strong enough to let it run unattended.
+_ALWAYS_REQUIRES_APPROVAL = {ActionType.ROLLBACK_DEPLOYMENT, ActionType.SCALE_DEPLOYMENT, ActionType.ADJUST_RESOURCES}
 
 
 @dataclass
 class PolicyRequest:
     action_type: ActionType
     target: ActionTarget
-    incident_id: str
-    incident_severity: IncidentSeverity
+    # None for a standalone action with no owning Incident (see
+    # models/action.py::RemediationAction.incident_id) -- when None,
+    # _check_per_incident_budget has nothing to check and is skipped; the
+    # per-window budget and per-target cooldown both still apply
+    # unconditionally, so a standalone action is never *less* bounded, only
+    # missing the one check that has no meaning without an incident.
+    incident_id: str | None
+    # None alongside incident_id -- there is no incident severity to reason
+    # about for a standalone action. `_auto_execution_eligible` already
+    # requires HIGH+ severity, so None here simply can never qualify for
+    # unattended execution, with no special-casing needed.
+    incident_severity: IncidentSeverity | None
     hypothesis_confidence: Confidence
     # Whether the diagnostic hypothesis that triggered this proposal believes this
     # type of action can actually help. Every rule through Milestone 2 sets this to
@@ -161,6 +179,12 @@ class PolicyEngine:
         return None
 
     def _check_per_incident_budget(self, request: PolicyRequest) -> PolicyDecision | None:
+        if request.incident_id is None:
+            # A standalone action has no incident to bound against -- the
+            # per-window budget and per-target cooldown checks still apply
+            # unconditionally, so this isn't a gap, just a check with
+            # nothing to check.
+            return None
         count = sum(
             1
             for a in request.recent_actions
