@@ -3787,3 +3787,145 @@ connectivity probe (Milestone 33), and this one.
 
 **Full regression suite**: ruff clean, mypy clean, **942 unit tests
 passed** (895 + 47).
+
+## Milestone 35: Manual review of Milestones 30-34's own diff -- DONE
+
+A free, self-directed manual code review (explicitly chosen over the
+paid multi-agent `/code-review ultra`, which the user asked not to run)
+of the full diff introduced by Milestones 30-34 -- 66 files, 6370
+insertions, against a throwaway `baseline-pre-fix-it-all` branch pinned
+at the commit immediately before that work started, created solely to
+give the review a concrete diff (both branch and the PR opened against
+it were deleted once the review closed, nothing to merge, nothing
+that needed keeping). File-by-file, highest-mutation-risk files first.
+
+**Six real findings, all fixed in the same pass, not just reported**:
+
+1. **Security, most severe**: `POST /network/probe`
+   (`api/network_routes.py`) had no `require_api_token` dependency --
+   every other mutating route in the project (including the sibling
+   `/optimization/recommendations/{id}/apply` added in Milestone 34
+   itself) carries one, per `api/app.py`'s own module docstring ("an
+   unset token means mutating endpoints are disabled, never open").
+   This route creates a real Job in the cluster and was reachable
+   unauthenticated regardless of `KUBESENTINEL_API_TOKEN`. Fixed by
+   adding the same dependency every sibling route already has.
+2. **Correctness**: `scheduling/constraints.py::check_topology_spread_constraints`
+   always treated a candidate node missing the topology label as
+   blocking, even under `whenUnsatisfiable=ScheduleAnyway` -- contradicting
+   the function's own stated design (a soft preference must never
+   block) and producing a false "unschedulable" verdict for a Pod the
+   real scheduler would still place. The existing test only covered the
+   `DoNotSchedule` case; a new one added for `ScheduleAnyway`.
+3. **Concurrency**: `network/service.py::run_probe`'s cooldown-check ->
+   concurrency-check -> create-Job sequence had no lock, unlike
+   `RemediationService._propose_lock`, built earlier in this project's
+   own history to close the exact same TOCTOU bug class for `propose()`.
+   Two concurrent `run_probe()` calls could both pass the gating checks
+   before either created a Job, exceeding the configured per-namespace
+   concurrency limit. Fixed with a new `NetworkService._probe_lock`
+   held across the same span `_propose_lock` covers for its own
+   analogous sequence.
+4. **Validation**: `optimization/service.py::apply_recommendation`'s
+   "nothing to apply" precondition checked `is None` on
+   `proposed_requests`/`proposed_limits`, not whether either object
+   actually carried a value -- a non-`None`-but-empty `ResourceQuantity`
+   slipped through to create a pointless (harmless, but unintended) no-op
+   action instead of being refused upfront with the same specific,
+   named reason every other precondition in that function gets.
+5. **Scalability**: `security/image_scanning.py::scan_images` had no cap
+   on the number of distinct images scanned per `audit()` call -- each
+   individual `trivy` call was already timeout-bounded, but the total
+   across every distinct image in the cluster was not. Added
+   `security_image_scan_max_images` (default 25); images past the cap
+   are named in a warning, never silently dropped.
+6. **Robustness**: `remediation/executor.py::_adjust_resources` never
+   verified `container_name` still existed on the live Deployment
+   before patching -- a stale name (renamed/removed since the
+   recommendation was created) would make Kubernetes' own
+   strategic-merge-patch *append* a new, invalid container instead of
+   refusing with a clear reason (the real API would still reject it at
+   admission for lacking an `image`, surfacing as a generic
+   `EXECUTION_FAILED` -- survivable, but not the specific, named refusal
+   every other precondition in this project gives). Fixed with an
+   explicit existence check before the patch is built.
+
+**Tests**: 2 new (the `ScheduleAnyway` topology case, and the
+network-probe-auth-boundary case) plus 4 existing `test_network_api.py`
+probe tests updated to supply the now-required bearer token. Full
+regression suite: ruff clean, mypy clean, **944 unit tests passed**
+(942 + 2).
+
+## Milestone 36: Cluster-level overcommitment analysis -- DONE
+
+Closes the one item `docs/IMPLEMENTATION_STATUS.md`'s Capability B
+section named "deliberately not built" at its own original audit:
+"cluster-level overcommitment analysis (needs Node allocatable capacity
+aggregated across every workload -- doesn't fit today's per-container
+`ResourceRecommendation` shape)." See `RESOURCE_OPTIMIZATION_DESIGN.md`
+§15 for the full design.
+
+A new top-level `ClusterOvercommitmentSummary`, never a
+`ResourceRecommendation` -- cluster-wide, not per-container, so it has
+no natural `namespace`/`workload_name` to key a recommendation row on.
+Reports two ratios per Node and cluster-wide, deliberately not
+collapsed into one: requested-vs-allocatable (the real scheduler's own
+accounting unit -- should never exceed 1.0; a ratio above that is a
+genuine anomaly, not a tuning signal) and limits-vs-allocatable (the
+actionable signal -- never admission-enforced by Kubernetes, so
+entirely normal to exceed 1.0 in healthy operation; flagged past a new
+configurable `optimization_overcommitment_limits_ratio_threshold`,
+default 1.0, rather than the moment it crosses 1.0 unconditionally).
+
+**Zero new cluster read**: `optimization/overcommitment.py::compute_cluster_overcommitment()`
+is a pure function over the *same* `NodeSnapshot`s `OptimizationService.analyze()`
+already fetches for the existing capacity-headroom check (Milestone 23).
+`NodeSnapshot` (`models/scheduling.py`) gained `limits` and
+`unlimited_cpu_container_count`/`unlimited_memory_container_count`,
+extended onto the same per-Node, per-Pod loop
+`scheduling/node_inventory.py::build_node_inventory` already runs for
+`requested` -- not a second Node/Pod listing. A container with no limit
+at all is never treated as contributing 0: the sum only totals
+containers that specified one, and the unlimited count is carried
+through separately so a caller can never mistake "no limit specified"
+for "confirmed safe." Attached to `AnalysisRunSummary.overcommitment`
+(a new optional field on an already JSON-blob-serialized model -- no
+schema migration, same precedent the HPA/capacity fields already set
+in Milestone 23) -- `None`, never a zero-filled summary, whenever Node
+inventory itself wasn't available that pass, reusing the exact same
+degrade-don't-abort path the capacity-headroom check already has.
+
+**Zero new routes or persistence**: `GET /optimization/summary` and
+`kubesentinel optimization-summary` (table and `--json`) already
+surface `latest_analysis` as a full model-dumped dict -- the CLI's
+table output gained one new line showing the cluster-wide limits ratio
+and a red/green flag, the only touch needed on that surface.
+
+**Live-verified against the real cluster, not just unit-tested**: ran
+`kubesentinel optimize`/`optimization-summary` and a real `GET
+/optimization/summary` against the actual `kind-kubesentinel` cluster.
+Real numbers: 4000m CPU / ~4.79Gi memory allocatable on the one real
+Node, ~960m CPU / ~306Mi memory requested (24%/6%), ~150m CPU / ~422Mi
+memory in specified limits (3.75%/8.6%) -- and, genuinely found rather
+than assumed, 8 of the real containers currently running have no CPU
+limit and 6 have no memory limit, both correctly carried through as
+`unlimited_*_container_count` instead of silently deflating the ratio.
+Both ratios land below the default 1.0 threshold, so
+`overcommitted_cpu`/`overcommitted_memory` both correctly read `False`
+today -- an honest negative result from real data, not a forced
+positive to prove the feature does something. Confirmed the same JSON
+shape round-trips correctly through a real running FastAPI server, not
+just the CLI's own direct-construction path.
+
+**Tests**: 14 new (`test_scheduling_node_inventory.py`: 3, covering the
+new `limits`/unlimited-count fields; `test_optimization_overcommitment.py`:
+9, the analysis function's own unit tests; `test_optimization_service.py`:
+2, confirming `analyze()`'s wiring and persistence). Full regression
+suite: ruff clean, mypy clean, **958 unit tests passed** (944 + 14).
+
+**Documentation**: `RESOURCE_OPTIMIZATION_DESIGN.md` (new Section 15).
+`docs/IMPLEMENTATION_STATUS.md` (Capability B's table gained a new
+"Cluster-level overcommitment analysis" row marked Implemented; the
+"Deliberately not built" paragraph updated to drop this item, keeping
+only the still-genuinely-unbuilt Node-metrics ClusterRole; a new
+"Live-verified" paragraph added for this closure specifically).

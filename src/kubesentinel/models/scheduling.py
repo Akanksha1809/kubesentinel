@@ -86,6 +86,19 @@ class NodeSnapshot(BaseModel):
     taints: list[NodeTaint] = Field(default_factory=list)
     labels: dict[str, str] = Field(default_factory=dict)
     ready: bool = True
+    # Sum of every bound container's own `limits` that actually specifies
+    # one -- never a stand-in for "total possible consumption," since a
+    # missing limit is a real, unbounded ceiling, not zero. See the
+    # `unlimited_*_container_count` fields below for that case.
+    limits: ResourceQuantity = Field(default_factory=ResourceQuantity)
+    # How many containers on this Node specify no cpu/memory limit at all --
+    # this Node's real worst-case consumption is unbounded for that
+    # resource whenever this is > 0, regardless of what `limits` above
+    # sums to. Used by `optimization/overcommitment.py` to avoid ever
+    # reporting a false sense of safety from a limits-vs-allocatable ratio
+    # alone.
+    unlimited_cpu_container_count: int = 0
+    unlimited_memory_container_count: int = 0
 
 
 class PodLabelSummary(BaseModel):

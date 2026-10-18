@@ -147,6 +147,16 @@ class Settings(BaseSettings):
     # How long a recommendation is considered fresh before a GET must say so
     # is EXPIRED rather than silently serving a stale number.
     optimization_recommendation_ttl_seconds: float = 86400.0
+    # A Node (or the cluster-wide total) is flagged overcommitted once its
+    # limits-vs-allocatable ratio exceeds this -- 1.0 is the literal
+    # "every container hitting its own limit simultaneously would exceed
+    # this Node's real capacity" threshold, not an arbitrary margin.
+    # Kubernetes never enforces this at admission (only requests are
+    # scheduler-checked), so a healthy cluster can and often does cross
+    # 1.0 without anything being wrong yet -- this is a judgment
+    # threshold, not a correctness bound the way the scheduler's own
+    # requests-vs-allocatable check is.
+    optimization_overcommitment_limits_ratio_threshold: float = 1.0
 
     @property
     def optimization_excluded_namespace_list(self) -> list[str]:

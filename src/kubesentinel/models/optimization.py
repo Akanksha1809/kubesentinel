@@ -249,6 +249,56 @@ class ResourceRecommendation(BaseModel):
     review_notes: str | None = None
 
 
+class NodeOvercommitment(BaseModel):
+    """One Node's requested/limits-vs-allocatable picture --
+    `optimization/overcommitment.py`'s per-Node row. `requested_*_ratio`
+    should never exceed 1.0 in a healthy cluster (the real scheduler
+    refuses to bind a Pod past allocatable); a ratio above 1.0 here is
+    itself a real anomaly worth surfacing, not just a formatting choice.
+    `limits_*_ratio` is the actionable signal: Kubernetes never enforces
+    this at admission, so it can run past 1.0 in perfectly normal
+    operation -- whether that's a problem is a judgment call `
+    overcommitted_cpu`/`overcommitted_memory` makes against a configurable
+    threshold, not a hardcoded "any overage is bad.\""""
+
+    node_name: str
+    allocatable: ResourceQuantity
+    requested: ResourceQuantity
+    limits: ResourceQuantity
+    # None (not 0.0) when allocatable for that resource is unknown --
+    # never a ratio computed against a missing denominator.
+    requested_cpu_ratio: float | None = None
+    requested_memory_ratio: float | None = None
+    limits_cpu_ratio: float | None = None
+    limits_memory_ratio: float | None = None
+    # How many containers on this Node specify no limit at all for that
+    # resource -- `limits_*_ratio` only ever reflects containers that
+    # *did* specify one, so this is the honest caveat that the real
+    # worst case is unbounded, not just whatever the ratio says.
+    unlimited_cpu_container_count: int = 0
+    unlimited_memory_container_count: int = 0
+    overcommitted_cpu: bool = False
+    overcommitted_memory: bool = False
+
+
+class ClusterOvercommitmentSummary(BaseModel):
+    """Cluster-wide resource overcommitment, aggregated across every Node
+    (RESOURCE_OPTIMIZATION_DESIGN.md's own named "cluster-level
+    overcommitment analysis" gap). Deliberately its own top-level summary,
+    never a `ResourceRecommendation` -- a per-container recommendation
+    shape has no way to express "this is true of the whole cluster, not
+    any one workload." See `optimization/overcommitment.py`."""
+
+    computed_at: datetime
+    nodes: list[NodeOvercommitment] = Field(default_factory=list)
+    cluster_requested_cpu_ratio: float | None = None
+    cluster_requested_memory_ratio: float | None = None
+    cluster_limits_cpu_ratio: float | None = None
+    cluster_limits_memory_ratio: float | None = None
+    overcommitted_cpu: bool = False
+    overcommitted_memory: bool = False
+
+
 class AnalysisRunSummary(BaseModel):
     """One `/analyze` pass's own metadata -- the thing `GET /optimization/summary`
     uses to answer "how fresh is this, and did metrics actually work" without
@@ -269,3 +319,8 @@ class AnalysisRunSummary(BaseModel):
     # failed."
     metrics_available: bool
     warning: str | None = None
+    # None whenever Node inventory wasn't available for this run (the same
+    # degrade-don't-abort case `analyze()` already handles for the
+    # capacity-headroom check) -- never a zero-filled summary, which would
+    # misread as "confirmed not overcommitted."
+    overcommitment: ClusterOvercommitmentSummary | None = None

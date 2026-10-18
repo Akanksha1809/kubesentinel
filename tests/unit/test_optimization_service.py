@@ -694,3 +694,52 @@ class TestApplyRecommendation:
         call_kwargs = remediation.propose_standalone.call_args.kwargs
         assert call_kwargs["parameters"]["requests"] == {"cpu": "250m"}
         assert call_kwargs["parameters"]["limits"] == {}
+
+
+class TestAnalyzeOvercommitment:
+    """`analyze()` reuses the capacity-headroom check's own `node_snapshots`
+    for `compute_cluster_overcommitment` -- zero new cluster read. See
+    `test_optimization_overcommitment.py` for the analysis function's own
+    unit tests; these confirm the wiring into `analyze()`/persistence."""
+
+    def test_node_inventory_unavailable_persists_none_not_zero(self, repo):
+        # `_clients()`'s MagicMock has no `list_node`/`list_pod_for_all_namespaces`
+        # stubbed, so `build_node_inventory` raises and `analyze()` degrades
+        # to `node_snapshots = []` -- the existing, already-covered
+        # degrade-don't-abort path for the capacity-headroom check.
+        clients = _clients(pods=[_standalone_pod()])
+        service = OptimizationService(clients, repo, _settings())
+
+        summary = service.analyze(namespaces=[NAMESPACE])
+
+        assert summary.overcommitment is None
+
+    def test_node_inventory_available_persists_a_real_overcommitment_summary(self, repo):
+        from kubesentinel.models.optimization import ResourceQuantity
+        from kubesentinel.models.scheduling import NodeSnapshot
+
+        clients = _clients(pods=[_standalone_pod()])
+        node = NodeSnapshot(
+            name="node-1",
+            allocatable=ResourceQuantity(cpu_millicores=2000, memory_bytes=4 * 1024**3),
+            requested=ResourceQuantity(cpu_millicores=500, memory_bytes=1024**3),
+            limits=ResourceQuantity(cpu_millicores=3000, memory_bytes=2 * 1024**3),
+        )
+        clients.core.list_node.return_value = _items([SimpleNamespace()])
+        clients.core.list_pod_for_all_namespaces.return_value = _items([])
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(
+                "kubesentinel.optimization.service.build_node_inventory",
+                lambda _clients: [node],
+            )
+            summary = OptimizationService(clients, repo, _settings(optimization_overcommitment_limits_ratio_threshold=1.0)).analyze(
+                namespaces=[NAMESPACE]
+            )
+
+        assert summary.overcommitment is not None
+        assert summary.overcommitment.overcommitted_cpu is True
+        assert summary.overcommitment.cluster_limits_cpu_ratio == 1.5
+        persisted = repo.get_latest_analysis_run()
+        assert persisted.overcommitment is not None
+        assert persisted.overcommitment.overcommitted_cpu is True

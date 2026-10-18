@@ -28,6 +28,21 @@ def _pod_with_request(name, node_name, cpu="100m", memory="128Mi", phase="Runnin
     return pod
 
 
+def _pod_with_limits(name, node_name, cpu=None, memory=None, phase="Running"):
+    limits = {}
+    if cpu is not None:
+        limits["cpu"] = cpu
+    if memory is not None:
+        limits["memory"] = memory
+    pod = make_pod(name=name, phase=phase)
+    pod.spec = V1PodSpec(
+        node_name=node_name,
+        containers=[V1Container(name="app", resources=V1ResourceRequirements(limits=limits or None))],
+    )
+    pod.status = V1PodStatus(phase=phase)
+    return pod
+
+
 class TestBuildNodeInventory:
     def test_single_node_no_pods(self):
         node = make_node(name="node-1", allocatable={"cpu": "2", "memory": "4Gi"})
@@ -124,6 +139,45 @@ class TestBuildNodeInventory:
 
         assert by_name["node-1"].requested.cpu_millicores == 500
         assert by_name["node-2"].requested.cpu_millicores == 300
+
+    def test_sums_limits_from_pods_bound_to_the_node(self):
+        node = make_node(name="node-1", allocatable={"cpu": "2", "memory": "4Gi"})
+        pod_a = _pod_with_limits("a", "node-1", cpu="500m", memory="256Mi")
+        pod_b = _pod_with_limits("b", "node-1", cpu="300m", memory="128Mi")
+        clients = _clients(nodes=[node], pods=[pod_a, pod_b])
+
+        snapshots = build_node_inventory(clients)
+
+        assert snapshots[0].limits.cpu_millicores == 800
+        assert snapshots[0].limits.memory_bytes == (256 + 128) * 1024 * 1024
+
+    def test_container_with_no_limits_tracked_as_unlimited_count_not_hidden(self):
+        # The node-level `limits` sum is 0 here, same as `requested` would
+        # be for a pod with no requests either -- the real signal that this
+        # 0 understates the actual worst case lives in the separate
+        # unlimited-count fields, never folded into the sum itself.
+        node = make_node(name="node-1", allocatable={"cpu": "2", "memory": "4Gi"})
+        unlimited = _pod_with_limits("a", "node-1")
+        clients = _clients(nodes=[node], pods=[unlimited])
+
+        snapshots = build_node_inventory(clients)
+
+        assert snapshots[0].limits.cpu_millicores == 0
+        assert snapshots[0].limits.memory_bytes == 0
+        assert snapshots[0].unlimited_cpu_container_count == 1
+        assert snapshots[0].unlimited_memory_container_count == 1
+
+    def test_container_with_only_cpu_limit_counts_memory_as_unlimited(self):
+        node = make_node(name="node-1", allocatable={"cpu": "2", "memory": "4Gi"})
+        pod = _pod_with_limits("a", "node-1", cpu="500m")
+        clients = _clients(nodes=[node], pods=[pod])
+
+        snapshots = build_node_inventory(clients)
+
+        assert snapshots[0].limits.cpu_millicores == 500
+        assert snapshots[0].limits.memory_bytes == 0
+        assert snapshots[0].unlimited_cpu_container_count == 0
+        assert snapshots[0].unlimited_memory_container_count == 1
 
 
 class TestBuildPodLabelInventory:

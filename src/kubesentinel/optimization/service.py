@@ -30,6 +30,7 @@ from kubesentinel.observer.client import ClusterClients
 from kubesentinel.optimization.analyzer import analyze_workload
 from kubesentinel.optimization.capacity import analyze_capacity, attach_hpa_snapshots, build_hpa_inventory
 from kubesentinel.optimization.inventory import build_workload_inventory
+from kubesentinel.optimization.overcommitment import compute_cluster_overcommitment
 from kubesentinel.optimization.metrics_providers import (
     InMemorySampleStore,
     MetricsApiProvider,
@@ -161,6 +162,12 @@ class OptimizationService:
             1 if self._settings.optimization_prometheus_url else 0
         )
 
+        # Same already-fetched `node_snapshots` the capacity-headroom check
+        # above used -- zero new cluster read. `None` whenever that read
+        # itself failed/returned nothing this pass, never a zero-filled
+        # summary (see compute_cluster_overcommitment's own docstring).
+        overcommitment = compute_cluster_overcommitment(node_snapshots, self._settings, now=now)
+
         summary = AnalysisRunSummary(
             analyzed_at=now,
             namespaces=namespaces,
@@ -168,6 +175,7 @@ class OptimizationService:
             recommendation_count=len(all_recommendations),
             metrics_available=metrics_available,
             warning=warning,
+            overcommitment=overcommitment,
         )
         self._repo.save_analysis_run(summary)
         return summary

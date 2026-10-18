@@ -721,3 +721,94 @@ entirely (e.g. "this limit shouldn't exist") is not supported -- this
 project's analyzer never proposes that shape today, so it is an honest
 non-issue, not a silently-handled one, named here in case that ever
 changes.
+
+## 15. Cluster-level overcommitment analysis
+
+This section's own original text (§6, now above) named the gap first:
+"cluster-level overcommitment analysis... needs Node capacity
+aggregated across every workload, which doesn't fit the per-container
+`ResourceRecommendation` shape." Closed here, as a separate top-level
+summary rather than forcing it into that shape after all.
+
+### 15.1 Two ratios, deliberately not collapsed into one
+
+*Requested*-vs-allocatable and *limits*-vs-allocatable answer different
+questions and are reported separately, never averaged or combined:
+
+- **Requested vs. allocatable** is the real scheduler's own accounting
+  unit -- it should never exceed 1.0 on a healthy Node, because the
+  scheduler refuses to bind a Pod past allocatable capacity. Reported
+  mainly so a ratio *above* 1.0 (a static/mirror Pod bypassing normal
+  admission, or a genuine accounting bug) is visible as the anomaly it
+  is, not normal headroom information.
+- **Limits vs. allocatable** is the actionable signal. Kubernetes does
+  not enforce this at admission at all -- a Node can run with its
+  containers' limits summing to well past 100% of allocatable in
+  completely ordinary operation, because most containers never hit
+  their limit simultaneously. Whether a given ratio is a real problem
+  is a judgment call, not a correctness bound, so it is gated by a
+  configurable threshold (`optimization_overcommitment_limits_ratio_threshold`,
+  default `1.0`: "every container hitting its own limit at once would
+  exceed this Node's real capacity") rather than flagged the moment it
+  crosses 1.0 unconditionally.
+
+### 15.2 Missing limits are never zero
+
+A container with no limit set at all has a real, unbounded ceiling --
+`NodeSnapshot.unlimited_cpu_container_count`/
+`unlimited_memory_container_count` (extended onto the same per-Node,
+per-Pod loop `scheduling/node_inventory.py::build_node_inventory`
+already runs for `requested`, not a second Node/Pod listing) carry that
+fact through separately from the `limits` sum itself. The sum only
+ever totals containers that *specified* a limit -- a Node with every
+container unlimited correctly shows `limits` as `0` (the literal sum of
+specified limits) *and* a nonzero unlimited count, never a `0` that
+could be misread as "confirmed bounded." Live-verified against this
+project's own lab cluster (below): 8 of the real containers currently
+running have no CPU limit, 6 have no memory limit -- not a hypothetical
+edge case this design anticipates, the normal state of this cluster
+today.
+
+### 15.3 Where it lives: a new summary, reusing an old read
+
+`optimization/overcommitment.py::compute_cluster_overcommitment(
+node_snapshots, settings, now) -> ClusterOvercommitmentSummary | None`
+is a pure function, same "orchestration lives in service.py, analysis
+stays pure" split every module in this engine already follows. Called
+from `OptimizationService.analyze()` against the *same* `node_snapshots`
+already fetched there for the capacity-headroom check (CAPACITY_PLANNING.md
+§1) -- zero new cluster read, zero new RBAC. Returns `None`, never a
+zero-filled summary, whenever Node inventory itself wasn't available
+this pass (the same already-existing degrade path the capacity-headroom
+check uses) -- a `None` can never be misread as "confirmed not
+overcommitted" the way a stray `0`/`False` could.
+
+Attached to `AnalysisRunSummary.overcommitment` (a new, fully optional
+field on an already JSON-blob-serialized model -- confirmed no schema
+migration needed, the same "additive field, no migration" precedent
+Milestone 17/Capability E already established for this exact
+persistence shape) rather than a new `ResourceRecommendation` category
+or a new persistence table: it is cluster-wide, not per-workload, so it
+has no natural `namespace`/`workload_name` to key on the way every
+other recommendation does. `GET /optimization/summary` (zero route
+changes -- it already returns `latest_analysis` as a full
+model-dumped dict) and `kubesentinel optimization-summary` (both table
+and `--json` output) are therefore the only two surfaces that needed
+touching to expose it.
+
+### 15.4 Live-verified against the real cluster, not just unit-tested
+
+Ran `kubesentinel optimize`/`optimization-summary` and a real
+`GET /optimization/summary` against the actual `kind-kubesentinel`
+cluster. Confirmed real, non-hypothetical numbers: 4000m CPU / ~4.79Gi
+memory allocatable on the single real Node, ~960m CPU / ~306Mi memory
+currently requested (24%/6% of allocatable), ~150m CPU / ~422Mi memory
+in specified limits (3.75%/8.6% of allocatable) -- and, as §15.2
+anticipated rather than assumed, 8 of the real containers on this Node
+have no CPU limit and 6 have no memory limit, both carried through
+correctly as `unlimited_*_container_count` rather than silently
+deflating the ratio. Below the default 1.0 threshold on both
+dimensions, so `overcommitted_cpu`/`overcommitted_memory` both
+correctly read `False` -- this lab cluster is not actually
+overcommitted today, an honest negative result from real data, not a
+forced positive to prove the feature does something.

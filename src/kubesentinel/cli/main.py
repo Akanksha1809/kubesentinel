@@ -503,6 +503,10 @@ def show_recommendation(
             console.print(f"    - {risk}")
 
 
+def _fmt_ratio(ratio: float | None) -> str:
+    return f"{ratio * 100:.0f}%" if ratio is not None else "unknown"
+
+
 @app.command("optimization-summary")
 def optimization_summary(json_output: bool = typer.Option(False, "--json")) -> None:
     """Show aggregate counts and the freshness of the last analysis pass."""
@@ -519,6 +523,18 @@ def optimization_summary(json_output: bool = typer.Option(False, "--json")) -> N
     if summary["latest_analysis"]:
         console.print(f"Last analyzed: {summary['latest_analysis']['analyzed_at']}")
         console.print(f"Metrics available: {summary['latest_analysis']['metrics_available']}")
+        overcommitment = summary["latest_analysis"].get("overcommitment")
+        if overcommitment is None:
+            console.print("Cluster overcommitment: [yellow]unknown (Node inventory unavailable)[/yellow]")
+        else:
+            cpu_style = "red" if overcommitment["overcommitted_cpu"] else "green"
+            memory_style = "red" if overcommitment["overcommitted_memory"] else "green"
+            console.print(
+                f"Cluster overcommitment (limits vs. allocatable): "
+                f"CPU [{cpu_style}]{_fmt_ratio(overcommitment['cluster_limits_cpu_ratio'])}[/{cpu_style}], "
+                f"memory [{memory_style}]{_fmt_ratio(overcommitment['cluster_limits_memory_ratio'])}[/{memory_style}] "
+                f"across {len(overcommitment['nodes'])} node(s)"
+            )
     else:
         console.print("[yellow]No analysis has been run yet -- run `kubesentinel optimize` first.[/yellow]")
 

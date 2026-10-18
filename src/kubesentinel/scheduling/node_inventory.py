@@ -1,11 +1,19 @@
 """Builds the Node-side state the scheduling advisor needs: allocatable
 capacity, already-requested resources (the scheduler's own accounting
 unit -- the sum of every bound Pod's own requests, never live usage),
-taints, and labels.
+already-specified limits, taints, and labels.
 
 Read-only: only ever `list_node`/`list_pod_for_all_namespaces`. No watch
 loop -- like `optimization/inventory.py`, this takes a one-shot snapshot
 per analysis call, not a continuously-maintained cache.
+
+`limits`/`unlimited_*_container_count` were added for
+`optimization/overcommitment.py`'s cluster-level overcommitment analysis
+(RESOURCE_OPTIMIZATION_DESIGN.md's own named "cluster-level overcommitment
+analysis" gap) -- the scheduling advisor itself has no use for limits
+(the real scheduler's own admission math only ever looks at requests), so
+this is additive data riding along on the same per-Node, per-Pod loop
+`requested` already computes, not a second Node/Pod listing.
 """
 
 from __future__ import annotations
@@ -73,6 +81,46 @@ def _pod_requested(pod) -> ResourceQuantity:
     )
 
 
+def _pod_limits(pod) -> tuple[ResourceQuantity, int, int]:
+    """Sums every (regular, non-init) container's own `limits` that
+    actually specifies one, same init-container simplification as
+    `_pod_requested`. Also returns how many of this Pod's containers
+    specify no cpu/no memory limit at all -- a missing limit means
+    unbounded, real worst-case consumption, never "contributes 0" to the
+    sum, so callers must track it separately rather than let it
+    disappear into the total."""
+    cpu_total = 0
+    memory_total = 0
+    any_cpu = False
+    any_memory = False
+    unlimited_cpu = 0
+    unlimited_memory = 0
+    for container in pod.spec.containers or []:
+        resources = container.resources
+        limits = resources.limits if resources is not None else None
+        parsed = (
+            parse_quantity_dict(limits, context=f"{pod.metadata.name}/{container.name}") if limits else ResourceQuantity()
+        )
+        if parsed.cpu_millicores is not None:
+            cpu_total += parsed.cpu_millicores
+            any_cpu = True
+        else:
+            unlimited_cpu += 1
+        if parsed.memory_bytes is not None:
+            memory_total += parsed.memory_bytes
+            any_memory = True
+        else:
+            unlimited_memory += 1
+    return (
+        ResourceQuantity(
+            cpu_millicores=cpu_total if any_cpu else None,
+            memory_bytes=memory_total if any_memory else None,
+        ),
+        unlimited_cpu,
+        unlimited_memory,
+    )
+
+
 def _node_ready(node) -> bool:
     for condition in node.status.conditions or []:
         if condition.type == "Ready":
@@ -100,10 +148,19 @@ def build_node_inventory(clients: ClusterClients) -> list[NodeSnapshot]:
 
         cpu_requested = 0
         memory_requested = 0
+        cpu_limited = 0
+        memory_limited = 0
+        unlimited_cpu_containers = 0
+        unlimited_memory_containers = 0
         for pod in requested_by_node[node.metadata.name]:
             pod_req = _pod_requested(pod)
             cpu_requested += pod_req.cpu_millicores or 0
             memory_requested += pod_req.memory_bytes or 0
+            pod_limits, pod_unlimited_cpu, pod_unlimited_memory = _pod_limits(pod)
+            cpu_limited += pod_limits.cpu_millicores or 0
+            memory_limited += pod_limits.memory_bytes or 0
+            unlimited_cpu_containers += pod_unlimited_cpu
+            unlimited_memory_containers += pod_unlimited_memory
 
         taints = [
             NodeTaint(key=t.key, value=t.value, effect=t.effect) for t in (node.spec.taints or [])
@@ -114,6 +171,9 @@ def build_node_inventory(clients: ClusterClients) -> list[NodeSnapshot]:
                 name=node.metadata.name,
                 allocatable=allocatable,
                 requested=ResourceQuantity(cpu_millicores=cpu_requested, memory_bytes=memory_requested),
+                limits=ResourceQuantity(cpu_millicores=cpu_limited, memory_bytes=memory_limited),
+                unlimited_cpu_container_count=unlimited_cpu_containers,
+                unlimited_memory_container_count=unlimited_memory_containers,
                 unschedulable=bool(node.spec.unschedulable),
                 taints=taints,
                 labels=dict(node.metadata.labels or {}),
