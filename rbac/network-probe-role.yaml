@@ -1,0 +1,35 @@
+# Write-capable Role for the active connectivity probe
+# (docs/NETWORK_DIAGNOSTICS.md Section 12). Kept SEPARATE from
+# rbac/network-role.yaml (read-only static analysis) and every other
+# capability's own Role, same independent-auditability reason as always
+# -- this is the clearest-yet example of "a Role whose very existence
+# signals elevated risk": a reviewer checking this project's blast
+# radius should be able to find every write-capable Role by filename
+# alone, and this one's name says exactly what it is.
+#
+# `jobs` (create/get/list/delete): this project's first write grant on
+# batch/v1 -- the `batch` client already exists on ClusterClients
+# (read-only, for Milestone 2's own Job listing), this is the first use
+# of it to mutate anything. `pods`/`pods/log` (get/list): reading the
+# probe Job's own throwaway Pod's logs to learn its result -- never any
+# other Pod's logs, and this Role grants no `pods/exec` at all (the
+# probe never execs into anything, it only creates its own disposable
+# Job).
+#
+# Scoped to exactly what network/probe.py does and nothing more:
+# no "watch" (one-shot create-wait-delete per probe call, not a
+# continuous loop), no delete on anything but Jobs this project's own
+# code created, no access to any other namespace (this Role is only
+# ever bound in kubesentinel-lab).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kubesentinel-network-prober
+  namespace: kubesentinel-lab
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "delete"]
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list"]

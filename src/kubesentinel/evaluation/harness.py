@@ -361,7 +361,7 @@ class EvaluationHarness:
         )
 
     def _check_network(self, spec: ScenarioSpec, applied_at_mono: float) -> _CheckResult:
-        service = NetworkService(self._clients, self._network_repo, incident_repo=self._incident_repo)
+        service = NetworkService(self._clients, self._network_repo, self._settings, incident_repo=self._incident_repo)
         deadline = applied_at_mono + spec.timeout_seconds
         while time.monotonic() < deadline:
             pod_name = _resolve_pod_name(self._clients, spec.namespace, spec.pod_label_app or "")

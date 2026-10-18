@@ -45,6 +45,9 @@ from kubesentinel.network.service import (
     FindingNotFoundError as NetworkFindingNotFoundError,
     NetworkService,
     PodNotFoundError as NetworkPodNotFoundError,
+    ProbeDeniedError,
+    ProbeDisabledError,
+    ProbeTargetError,
 )
 from kubesentinel.persistence.evaluation_repo import SQLiteEvaluationRepository
 from kubesentinel.persistence.network_repo import SQLiteNetworkRepository
@@ -642,7 +645,7 @@ def _build_network_service(settings: Settings) -> tuple[NetworkService, SQLiteNe
     clients = build_clients(settings)
     repo = SQLiteNetworkRepository(settings.db_path)
     incident_repo = SQLiteIncidentRepository(settings.db_path)
-    return NetworkService(clients, repo, incident_repo=incident_repo), repo
+    return NetworkService(clients, repo, settings, incident_repo=incident_repo), repo
 
 
 @app.command("network-check")
@@ -741,6 +744,52 @@ def show_network_finding(
             console.print(f"    port {pr.service_port} -> {pr.target_port} [{mark}]: {pr.reasoning}")
     for policy in finding.applicable_network_policies:
         console.print(f"  NetworkPolicy '{policy.policy_name}' (applies={policy.applies_to_target}): {policy.summary}")
+
+
+@app.command("network-probe")
+def network_probe(
+    namespace: str = typer.Argument(..., help="Namespace of the target Service"),
+    service_name: str = typer.Argument(..., help="Service to probe"),
+    port: str = typer.Argument(..., help="Service port, by number or name"),
+    related_finding_id: str = typer.Option(None, "--finding-id", help="Link this probe to an existing network finding"),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """Creates, waits on, and deletes one short-lived diagnostic Job
+    testing DNS resolution and a raw TCP connect against a real Service --
+    closes the one gap network-check's static analysis can't: whether a
+    packet actually arrives and gets a response. Off by default
+    (KUBESENTINEL_NETWORK_PROBE_ENABLED=true to enable); see
+    docs/NETWORK_DIAGNOSTICS.md Section 12."""
+    settings = get_settings()
+    configure_logging(settings.log_level)
+    service, _repo = _build_network_service(settings)
+    port_arg: int | str = int(port) if port.isdigit() else port
+    try:
+        result = service.run_probe(namespace, service_name, port_arg, related_finding_id=related_finding_id)
+    except (ProbeDisabledError, ProbeDeniedError, ProbeTargetError) as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from exc
+
+    if json_output:
+        print(json_module.dumps(result.model_dump(mode="json"), indent=2))
+        return
+
+    dns_mark = "[green]ok[/green]" if result.dns_resolved else "[red]failed[/red]" if result.dns_resolved is False else "[yellow]not attempted[/yellow]"
+    console.print(f"{result.namespace}/{result.service_name}:{result.port} -- DNS: {dns_mark}")
+    if result.tcp_applicable:
+        tcp_mark = (
+            "[green]ok[/green]"
+            if result.tcp_connected
+            else "[red]failed[/red]"
+            if result.tcp_connected is False
+            else "[yellow]not attempted[/yellow]"
+        )
+        console.print(f"  TCP connect: {tcp_mark}")
+    else:
+        console.print("  TCP connect: not applicable (headless Service)")
+    if result.error:
+        console.print(f"  [yellow]{result.error}[/yellow]")
+    console.print(f"  overall: {'[green]succeeded[/green]' if result.succeeded else '[red]failed[/red]'}")
 
 
 def _build_security_service(settings: Settings) -> tuple[SecurityService, SQLiteSecurityRepository]:

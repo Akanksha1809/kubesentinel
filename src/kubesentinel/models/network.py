@@ -1,12 +1,15 @@
 """Network troubleshooting engine models: Service/EndpointSlice/port facts,
-NetworkPolicy relevance, DNS health, and the overall finding for one
-target Pod's inbound connectivity story.
+NetworkPolicy relevance, DNS health, the overall finding for one target
+Pod's inbound connectivity story, and the active connectivity probe's own
+result.
 
-See docs/NETWORK_DIAGNOSTICS.md Section 2 for exactly what's evaluated for
-real (Service selector matching, EndpointSlice consistency, port
-resolution, NetworkPolicy static analysis, CoreDNS health) vs. explicitly
-deferred (the active DNS/connectivity probe, Ingress/Gateway -- neither
-applicable on this lab cluster today).
+See docs/NETWORK_DIAGNOSTICS.md Section 2 for exactly what's evaluated
+for real via static analysis (Service selector matching, EndpointSlice
+consistency, port resolution, NetworkPolicy static analysis, CoreDNS
+health) and Section 12 for the active probe (`ConnectivityProbeResult`,
+below) that closes the one gap static analysis cannot: whether a packet
+actually arrives and gets a response. Ingress/Gateway remain not
+applicable on this lab cluster today.
 """
 
 from __future__ import annotations
@@ -86,3 +89,33 @@ class NetworkFinding(BaseModel):
     reasoning: str
     related_incident_ids: list[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class ConnectivityProbeResult(BaseModel):
+    """The active connectivity probe's own result (docs/NETWORK_DIAGNOSTICS.md
+    Section 12) -- genuinely dynamic evidence (a real DNS resolution, a
+    real TCP connect attempt), unlike every other model in this file,
+    which is static analysis of already-fetched Kubernetes objects.
+    Deliberately a separate, standalone record, never a mutation of a
+    past `NetworkFinding` -- `related_finding_id` is an optional,
+    ID-only link, the same pattern `related_incident_ids` already uses
+    elsewhere in this project."""
+
+    probe_id: str
+    namespace: str
+    service_name: str
+    port: int
+    #: None means "not attempted" -- the Job never ran, or timed out
+    #: before any marker was observed.
+    dns_resolved: bool | None = None
+    tcp_connected: bool | None = None
+    #: False for a headless Service (no single ClusterIP to test) -- see
+    #: Section 12.1. `succeeded` never considers tcp_connected when this
+    #: is False.
+    tcp_applicable: bool = True
+    succeeded: bool = False
+    raw_log: str = ""
+    error: str | None = None
+    related_finding_id: str | None = None
+    requested_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    completed_at: datetime | None = None

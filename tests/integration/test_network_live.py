@@ -14,6 +14,7 @@ from unittest.mock import patch
 
 import pytest
 
+from kubesentinel.config import Settings
 from kubesentinel.models.network import NetworkFindingClassification
 from kubesentinel.network.service import NetworkService
 from kubesentinel.persistence.network_repo import SQLiteNetworkRepository
@@ -27,7 +28,7 @@ def network_service(live_cluster_clients):
     with tempfile.TemporaryDirectory() as d:
         repo = SQLiteNetworkRepository(str(Path(d) / "test.db"))
         try:
-            yield NetworkService(live_cluster_clients, repo)
+            yield NetworkService(live_cluster_clients, repo, Settings())
         finally:
             repo.close()
 

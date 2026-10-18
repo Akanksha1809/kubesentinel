@@ -226,6 +226,62 @@ class Settings(BaseSettings):
     # project does not pre-warm or special-case.
     security_image_scan_timeout_seconds: int = 180
 
+    # Active connectivity probe (docs/NETWORK_DIAGNOSTICS.md §12) -- this
+    # project's first new mutation capability outside the fully
+    # policy-gated RemediationExecutor. Off by default, same "genuinely
+    # optional" guarantee ai_enabled/security_enable_image_scanning
+    # already established: False means network/probe.py never runs, zero
+    # new API calls happen, identical to this capability not existing.
+    network_probe_enabled: bool = False
+    # Deliberately its own, separate allowlist from action_allowed_namespaces
+    # -- conflating the two would wrongly imply this feature and
+    # remediation share a risk model. They don't.
+    network_probe_allowed_namespaces: str = "kubesentinel-lab"
+    # Per (namespace, service_name, port) -- prevents hammering the same
+    # target repeatedly.
+    network_probe_cooldown_seconds: int = 30
+    # Counted by listing Jobs carrying the kubesentinel.io/probe=true label
+    # in the target namespace that haven't finished yet.
+    network_probe_max_concurrent_per_namespace: int = 1
+    # Job.spec.activeDeadlineSeconds -- the probe Job can never run longer
+    # than this, no matter what the script inside it does.
+    network_probe_job_timeout_seconds: int = 15
+    # The `nc -w` timeout inside the probe script itself -- kept well
+    # under network_probe_job_timeout_seconds so the script's own TCP
+    # attempt can never be what causes the Job-level deadline to fire.
+    network_probe_tcp_timeout_seconds: int = 5
+    # Job.spec.ttlSecondsAfterFinished -- a backstop that garbage-collects
+    # the Job (and its Pod) even if this project's own explicit deletion
+    # after reading the result never runs at all.
+    network_probe_job_ttl_seconds: int = 60
+    # How long NetworkService.run_probe waits for the Job to reach a
+    # terminal state before giving up and reporting a timeout -- always
+    # longer than network_probe_job_timeout_seconds, with margin for Pod
+    # scheduling/startup.
+    network_probe_poll_timeout_seconds: float = 20.0
+    network_probe_poll_interval_seconds: float = 1.0
+    # Bounds each individual Kubernetes API call `run_probe` makes
+    # (read_namespaced_service, create/read-status/delete on the Job,
+    # list/read-log on its Pod) -- matching RemediationExecutor's own
+    # action_execution_timeout_seconds precedent. Without this, a single
+    # slow/hung apiserver response can block far longer than
+    # network_probe_poll_timeout_seconds itself, since that deadline is
+    # only checked *between* polling calls, never during one -- caught
+    # live, where an unbounded call left a probe hanging over 20 minutes
+    # against a genuinely overloaded apiserver.
+    network_probe_api_timeout_seconds: float = 10.0
+    # The probe's own DNS check queries the Service's full in-namespace
+    # FQDN (<service>.<namespace>.svc.<this>), never the bare short name
+    # -- caught live: BusyBox's nslookup, resolving a bare name through
+    # resolv.conf's search-domain list, returns a *nonzero* exit code
+    # even when a later search domain resolves successfully, making the
+    # script's own `&&`-gated success marker unreliable. The fully
+    # qualified name resolves in one clean attempt instead. Configurable
+    # rather than hardcoded for a cluster with a non-default
+    # --cluster-domain, though "cluster.local" covers every real cluster
+    # this project runs against today.
+    network_probe_cluster_domain: str = "cluster.local"
+
     @property
     def security_builtin_subject_group_prefix_list(self) -> list[str]:
         return [p.strip() for p in self.security_builtin_subject_group_prefixes.split(",") if p.strip()]
@@ -245,6 +301,10 @@ class Settings(BaseSettings):
     @property
     def action_allowed_resource_name_list(self) -> list[str]:
         return [n.strip() for n in self.action_allowed_resource_names.split(",") if n.strip()]
+
+    @property
+    def network_probe_allowed_namespace_list(self) -> list[str]:
+        return [n.strip() for n in self.network_probe_allowed_namespaces.split(",") if n.strip()]
 
 
 def get_settings() -> Settings:

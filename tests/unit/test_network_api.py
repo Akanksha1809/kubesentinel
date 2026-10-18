@@ -7,14 +7,23 @@ import json
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
-from kubernetes.client import V1Deployment, V1DeploymentSpec, V1DeploymentStatus, V1ObjectMeta, V1PodCondition, V1Service
+from kubernetes.client import (
+    V1Deployment,
+    V1DeploymentSpec,
+    V1DeploymentStatus,
+    V1ObjectMeta,
+    V1PodCondition,
+    V1Service,
+    V1ServicePort,
+)
 from kubernetes.client.rest import ApiException
 
 from kubesentinel.api import app as app_module
+from kubesentinel.config import Settings
 from kubesentinel.network.service import NetworkService
 from kubesentinel.persistence.network_repo import SQLiteNetworkRepository
 from tests.unit.factories import make_pod, make_service
@@ -76,7 +85,7 @@ def api_state():
         svc = make_service(name="svc", selector={"app": "target"})
         clients = _clients(services=[svc])
 
-        app_module.state.network = NetworkService(clients, repo)
+        app_module.state.network = NetworkService(clients, repo, Settings())
 
         yield repo
         repo.close()
@@ -135,4 +144,73 @@ def test_get_finding_by_id(api_state):
 
 def test_get_finding_not_found_is_404(api_state):
     resp = client.get("/network/findings/does-not-exist")
+    assert resp.status_code == 404
+
+
+@pytest.fixture
+def probe_api_state():
+    with tempfile.TemporaryDirectory() as d:
+        repo = SQLiteNetworkRepository(str(Path(d) / "network.db"))
+        clients = MagicMock()
+        clients.core.read_namespaced_service.return_value = make_service(
+            name="svc", ports=[V1ServicePort(port=80, target_port=8080)], cluster_ip="10.0.0.5"
+        )
+        clients.batch.list_namespaced_job.return_value = _items([])
+        settings = Settings(network_probe_enabled=True, network_probe_allowed_namespaces=NAMESPACE)
+        app_module.state.network = NetworkService(clients, repo, settings)
+        yield repo
+        repo.close()
+
+
+def test_probe_disabled_by_default_is_403(api_state):
+    resp = client.post("/network/probe", json={"namespace": NAMESPACE, "service_name": "svc", "port": 80})
+    assert resp.status_code == 403
+
+
+def test_probe_success_returns_200_with_result(probe_api_state):
+    with (
+        patch("kubesentinel.network.service.probe_module.create_probe_job"),
+        patch("kubesentinel.network.service.probe_module.wait_for_job_completion", return_value=True),
+        patch(
+            "kubesentinel.network.service.probe_module.read_job_pod_log",
+            return_value="KUBESENTINEL_PROBE_DNS_ATTEMPT\nKUBESENTINEL_PROBE_DNS_OK\nKUBESENTINEL_PROBE_TCP_ATTEMPT\nKUBESENTINEL_PROBE_TCP_OK\n",
+        ),
+        patch("kubesentinel.network.service.probe_module.delete_probe_job"),
+    ):
+        resp = client.post("/network/probe", json={"namespace": NAMESPACE, "service_name": "svc", "port": 80})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["dns_resolved"] is True
+    assert body["tcp_connected"] is True
+    assert body["succeeded"] is True
+
+
+def test_probe_target_not_found_is_404(probe_api_state):
+    resp = client.post("/network/probe", json={"namespace": NAMESPACE, "service_name": "svc", "port": 9999})
+    assert resp.status_code == 404
+
+
+def test_probe_results_list_and_get(probe_api_state):
+    with (
+        patch("kubesentinel.network.service.probe_module.create_probe_job"),
+        patch("kubesentinel.network.service.probe_module.wait_for_job_completion", return_value=True),
+        patch("kubesentinel.network.service.probe_module.read_job_pod_log", return_value=""),
+        patch("kubesentinel.network.service.probe_module.delete_probe_job"),
+    ):
+        probe_id = client.post("/network/probe", json={"namespace": NAMESPACE, "service_name": "svc", "port": 80}).json()[
+            "probe_id"
+        ]
+
+    list_resp = client.get("/network/probe-results", params={"namespace": NAMESPACE})
+    assert list_resp.status_code == 200
+    assert len(list_resp.json()) == 1
+
+    get_resp = client.get(f"/network/probe-results/{probe_id}")
+    assert get_resp.status_code == 200
+    assert get_resp.json()["probe_id"] == probe_id
+
+
+def test_probe_result_not_found_is_404(probe_api_state):
+    resp = client.get("/network/probe-results/does-not-exist")
     assert resp.status_code == 404

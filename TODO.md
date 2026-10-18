@@ -3372,3 +3372,181 @@ recorded as separate follow-up work here instead.
 **Full regression suite**: ruff clean, mypy clean, **849 unit tests
 passed** (828 + 21, including the dedup regression test added after
 the live-verification fix above).
+
+## Milestone 33: Active connectivity probe for the network engine -- DONE
+
+The fourth of the five scope boundaries the user asked to close, and
+the one named from the start as riskiest: this project's first new
+mutation capability outside the fully policy-gated
+`RemediationExecutor`. Closes `docs/NETWORK_DIAGNOSTICS.md` Section 2's
+own long-named gap, written up as new Section 12 in that doc (an
+extension of an already-designed capability, same precedent as
+Milestones 30/32's own new sections) before any code, with its own
+dedicated safety review -- not a smaller version of
+`RemediationExecutor`'s, a differently-shaped one purpose-built for
+"create and delete a throwaway diagnostic Job" rather than "mutate an
+existing Deployment."
+
+**What it tests, and why those two checks specifically**: the
+request-path narrative this engine already builds
+(`Client -> DNS -> Service -> EndpointSlice -> destination Pod`) can
+prove a Service's selector matches Ready Pods and that a `targetPort`
+resolves, but never that a packet sent to it actually arrives and gets
+a response. The probe closes that gap with two genuinely independent
+checks against one target `(namespace, service_name, port)`: (1) DNS
+resolution of the Service's own FQDN, and (2) a raw TCP connect
+straight to the Service's real `ClusterIP:port` (read fresh, never the
+DNS name) -- deliberately independent of each other, so a
+DNS-broken-but-Service-healthy cluster shows exactly that, not one
+undifferentiated failure.
+
+**Design decisions, made deliberately rather than assumed** (full
+reasoning in the design doc):
+- Off by default (`network_probe_enabled=False`) -- the same "never
+  the only source of a capability's own logic" discipline
+  `ai_enabled`/`security_enable_image_scanning` already established.
+- Not a `SecurityRule`/`SchedulingRule`-style pure function -- it's
+  orchestrated directly by `NetworkService.run_probe`, since a
+  subprocess-adjacent Job-create-and-delete sequence isn't a pure
+  function over already-fetched evidence.
+- Its own dedicated namespace allowlist
+  (`network_probe_allowed_namespaces`), cooldown
+  (`network_probe_cooldown_seconds`), and per-namespace concurrency
+  limit (`network_probe_max_concurrent_per_namespace`) -- a small,
+  purpose-built gate, deliberately *not* routed through
+  `PolicyEngine`/`ActionType`/`RemediationAction`, which model "mutate
+  an existing Deployment" and don't fit this shape. `policy_mode` is
+  deliberately **not** consulted either -- it's documented as gating
+  *remediation*, and a connectivity probe fixes nothing; overloading it
+  would quietly change what that setting means for every existing
+  deployment relying on its documented behavior.
+- The container's command is a fixed, hardcoded string -- every piece
+  of caller-supplied data (host, cluster IP, port, timeout) flows in
+  exclusively through typed `V1EnvVar` entries, never through Python
+  string formatting into the script. Verified by a dedicated test with
+  deliberately adversarial input (shell metacharacters in the "service
+  name") confirming the constructed command string is byte-for-byte
+  identical regardless.
+- One port per probe call, by design -- never a range, so this stays a
+  bounded diagnostic tool, not a port-scanning primitive. Only Services
+  (matching this capability's own existing "inbound Service-based
+  connectivity" framing), never an arbitrary Pod.
+- No new RBAC beyond the probe's own narrow `kubesentinel-network-prober`
+  Role (`batch/v1` jobs create/get/list/delete, `pods`/`pods/log`
+  get/list) -- the first write grant on `batch` anywhere in this
+  project (the `batch` client itself already existed, read-only, since
+  Milestone 2's own Job listing).
+
+**What was added**: `network/probe.py` (script/Job construction, log
+marker parsing, Job lifecycle functions), `models/network.py::
+ConnectivityProbeResult`, `NetworkService.run_probe`/`get_probe_result`/
+`list_probe_results` plus `ProbeDisabledError`/`ProbeDeniedError`/
+`ProbeTargetError`, a second table in `SQLiteNetworkRepository`
+(`connectivity_probe_results`), `POST /network/probe` + two new `GET`
+routes (403 on disabled/denied, distinct from 503 for an unreachable
+cluster), `kubesentinel network-probe` CLI command,
+`rbac/network-probe-role.yaml` + its binding, nine new `Settings`
+fields.
+
+**Three real bugs caught live, not by unit tests (which mock every
+Kubernetes client call) -- each fixed immediately, each now covered by
+a dedicated regression test, not just patched and moved on**:
+
+1. **`runAsNonRoot` without `runAsUser`.** `busybox:1.36` defaults to
+   root; `runAsNonRoot: true` alone makes the kubelet refuse to start
+   the container at all ("container has runAsNonRoot and image will
+   run as root") -- which looked identical to a hung Job from the
+   outside until `kubectl describe pod` named the real reason. Fixed by
+   adding `runAsUser: 65534` ("nobody"). Pinned by
+   `test_pod_template_passes_container_security_checks` asserting
+   `run_as_user is not None and != 0`.
+2. **Bare short name vs. full FQDN for the DNS check.** BusyBox's
+   `nslookup`, resolving a bare name through `resolv.conf`'s
+   search-domain list (`ndots:5`), returns a **nonzero exit code even
+   when a later search domain resolves successfully** -- confirmed
+   directly via `kubectl exec` comparing a bare-name lookup (exit 1,
+   despite printing a correct final address) against the same Service's
+   FQDN (exit 0, one clean attempt). The script's own `nslookup ... &&
+   echo ..._OK` marker depends on a reliable exit code, so the bare
+   short name would have silently misreported a real success as a DNS
+   failure. Fixed by querying `<service>.<namespace>.svc.<cluster_domain>`
+   (new `network_probe_cluster_domain` setting, default
+   `"cluster.local"`) instead of the bare name.
+3. **No `_request_timeout` on any Kubernetes API call in
+   `network/probe.py`.** `wait_for_job_completion`'s own outer deadline
+   (`network_probe_poll_timeout_seconds`) is only checked *between*
+   polling calls, never during one -- a single slow/hung apiserver
+   response could block the whole probe far longer than any configured
+   timeout implied. Caught live against a genuinely overloaded local
+   cluster: one probe attempt took over 20 minutes to return. Fixed by
+   adding `network_probe_api_timeout_seconds` (default 10s, matching
+   `RemediationExecutor`'s own `action_execution_timeout_seconds`
+   precedent) as `_request_timeout` on every call in `probe.py` and on
+   `NetworkService.run_probe`'s own `read_namespaced_service` call.
+   Pinned by a new `TestEveryApiCallIsRequestTimeoutBounded` class (5
+   tests, one per call site) plus a service-level test asserting the
+   same for `read_namespaced_service`.
+
+**Tests**: 46 new unit tests -- `test_network_probe.py` (26: port
+resolution, Job construction including the command-injection-immunity
+test, log-marker classification for every marker combination, Job
+concurrency counting, the `_request_timeout` regression class, result
+building), `test_network_service.py` (15: every gating path --
+disabled, namespace-denied, service/port not found, cooldown,
+concurrency, cleanup-always-runs including on timeout and on a raised
+exception, headless-Service handling, metrics, the FQDN/timeout
+regression tests), `test_network_api.py` (5: 403 when disabled, a real
+success response, 404 for an unresolvable target, list/get). The
+existing `NetworkService.__init__` signature gained a required
+`settings` parameter (every production call site -- `api/app.py`,
+`cli/main.py`, `evaluation/harness.py` -- and every test call site
+updated; `test_network_live.py`'s own "a full `analyze_pass` never
+issues a non-GET request" guarantee is unaffected, since it only wraps
+`analyze_pod`, never the new `run_probe`).
+
+**Live-verified against the real cluster, after a live-caught
+third problem that turned out to be the host, not the code**: the
+lab's own kind-on-Colima VM had been pegging 300%+ CPU for days
+(confirmed via `ps`/`uptime`, load average 9-20), causing
+`kube-scheduler`/`kube-controller-manager` to lose their leader-election
+lease and crash-loop repeatedly -- this is what made the first several
+live-verification attempts time out, and is what surfaced bug 3 above
+in the first place (a probe genuinely waiting on a server too
+overloaded to answer quickly). Restarting Colima fixed the CPU
+contention but exposed a second, unrelated, lower-level problem: the
+kind node container's own `kube-proxy` crash-looped with "too many open
+files" after the cold restart forced it to re-read days of accumulated
+iptables state against a 1024 open-file soft limit baked into the
+container at creation time -- not fixable by restarting pods, only by
+recreating the container. Recreated the kind cluster entirely
+(`lab/delete-cluster.sh` + `lab/create-cluster.sh`), reapplied every
+`rbac/*.yaml`, confirmed every control-plane component came up `1/1`
+with zero restarts on the fresh cluster, then: a real Pod+Service
+serving a real TCP listener produced a real `dns_resolved=true,
+tcp_connected=true, succeeded=true` result in 4 seconds; the existing
+`scenario-service-port-mismatch` lab scenario (a Service whose
+`targetPort` names a container port that doesn't exist) produced a real
+`dns_resolved=true, tcp_connected=false` -- DNS and Service object both
+fine, but no valid EndpointSlice port mapping means kube-proxy has
+nothing to forward to, a genuine TCP-level failure this check is
+specifically built to catch. Confirmed via `kubectl` immediately after
+each run that no Job/Pod from either probe remained in the cluster, and
+via `kubesentinel security-audit` that the (already-gone, auto-cleaned-up)
+probe Jobs left no container-security findings behind. Test fixture
+(`probe-success-demo`) deleted immediately after;
+`scenario-service-port-mismatch` is a persistent lab scenario, left in
+place.
+
+**Documentation**: `docs/NETWORK_DIAGNOSTICS.md` (new Section 12,
+Section 2's deferred bullet and Section 6's safety guarantee both
+updated to point to it), `docs/IMPLEMENTATION_STATUS.md` (Capability D's
+own package description and "Active, bounded diagnostic mechanism" row
+updated to Implemented/opt-in), `README.md` (Capability D's own
+paragraph updated). `docs/PLATFORM_ROADMAP.md`'s Milestone 4 section is
+left unedited, same reasoning as Milestones 30-32's own precedent -- a
+historical record of that milestone's original, deliberately-scoped-out
+decision, with this closure recorded as separate follow-up work here
+instead.
+
+**Full regression suite**: ruff clean, mypy clean, **895 unit tests
+passed** (849 + 46).

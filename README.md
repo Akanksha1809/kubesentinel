@@ -80,9 +80,9 @@ of node/pod affinity, and any required pod-affinity/anti-affinity term
 using `namespaceSelector`, are detected and named, never guessed at. See
 [SCHEDULING_ANALYSIS.md](docs/SCHEDULING_ANALYSIS.md) for the design.
 
-A fourth, read-only engine -- the **network troubleshooting engine** --
-explains a real Pod's inbound Service-based connectivity story: which
-Services actually select it (computed independently, not inferred from
+A fourth engine -- the **network troubleshooting engine** -- explains a
+real Pod's inbound Service-based connectivity story: which Services
+actually select it (computed independently, not inferred from
 EndpointSlice counts), whether its EndpointSlice output agrees, whether
 each Service's `targetPort` actually resolves against the Pod's declared
 container ports (numeric and named `targetPort`s have genuinely different
@@ -90,13 +90,19 @@ Kubernetes semantics, both implemented precisely), whether cluster DNS
 (CoreDNS/`kube-dns`) looks healthy, and which NetworkPolicies apply --
 always as static policy analysis, never a claim about actually-observed
 blocked traffic (this lab cluster's CNI doesn't enforce NetworkPolicy at
-all). Every finding's reasoning ends with the same caveat: Kubernetes API
+all). Every finding's reasoning states the same caveat: Kubernetes API
 inspection can describe configuration, never prove a packet actually
-arrives. An active, bounded connectivity probe was deliberately scoped
-out of this engine -- it would be this project's first mutation surface
-outside the fully policy-gated `RemediationExecutor`, and deserves its own
-safety review rather than being folded into a static-analysis milestone.
-See [NETWORK_DIAGNOSTICS.md](docs/NETWORK_DIAGNOSTICS.md) for the design.
+arrives -- which is exactly what the engine's one opt-in, off-by-default
+extra closes: an **active connectivity probe** creates a short-lived,
+auto-cleaned-up Job that performs a real DNS lookup and a real TCP
+connect against a target Service, this project's first mutation
+capability outside the fully policy-gated `RemediationExecutor`, closed
+only after its own dedicated safety review (its own namespace allowlist,
+cooldown, concurrency limit, a fixed shell command that caller input
+never reaches except through typed environment variables, and a Pod
+template that passes this project's own container-security checks by
+construction). See [NETWORK_DIAGNOSTICS.md](docs/NETWORK_DIAGNOSTICS.md)
+for the design.
 
 A fifth capability -- the **capacity planning & autoscaling advisor** --
 is additive work *inside* the resource optimization engine rather than a

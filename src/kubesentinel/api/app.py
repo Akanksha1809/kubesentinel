@@ -118,7 +118,7 @@ async def lifespan(app: FastAPI):
                 clients, state.optimization_repo, settings, incident_repo=state.repo
             )
             state.scheduling = SchedulingService(clients, state.scheduling_repo, incident_repo=state.repo)
-            state.network = NetworkService(clients, state.network_repo, incident_repo=state.repo)
+            state.network = NetworkService(clients, state.network_repo, settings, incident_repo=state.repo)
             state.security = SecurityService(clients, state.security_repo, settings)
         except Exception:  # noqa: BLE001 - API must still serve read endpoints without a cluster
             logger.exception("could not start observer")

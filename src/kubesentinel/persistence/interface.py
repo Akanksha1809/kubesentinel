@@ -13,7 +13,7 @@ from datetime import datetime
 from kubesentinel.models.action import RemediationAction
 from kubesentinel.models.evaluation import EvaluationRun
 from kubesentinel.models.incident import Incident
-from kubesentinel.models.network import NetworkFinding
+from kubesentinel.models.network import ConnectivityProbeResult, NetworkFinding
 from kubesentinel.models.optimization import AnalysisRunSummary, ResourceRecommendation, WorkloadSnapshot
 from kubesentinel.models.scheduling import SchedulingFinding
 from kubesentinel.models.security import SecurityFinding
@@ -145,6 +145,21 @@ class NetworkRepository(ABC):
     def list_findings(
         self, *, namespace: str | None = None, classification: str | None = None
     ) -> builtins.list[NetworkFinding]: ...
+
+    @abstractmethod
+    def get_probe_result(self, probe_id: str) -> ConnectivityProbeResult | None: ...
+
+    @abstractmethod
+    def save_probe_result(self, result: ConnectivityProbeResult) -> None:
+        """Insert-only -- a probe result is never re-run and upserted the
+        way a finding is; each `run_probe` call produces exactly one new,
+        immutable row."""
+        ...
+
+    @abstractmethod
+    def list_probe_results(
+        self, *, namespace: str | None = None, service_name: str | None = None, port: int | None = None
+    ) -> builtins.list[ConnectivityProbeResult]: ...
 
 
 class SecurityRepository(ABC):

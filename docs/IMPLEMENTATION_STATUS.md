@@ -188,9 +188,12 @@ EndpointSlice-vs-selector consistency check; numeric-vs-named `targetPort`
 resolution), `policy_inventory.py` (applicable NetworkPolicy summaries),
 `dns_health.py` (CoreDNS/`kube-dns` health, a narrow, explicitly-justified
 `kube-system` RBAC exception), `analyzer.py` (pure classification over
-pre-computed evidence), `service.py` (the one module with side effects,
-mirroring `SchedulingService`/`OptimizationService` exactly).
-`NetworkingV1Api` added to `ClusterClients` (new, additive).
+pre-computed evidence), `probe.py` (the active connectivity probe,
+Section 12, opt-in and off by default), `service.py` (the one module
+with side effects, mirroring `SchedulingService`/`OptimizationService`
+exactly, plus the probe's own gating logic). `NetworkingV1Api` added to
+`ClusterClients` (new, additive); `BatchV1Api` (already present,
+read-only since Milestone 2) gets its first write use.
 
 | Spec item | Status | Evidence |
 |---|---|---|
@@ -204,7 +207,7 @@ mirroring `SchedulingService`/`OptimizationService` exactly).
 | Ingress / Gateway | **Not applicable** | confirmed live (`kubectl get ingressclass`, `kubectl get crd`) that zero such resources or CRDs exist anywhere in this project's cluster or manifest history -- an honest "not applicable," not a built-but-silent gap |
 | Relevant Events | Detected via reuse | `resolve_pod_owner` (workload resolution) is reused as-is; Event correlation itself is the troubleshooting engine's own existing surface (`observer`/`diagnostics`), not duplicated here |
 | Evidence-based request-path explanation | Implemented | `NetworkFinding.reasoning` always states the specific evidence behind the classification, and always appends the "not a confirmed end-to-end connectivity test" caveat -- API inspection cannot prove a packet actually arrives |
-| Active, bounded diagnostic mechanism | **Deliberately deferred** | reasoned during this milestone's own design pass as this project's first mutation capability outside the fully policy-gated `RemediationExecutor` -- deserves its own dedicated design/safety review rather than folding a new mutation surface into an already-large static-analysis milestone |
+| Active, bounded diagnostic mechanism | Implemented, opt-in | `network/probe.py` + `NetworkService.run_probe` (docs/NETWORK_DIAGNOSTICS.md Section 12) -- a short-lived, auto-cleaned-up `batch/v1` Job tests real DNS resolution and a real TCP connect against a target Service's ClusterIP. This project's first mutation capability outside the fully policy-gated `RemediationExecutor`, closed only after its own dedicated design/safety review (Section 12): off by default (`network_probe_enabled=False`), its own namespace allowlist, cooldown, and concurrency limit, a fixed never-caller-built shell command, and a Pod template that passes every one of this project's own container-security checks by construction |
 | Never claim a NetworkPolicy blocks traffic without evidence | Honored | `POLICY_MAY_RESTRICT` is the strongest classification an applicable policy can produce; the reasoning text never states a stronger claim, and the kindnet non-enforcement caveat is documented explicitly (below) |
 
 **Environment constraint, confirmed still true and load-bearing here**:

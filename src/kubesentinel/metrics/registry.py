@@ -145,3 +145,13 @@ security_findings_total = Counter(
     "primary triage axis.",
     ["severity"],
 )
+
+network_probe_total = Counter(
+    "kubesentinel_network_probe_total",
+    "Active connectivity probe runs (docs/NETWORK_DIAGNOSTICS.md Section "
+    "12), by result: dns_ok_tcp_ok, dns_ok_tcp_failed, dns_failed, "
+    "timeout (the Job never reached a terminal state in time), denied "
+    "(feature disabled, namespace not allowed, cooldown/concurrency "
+    "limit), or failed (the run itself raised).",
+    ["result"],
+)

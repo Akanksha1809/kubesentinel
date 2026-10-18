@@ -12,7 +12,7 @@ import builtins
 import sqlite3
 import threading
 
-from kubesentinel.models.network import NetworkFinding
+from kubesentinel.models.network import ConnectivityProbeResult, NetworkFinding
 from kubesentinel.persistence.interface import NetworkRepository
 
 _SCHEMA = """
@@ -26,6 +26,20 @@ CREATE TABLE IF NOT EXISTS network_findings (
 );
 CREATE INDEX IF NOT EXISTS idx_network_findings_namespace ON network_findings(namespace);
 CREATE INDEX IF NOT EXISTS idx_network_findings_classification ON network_findings(classification);
+
+-- Section 12: the active connectivity probe's own results -- a sibling
+-- table in the same file, not a new repository class (same capability,
+-- same package). Insert-only: a probe result is never upserted.
+CREATE TABLE IF NOT EXISTS connectivity_probe_results (
+    probe_id TEXT PRIMARY KEY,
+    namespace TEXT NOT NULL,
+    service_name TEXT NOT NULL,
+    port INTEGER NOT NULL,
+    data TEXT NOT NULL,
+    requested_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_probe_results_namespace ON connectivity_probe_results(namespace);
+CREATE INDEX IF NOT EXISTS idx_probe_results_target ON connectivity_probe_results(namespace, service_name, port);
 """
 
 
@@ -89,6 +103,51 @@ class SQLiteNetworkRepository(NetworkRepository):
         with self._lock:
             rows = self._conn.execute(query, params).fetchall()
         return [NetworkFinding.model_validate_json(r[0]) for r in rows]
+
+    def get_probe_result(self, probe_id: str) -> ConnectivityProbeResult | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT data FROM connectivity_probe_results WHERE probe_id = ?", (probe_id,)
+            ).fetchone()
+        return ConnectivityProbeResult.model_validate_json(row[0]) if row else None
+
+    def save_probe_result(self, result: ConnectivityProbeResult) -> None:
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO connectivity_probe_results
+                    (probe_id, namespace, service_name, port, data, requested_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    result.probe_id,
+                    result.namespace,
+                    result.service_name,
+                    result.port,
+                    result.model_dump_json(),
+                    result.requested_at.isoformat(),
+                ),
+            )
+            self._conn.commit()
+
+    def list_probe_results(
+        self, *, namespace: str | None = None, service_name: str | None = None, port: int | None = None
+    ) -> builtins.list[ConnectivityProbeResult]:
+        query = "SELECT data FROM connectivity_probe_results WHERE 1=1"
+        params: list[str | int] = []
+        if namespace:
+            query += " AND namespace = ?"
+            params.append(namespace)
+        if service_name:
+            query += " AND service_name = ?"
+            params.append(service_name)
+        if port is not None:
+            query += " AND port = ?"
+            params.append(port)
+        query += " ORDER BY requested_at DESC"
+        with self._lock:
+            rows = self._conn.execute(query, params).fetchall()
+        return [ConnectivityProbeResult.model_validate_json(r[0]) for r in rows]
 
     def close(self) -> None:
         with self._lock:
