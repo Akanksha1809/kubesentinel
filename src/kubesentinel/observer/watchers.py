@@ -14,6 +14,12 @@ The three resource watchers below (Pod, Event, Deployment) are thin wrappers aro
 one shared `_ListWatchLoop`: the reconnect/resync/backoff logic is identical across
 resource types and was duplicated three times before this -- only the specific
 list/watch API calls and the callback type differ per resource.
+
+Configured with several namespaces, `_ListWatchLoop` runs one fully independent
+list-then-watch-then-resync loop per namespace, each in its own thread (see
+`_ListWatchLoop.run`) -- a single `watch.Watch()` stream can only ever follow one
+namespace at a time, so several configured namespaces need several concurrent
+streams, not one stream that happens to cover several namespaces.
 """
 
 from __future__ import annotations
@@ -89,16 +95,10 @@ class _ListWatchLoop:
         # not a variant of it.
         self._dict_object_watch = dict_object_watch
 
-    def _list(self, **kwargs: Any) -> tuple[list[Any], str | None]:
-        if self._namespaces:
-            # Multiple namespaces require one list call each; merge results.
-            items: list[Any] = []
-            resource_version = None
-            for ns in self._namespaces:
-                items_part, resource_version = self._list_one(self._list_namespaced, namespace=ns, **kwargs)
-                items.extend(items_part)
-            return items, resource_version
-        return self._list_one(self._list_all_namespaces, **kwargs)
+    def _list_single(self, namespace: str | None) -> tuple[list[Any], str | None]:
+        if namespace is not None:
+            return self._list_one(self._list_namespaced, namespace=namespace)
+        return self._list_one(self._list_all_namespaces)
 
     def _list_one(self, list_fn: Callable[..., Any], **kwargs: Any) -> tuple[list[Any], str | None]:
         if self._dict_object_watch:
@@ -112,15 +112,48 @@ class _ListWatchLoop:
         return data.get("items", []), data.get("metadata", {}).get("resourceVersion")
 
     def run(self, stop_event: threading.Event) -> None:
+        if len(self._namespaces) <= 1:
+            namespace = self._namespaces[0] if self._namespaces else None
+            self._run_one_namespace(namespace, stop_event)
+            return
+
+        # Several configured namespaces: one independent list-then-watch-
+        # then-resync loop per namespace, each in its own daemon thread,
+        # all sharing `stop_event` -- so one namespace's relist/backoff/410
+        # handling can never block or be affected by another's. Previously
+        # a single watch stream only ever followed `self._namespaces[0]`;
+        # namespaces past the first were picked up only on the next
+        # periodic resync, not on every change. See
+        # docs/DESIGN_DECISIONS.md's own former "known limitation, not
+        # silently worked around" section -- closed here.
+        threads = [
+            threading.Thread(
+                target=self._run_one_namespace,
+                args=(ns, stop_event),
+                name=f"{self._component}[{ns}]",
+                daemon=True,
+            )
+            for ns in self._namespaces
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+    def _run_one_namespace(self, namespace: str | None, stop_event: threading.Event) -> None:
+        """List-then-watch-then-resync loop for exactly one namespace (or,
+        when `namespace` is None, cluster-wide/all-namespaces). Called
+        directly by `run()` for 0-or-1 configured namespaces; for several,
+        `run()` invokes this once per namespace, each in its own thread."""
         attempt = 0
         while not stop_event.is_set():
             try:
-                items, resource_version = self._list()
+                items, resource_version = self._list_single(namespace)
                 for item in items:
                     self._on_event("ADDED", item)
 
                 attempt = 0  # successful list resets backoff
-                self._watch_from(resource_version, stop_event)
+                self._watch_from(namespace, resource_version, stop_event)
             except ApiException as exc:
                 if exc.status == 410:
                     logger.info(f"{self._component} watch resourceVersion expired, relisting")
@@ -137,15 +170,15 @@ class _ListWatchLoop:
             attempt += 1
             stop_event.wait(delay)
 
-    def _watch_from(self, resource_version: str | None, stop_event: threading.Event) -> None:
+    def _watch_from(self, namespace: str | None, resource_version: str | None, stop_event: threading.Event) -> None:
         w = watch.Watch(return_type="object") if self._raw_object_watch else watch.Watch()
         resync_deadline = time.monotonic() + self._resync_interval
         kwargs = {"resource_version": resource_version, "timeout_seconds": self._resync_interval}
 
         stream = (
             w.stream(self._list_all_namespaces, **kwargs)
-            if not self._namespaces
-            else w.stream(self._list_namespaced, namespace=self._namespaces[0], **kwargs)
+            if namespace is None
+            else w.stream(self._list_namespaced, namespace=namespace, **kwargs)
         )
         try:
             for event in stream:

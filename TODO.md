@@ -4716,3 +4716,74 @@ real throwaway Deployment, `recommendation-apply` with no
 disabled entirely, not even proposed` -- the operator now sees the
 exact cause and, from the corrected `--help` text, the fix, without
 reading `PolicyEngine` source.
+
+## Milestone 47: Multi-namespace live watching -- DONE
+
+Closes Milestone 1's own known-limitation item 3 (see that list, above):
+`_ListWatchLoop`'s live WATCH stream only ever followed
+`self._namespaces[0]` -- namespaces past the first were picked up at most
+once per periodic resync (default 300s), not on every change. Named
+explicitly in `docs/DESIGN_DECISIONS.md` as "the thing to address before
+`KUBESENTINEL_WATCH_NAMESPACES` is used with more than one value," never
+silently worked around. This affects every namespaced watcher sharing
+`_ListWatchLoop` -- Pod, Event, Deployment, PVC, EndpointSlice,
+CustomResource -- not just `PodWatcher`.
+
+**The fix**: `observer/watchers.py::_ListWatchLoop` -- `_list_single(namespace)`
+and `_watch_from(namespace, resource_version, stop_event)` are now both
+parametrized by an explicit namespace (or `None` for cluster-wide/all-
+namespaces), replacing the old `_list()` (which merged LIST calls across
+every configured namespace, correctly, but fed only one shared watch loop)
+and the old `_watch_from(resource_version, stop_event)` (which hardcoded
+`self._namespaces[0]`). `run()` now dispatches: 0-or-1 configured namespaces
+still run directly on the calling thread, identical to before (the
+single-namespace lab's own behavior and timing are unchanged, confirmed by
+every pre-existing test passing unchanged); 2+ namespaces spawn one
+independent list-then-watch-then-resync loop per namespace
+(`_run_one_namespace`), each in its own daemon thread, all sharing one
+`stop_event` -- so one namespace's own relist/backoff/410 handling can
+never block or affect another's.
+
+**Why this is safe under this project's existing concurrency model, not a
+new one**: `ObserverService` already invokes `IncidentManager.observe()`
+concurrently from one thread per watcher *type* (Pod/Event/Deployment/PVC/
+EndpointSlice), and `SQLiteIncidentRepository` already guards its shared
+connection with its own `threading.Lock`. Adding one more thread per
+*namespace* within a single watcher type introduces no new race: two
+threads for the same watcher type always observe disjoint resources (a
+Pod's UID belongs to exactly one namespace), so no two per-namespace
+threads of the same watcher type can ever call `observe()` for the same
+resource concurrently.
+
+**Tests**: 10 new unit tests, `test_list_watch_loop.py` (new file) --
+`_list_single` routes to `list_namespaced`/`list_all_namespaces` correctly
+(2); `_watch_from` targets the given namespace, not a fixed one, the exact
+method that had the bug (3); `_run_one_namespace` routes list+watch+
+`on_event` end to end for a given namespace (1); `run()`'s dispatch --
+0 and 1 namespace run directly on the calling thread with no extra
+threading (2), several namespaces each get their own thread and `run()`
+blocks until every thread finishes (1), and one namespace's own loop
+blocking indefinitely never blocks another's (1, the precise concurrency
+claim this closes). `tests/unit/test_custom_resource_watcher.py` updated
+to call the new `_list_single(namespace)` in place of the removed `_list()`
+-- same assertions, no behavior change. Full regression: ruff clean, mypy
+clean, **1045 unit tests passed** (1035 + 10).
+
+**Live-verified against the real cluster**: constructed a real `PodWatcher`
+with two real namespaces (`kubesentinel-lab` plus a throwaway
+`kubesentinel-multiwatch-demo`) and a deliberately long
+`resync_interval_seconds=300` -- long enough that, under the pre-fix bug,
+zero live events could possibly arrive for the second namespace within a
+short observation window (only a resync 300s later would have shown it).
+Created a real Pod in the second namespace: its `ADDED` event arrived via
+the live watch stream in 0.04s, not 300s later. A second run created Pods
+in *both* namespaces concurrently and confirmed both delivered live `ADDED`
+events -- proving this is genuinely two independent streams, not the
+second namespace working instead of the first. Cleaned up the throwaway
+namespace and both demo Pods afterward.
+
+**Documentation**: `docs/DESIGN_DECISIONS.md` (the "known limitation, not
+silently worked around" section rewritten to record the closure, the
+concurrency-safety reasoning, and why 0-or-1-namespace behavior is
+unchanged). `observer/watchers.py`'s own module and `_run_one_namespace`
+docstrings updated.

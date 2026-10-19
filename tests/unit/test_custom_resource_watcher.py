@@ -61,7 +61,7 @@ class TestCustomResourceWatcher:
             namespaces=["kubesentinel-lab"],
             on_event=MagicMock(),
         )
-        watcher._loop._list()
+        watcher._loop._list_single("kubesentinel-lab")
         custom_objects_api.list_namespaced_custom_object.assert_called_once_with(
             group="kubesentinel.io",
             version="v1alpha1",
@@ -71,11 +71,11 @@ class TestCustomResourceWatcher:
 
     def test_list_delivers_each_item_through_on_event_as_added(self):
         # Exercises the same path `run()` does for its initial replay
-        # (`_list()` then `on_event("ADDED", item)` per item), without
+        # (`_list_single()` then `on_event("ADDED", item)` per item), without
         # going through `run()`'s own watch half at all -- that half is a
         # real network stream and is covered for every other watcher by
         # `tests/integration/test_watch_resync.py` (live, not unit); this
-        # test is specifically pinning the new dict-shaped `_list()` ->
+        # test is specifically pinning the new dict-shaped `_list_single()` ->
         # `on_event` wiring `dict_object_watch` added.
         custom_objects_api = MagicMock()
         custom_objects_api.list_namespaced_custom_object.return_value = _dict_response(
@@ -90,7 +90,7 @@ class TestCustomResourceWatcher:
             namespaces=["kubesentinel-lab"],
             on_event=lambda event_type, obj: events.append((event_type, obj)),
         )
-        items, _resource_version = watcher._loop._list()
+        items, _resource_version = watcher._loop._list_single("kubesentinel-lab")
         for item in items:
             watcher._loop._on_event("ADDED", item)
         assert events == [("ADDED", {"kind": "KubeSentinelRemediationPolicy", "metadata": {"name": "p1"}})]

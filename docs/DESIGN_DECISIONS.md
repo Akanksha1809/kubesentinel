@@ -68,17 +68,40 @@ terminating Pod's status can take (fragile, and games-of-whack-a-mole-prone);
 it treats `deletionTimestamp != None` as "this Pod is not a source of health
 information right now" and skips it outright, full stop.
 
-## Why `watch_namespace_list` with multiple entries is a known limitation, not
-silently worked around
+## Why `_ListWatchLoop` runs one independent thread per configured namespace,
+not one merged watch stream
 
-`PodWatcher`'s periodic resync LISTs every configured namespace correctly, but its
-live WATCH stream only follows the first namespace in the list -- so namespaces past
-the first only get picked up once per resync interval (default 300s), not on every
-change. Building a correct multi-namespace merge (independent watch streams per
-namespace, a shared resync timer, correct handling of one stream's 410 while others
-stay healthy) is real complexity the single-namespace lab doesn't need yet. Rather
-than hack in a silent partial fix, this is named explicitly in TODO.md as the thing to
-address before `KUBESENTINEL_WATCH_NAMESPACES` is used with more than one value.
+**Closed -- was a known limitation, named explicitly rather than silently
+worked around; see TODO.md's Milestone-1 known-limitations list, item 3, and
+the later milestone that closed it.** `PodWatcher`'s (and every other
+namespaced watcher's) periodic resync LISTs every configured namespace
+correctly, but its live WATCH stream used to only ever follow the first
+namespace in the list -- so namespaces past the first were picked up at most
+once per resync interval (default 300s), not on every change. A single
+`watch.Watch()` stream can only ever follow one namespace at a time (no
+Kubernetes API supports watching several arbitrary namespaces over one
+stream), so there was no way to fix this by tuning the existing stream --
+it needed genuinely independent streams, one per namespace.
+
+Fixed by giving each configured namespace its own, fully independent
+list-then-watch-then-resync loop, run concurrently in its own daemon thread,
+all sharing one `stop_event` (`_ListWatchLoop.run`/`_run_one_namespace` in
+`observer/watchers.py`). Each namespace's own relist/backoff/410 handling is
+therefore already isolated by construction -- a slow or stuck namespace
+can never block or delay another's thread, confirmed live by making one
+namespace's loop block indefinitely while a second namespace's events still
+arrive. Safe under this project's own existing concurrency model, not a new
+one: `ObserverService` already invokes `IncidentManager.observe()`
+concurrently from one thread per *watcher type* (Pod/Event/Deployment/PVC/
+EndpointSlice), and `SQLiteIncidentRepository` already guards its shared
+connection with its own lock; adding one more thread per *namespace* within
+a single watcher type introduces no new race, because two threads for the
+same watcher type always observe disjoint resources (a Pod's UID belongs to
+exactly one namespace, so no two per-namespace threads of the same watcher
+ever call `observe()` for the same resource). For 0 or 1 configured
+namespaces -- the common case, including the single-namespace lab -- `run()`
+still executes directly on the calling thread, identical to before; the
+extra threading only exists for 2+ namespaces.
 
 ## Why the policy engine's checks run as an ordered list, first-match-wins, not
 a single combined boolean expression
