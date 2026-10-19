@@ -35,6 +35,7 @@ def resource_ref_from_pod(pod: V1Pod) -> ResourceRef:
         owner_kind=owner.kind if owner else None,
         owner_name=owner.name if owner else None,
         owner_uid=owner.uid if owner else None,
+        node_name=pod.spec.node_name if pod.spec else None,
     )
 
 

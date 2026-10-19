@@ -52,3 +52,18 @@ def test_resource_ref_from_pod_without_owner():
     pod = make_pod(owner=None)
     ref = resource_ref_from_pod(pod)
     assert ref.owner_kind is None
+
+
+def test_resource_ref_from_pod_captures_node_name():
+    # Used to match a stale DaemonSet-owned Pod incident to its replacement
+    # by node -- see incidents/manager.py's
+    # _maybe_supersede_stale_daemonset_pod_incidents.
+    pod = make_pod(owner=("DaemonSet", "demo-daemonset", "ds-uid-1"), node_name="node-a")
+    ref = resource_ref_from_pod(pod)
+    assert ref.node_name == "node-a"
+
+
+def test_resource_ref_from_pod_without_node_name():
+    pod = make_pod()  # not yet scheduled -- spec.node_name defaults to None
+    ref = resource_ref_from_pod(pod)
+    assert ref.node_name is None

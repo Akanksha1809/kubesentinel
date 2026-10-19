@@ -58,6 +58,14 @@ class ResourceRef(BaseModel):
     owner_kind: str | None = None
     owner_name: str | None = None
     owner_uid: str | None = None
+    # Only ever set for a Pod (from `pod.spec.node_name`, once scheduled) --
+    # the stable "slot" a DaemonSet-owned Pod occupies, since its own name is
+    # freshly generated on every recreation (unlike a StatefulSet Pod's,
+    # which is reused). Lets a stale DaemonSet-owned Pod incident be matched
+    # to its replacement by node, the same role a Deployment's ReplicaSet
+    # chain plays for that kind. See
+    # incidents/manager.py::IncidentManager._maybe_supersede_stale_daemonset_pod_incidents.
+    node_name: str | None = None
 
 
 class Incident(BaseModel):

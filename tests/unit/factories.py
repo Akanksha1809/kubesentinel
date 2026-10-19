@@ -241,6 +241,7 @@ def make_pod(
     container_statuses: list[V1ContainerStatus] | None = None,
     conditions: list[V1PodCondition] | None = None,
     owner: tuple[str, str, str] | None = None,
+    node_name: str | None = None,
 ) -> V1Pod:
     owner_refs = None
     if owner:
@@ -257,7 +258,7 @@ def make_pod(
             resource_version="100",
             owner_references=owner_refs,
         ),
-        spec=V1PodSpec(containers=[V1Container(name="app")]),
+        spec=V1PodSpec(containers=[V1Container(name="app")], node_name=node_name),
         status=V1PodStatus(
             phase=phase,
             container_statuses=container_statuses or [],

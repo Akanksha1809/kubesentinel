@@ -5035,3 +5035,90 @@ bounded to a single cycle. Not done here.
 **Documentation**: `docs/DIAGNOSTIC_RULES.md` (new section explaining why
 evidence accumulates, which rules needed the fix and why, which didn't,
 and the narrower residual case named above).
+
+## Milestone 51: Stale-incident supersede extended to DaemonSet -- DONE
+
+Closes one of the three kinds `docs/INCIDENT_RECONCILIATION_DESIGN.md`
+§6 named explicitly as "left for a follow-up" when the Deployment-only
+sweep shipped: a stale Pod-level incident owned by a StatefulSet/
+DaemonSet/Job never got superseded, only one owned by a Deployment did.
+Scoped to DaemonSet specifically, after investigating all three: a
+StatefulSet Pod's own name is *reused* across recreation (ordinal
+identity), so the existing "confirm via live 404 on the old recorded
+name" check can't tell "replaced" from "still the same Pod" for that
+kind -- a materially different, harder problem. A Job generally has no
+stable per-attempt identity to match an old incident to its replacement
+by at all (only `completionMode: Indexed` Jobs would, via the
+completion-index label, and most Jobs don't use it). DaemonSet has
+neither problem: its Pod names are freshly generated on every
+recreation (like a Deployment's), and the Node a Pod lands on gives it
+a stable "slot" identifier a Deployment's ReplicaSet chain doesn't need
+an equivalent of.
+
+**Why the trigger has to differ from the Deployment case, not just the
+matching**: the Deployment sweep fires off the owning controller's own
+confirmed-healthy observation -- this project watches Deployments
+directly, with their own evidence/diagnosis pipeline. There is no
+equivalent watcher for DaemonSet, and building one (plus the machinery
+to decide "is this DaemonSet healthy") would be a materially larger
+undertaking than this gap warrants alone. Used instead: a single
+DaemonSet-owned Pod's own confirmed-healthy observation, already
+produced by the existing `PodWatcher`/`is_confirmed_healthy` -- no new
+watcher needed. Weaker than "the whole controller is healthy" (says
+nothing about any other node), which is exactly why the match is scoped
+to the one node that signal actually speaks for.
+
+**Added**:
+
+- `models/incident.py::ResourceRef.node_name: str | None` -- additive,
+  only ever set for a Pod.
+- `observer/inspector.py::resource_ref_from_pod` -- populates it from
+  `pod.spec.node_name`.
+- `incidents/manager.py::IncidentManager._maybe_supersede_stale_daemonset_pod_incidents`
+  -- candidates matched by `owner_uid` + `node_name`, excluding the
+  triggering Pod's own `resource_uid` explicitly. No live ReplicaSet-
+  style lookup needed at all (unlike the Deployment case): a DaemonSet
+  owns its Pods directly, so `owner_uid`, already recorded on the
+  incident at open time, is already everything needed to find the right
+  candidates. Triggered from `observe()` on
+  `resource.kind == "Pod" and resource.owner_kind == "DaemonSet" and
+  is_confirmed_healthy(evidence)`, mirroring the Deployment trigger's own
+  placement exactly.
+- `IncidentManager._supersede` generalized from a Deployment-specific
+  `replaced_by_deployment` parameter to a kind-agnostic `replaced_by` +
+  explicit `reason`, shared by both sweeps now rather than duplicated.
+
+**Tests**: 11 new unit tests -- 9 in a new `TestSupersedeStaleDaemonSetPodIncidents`
+class in `test_incident_manager.py` (mirroring `TestSupersedeStalePodIncidents`'s
+own coverage: supersedes on confirmed-gone, decrements the gauge, does
+NOT supersede a different node's incident -- the load-bearing safety
+property -- a different DaemonSet's incident, a Pod that still exists,
+an inconclusive live check, or the triggering Pod itself), 2 in
+`test_inspector.py` (`resource_ref_from_pod` captures `node_name` when
+scheduled, `None` when not). One pre-existing test updated for the
+generalized `_supersede` signature (`replaced_by_deployment` ->
+`replaced_by` in its audit-log assertion) -- a key rename, not a
+behavior change. Every other pre-existing test passed unchanged. Full
+regression: ruff clean, mypy clean, **1065 unit tests passed** (1054 +
+11).
+
+**Live-verified against the real cluster**: a real single-node
+`kind-kubesentinel` cluster (no multi-node setup needed -- a DaemonSet's
+one Pod and its replacement both land on the cluster's only node by
+construction). Created a crash-looping DaemonSet, confirmed a real
+`CRASH_LOOP_BACKOFF` incident opened, patched the DaemonSet's own
+template to a healthy command (a real rolling update: old Pod deleted,
+new Pod created with a fresh name on the same node). Once the new Pod
+reported healthy, the old incident correctly showed `status:
+SUPERSEDED`, `recovery_duration_seconds: None` (never fabricating a
+recovery that was never observed), and an audit entry naming
+`replaced_by: 'daemonset-supersede-demo'` -- confirmed via the real
+`/incidents` endpoint. `incidents_active{category="CRASH_LOOP_BACKOFF"}`
+correctly back to `0` via the real `/metrics` endpoint. Cleaned up the
+demo DaemonSet afterward.
+
+**Documentation**: `docs/INCIDENT_RECONCILIATION_DESIGN.md` -- §6's own
+"left for a follow-up" bullet corrected to name DaemonSet as closed and
+explain, with the reasons found while scoping this, why StatefulSet and
+Job are genuinely harder, not just unscheduled; new §8 covering the
+closure in full.

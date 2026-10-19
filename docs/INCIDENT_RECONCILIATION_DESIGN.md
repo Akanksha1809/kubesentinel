@@ -180,12 +180,19 @@ filter) -- no new route, no new command.
   current gap (most single rollouts keep their immediately-prior
   ReplicaSet around), not eliminated.
 - **Does not supersede a standalone Pod's incident** (no owner at all)
-  or one owned by a StatefulSet/DaemonSet/Job -- this design is scoped
-  specifically to the Deployment -> ReplicaSet -> Pod chain named in the
-  original limitation. A StatefulSet Pod recreated with a new UID is a
-  real, separate instance of the same underlying class of problem, left
-  for a follow-up that would need `resolve_pod_owner`'s own
-  `_DIRECT_OWNER_KINDS` handling, not this one.
+  or one owned by a StatefulSet/Job -- this design is scoped specifically
+  to the Deployment -> ReplicaSet -> Pod chain named in the original
+  limitation. **DaemonSet closed as a later, separate follow-up -- see
+  §8.** StatefulSet and Job remain open, and for a reason found only while
+  closing DaemonSet, not assumed going in: a StatefulSet Pod's own name is
+  *reused* across recreation (ordinal identity), so the "confirm via a
+  live 404 on the old recorded name" check this design and §8 both rely
+  on can't tell "replaced" from "this is still the same Pod" for that
+  kind -- a materially different problem, not a mechanical copy of this
+  one. A Job generally has no stable per-attempt identity to match an old
+  incident to its replacement by at all (only `completionMode: Indexed`
+  Jobs would -- via the completion-index label -- and most Jobs don't use
+  it).
 - **Does not retroactively close incidents that predate this feature**
   on upgrade -- the sweep only runs on a live Deployment observation
   going forward; an already-ancient stale incident from before this
@@ -243,3 +250,99 @@ several *stale* throwaway demo-server processes left running from
 earlier, unrelated points in this same session -- an operational slip in
 how this agent cleaned up after itself, not a finding about the feature
 under test.
+
+## 8. DaemonSet, closed as a later, separate follow-up
+
+Closes §6's own named gap, for exactly the one kind it's tractable for
+without a larger redesign: a DaemonSet-owned Pod's incident now gets
+superseded too, once a healthy replacement Pod is observed on the same
+node.
+
+### 8.1 Why the trigger has to be different, not just the matching
+
+The Deployment sweep fires off the *owning controller's own* confirmed-
+healthy observation (§3) -- this project watches Deployments directly,
+with their own `DEPLOYMENT_STATUS` evidence and `has_failure_signal`/
+`is_confirmed_healthy` checks. There is no equivalent watcher for
+DaemonSet, and adding one (plus the evidence/diagnosis machinery to
+decide "is this DaemonSet healthy") would be a materially larger
+undertaking than this gap warrants on its own.
+
+Used instead: a single DaemonSet-owned Pod's own confirmed-healthy
+observation -- already produced by the existing `PodWatcher`/
+`is_confirmed_healthy`, no new watcher needed. This is a weaker signal
+than "the whole controller is healthy" (it says nothing about any other
+node), which is exactly why the matching below is scoped to the one
+node that signal actually speaks for, not to "every stale incident for
+this DaemonSet."
+
+### 8.2 Why the match is (DaemonSet, node), not (DaemonSet, name) like the Deployment case
+
+The Deployment sweep confirms supersession with a live 404 on the *old
+incident's own recorded Pod name* -- safe there because a Deployment's
+replacement Pod always gets a fresh, generated name (never reused). A
+DaemonSet-owned Pod's name is *also* freshly generated on every
+recreation (unlike a StatefulSet's ordinal name), so the same 404 check
+is valid here too -- but only once the right *candidate* has been found,
+and a Deployment-style "same ReplicaSet chain" filter doesn't exist for
+a DaemonSet (no intermediate controller at all:
+`resolve_pod_owner`/`_DIRECT_OWNER_KINDS` already resolves a DaemonSet-
+owned Pod's `owner_uid` straight from its own single ownerReference,
+confirmed by reading `resource_ref_from_pod` -- no live ReplicaSet-style
+lookup needed, unlike §4 step 2).
+
+`ResourceRef` gained `node_name` (from `pod.spec.node_name`, populated by
+`resource_ref_from_pod` for every Pod, set once scheduled) specifically
+to serve as this kind's "slot" identifier -- the role a Deployment's
+ReplicaSet chain plays, but simpler: no live API call is needed to
+establish it, since it is already recorded on the incident at open time.
+A candidate must match the triggering Pod's own `owner_uid` *and*
+`node_name`, and must not be the triggering Pod's own `resource_uid`
+(excluded explicitly, not merely assumed impossible) -- a genuinely
+still-unhealthy Pod on a *different* node must never be superseded just
+because *some other* node's Pod came back healthy; this is the load-
+bearing safety property a single Pod's own health, instead of a
+controller's aggregate health, makes necessary.
+
+### 8.3 What was added
+
+- `models/incident.py::ResourceRef.node_name: str | None` -- additive,
+  only ever set for a Pod.
+- `observer/inspector.py::resource_ref_from_pod` -- populates it from
+  `pod.spec.node_name`.
+- `incidents/manager.py::IncidentManager._maybe_supersede_stale_daemonset_pod_incidents`
+  -- the DaemonSet-scoped sweep described above, triggered from `observe()`
+  whenever `resource.kind == "Pod" and resource.owner_kind == "DaemonSet"
+  and is_confirmed_healthy(evidence)`, mirroring the Deployment trigger's
+  own placement and reasoning (§3) exactly.
+- `IncidentManager._supersede` generalized from a Deployment-specific
+  `replaced_by_deployment` parameter to a kind-agnostic `replaced_by` +
+  explicit `reason`, shared by both sweeps now rather than duplicated.
+
+### 8.4 Live-verified against the real cluster
+
+A real single-node `kind-kubesentinel` cluster (no multi-node setup
+needed -- a DaemonSet's one Pod and its replacement both land on the
+cluster's only node by construction): created a crash-looping DaemonSet,
+confirmed a real `CRASH_LOOP_BACKOFF` Pod-level incident opened, then
+patched the DaemonSet's own template to a healthy command -- a real
+rolling update, old Pod deleted, new Pod created with a fresh name on
+the same node. Once the new Pod reported healthy, the old incident
+correctly showed:
+
+```
+status: SUPERSEDED
+resolved_at: 2026-10-19T17:04:54.749020Z
+recovery_duration_seconds: None
+last audit entry: {'event_type': 'incident_superseded', 'actor': 'observer',
+  'details': {'replaced_by': 'daemonset-supersede-demo',
+    'reason': 'pod confirmed gone (live 404); a healthy replacement pod observed on the same node'}}
+```
+
+-- `recovery_duration_seconds` correctly `None` (§1's constraint holds
+here too), `incidents_active{category="CRASH_LOOP_BACKOFF"}` correctly
+back to `0` via the real `/metrics` endpoint. Cleaned up the demo
+DaemonSet afterward; namespace confirmed empty.
+
+StatefulSet and Job remain open, named explicitly in §6, for the reasons
+found while scoping this closure, not assumed going in.

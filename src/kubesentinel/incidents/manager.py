@@ -125,6 +125,14 @@ class IncidentManager:
         if resource.kind == "Deployment" and is_confirmed_healthy(evidence):
             self._maybe_supersede_stale_pod_incidents(resource, now)
 
+        # Fires on a single DaemonSet-owned Pod's own confirmed-healthy
+        # observation, not a controller-level signal -- this project
+        # watches no DaemonSet directly (see
+        # _maybe_supersede_stale_daemonset_pod_incidents's own docstring
+        # for why that's a different trigger shape, not a gap).
+        if resource.kind == "Pod" and resource.owner_kind == "DaemonSet" and is_confirmed_healthy(evidence):
+            self._maybe_supersede_stale_daemonset_pod_incidents(resource, now)
+
         existing = self._repo.find_open_by_resource_uid(resource.uid)
 
         if existing is not None:
@@ -346,23 +354,89 @@ class IncidentManager:
                     # conservative, never supersede on an inconclusive check.
                     continue
 
-            self._supersede(incident, now, deployment_resource.name)
+            self._supersede(
+                incident,
+                now,
+                replaced_by=deployment_resource.name,
+                reason="pod confirmed gone (live 404); owning Deployment observed healthy",
+            )
+            self._repo.save(incident)
+
+    def _maybe_supersede_stale_daemonset_pod_incidents(self, pod_resource: ResourceRef, now: datetime) -> None:
+        """The DaemonSet analog of `_maybe_supersede_stale_pod_incidents`,
+        triggered differently because this project watches no DaemonSet
+        directly (no owning-controller health signal to key off, unlike a
+        Deployment's own Available/Progressing conditions): a single
+        DaemonSet-owned Pod's own confirmed-healthy observation is the
+        trigger instead, scoped to its exact (DaemonSet, node) slot so a
+        genuinely still-unhealthy Pod on a *different* node is never
+        touched by it.
+
+        Needs no live ReplicaSet-style lookup at all, unlike the Deployment
+        case -- a DaemonSet owns its Pods directly, so `owner_uid`, already
+        recorded on the incident at open time (`resource_ref_from_pod`
+        reads it straight off the Pod's own single ownerReference), is
+        already everything needed to find the right candidates. See
+        docs/INCIDENT_RECONCILIATION_DESIGN.md Section 8.
+
+        Node-scoped, not just DaemonSet-scoped: a DaemonSet-owned Pod's own
+        name is freshly generated on every recreation (like a Deployment's,
+        unlike a StatefulSet's), so there is no name to confirm-via-404
+        across a recreation without first finding the right candidate --
+        `node_name` is the stable identifier that plays the role a
+        Deployment's ReplicaSet chain plays for that kind."""
+        if self._clients is None:
+            return
+        if pod_resource.owner_kind != "DaemonSet" or pod_resource.owner_uid is None or pod_resource.node_name is None:
+            return
+
+        candidates = [
+            i
+            for i in self._repo.list(namespace=pod_resource.namespace)
+            if i.resource.kind == "Pod"
+            and i.resource.owner_kind == "DaemonSet"
+            and i.resource.owner_uid == pod_resource.owner_uid
+            and i.resource.node_name == pod_resource.node_name
+            and i.resource.uid != pod_resource.uid
+            and i.status not in (IncidentStatus.RESOLVED, IncidentStatus.SUPERSEDED)
+        ]
+        if not candidates:
+            return
+
+        for incident in candidates:
+            try:
+                self._clients.core.read_namespaced_pod(
+                    name=incident.resource.name, namespace=incident.resource.namespace
+                )
+                # Still exists (even under a different UID) -- leave it
+                # alone, same as the Deployment case.
+                continue
+            except ApiException as exc:
+                if exc.status != 404:
+                    continue
+
+            self._supersede(
+                incident,
+                now,
+                replaced_by=pod_resource.owner_name or incident.resource.owner_name or "<unknown-daemonset>",
+                reason="pod confirmed gone (live 404); a healthy replacement pod observed on the same node",
+            )
             self._repo.save(incident)
 
     @staticmethod
-    def _supersede(incident: Incident, now: datetime, replaced_by_deployment: str) -> None:
-        """Closes an incident whose own Pod was replaced by a rollout --
-        deliberately not `_resolve()`: no recovery of *this* object was
-        ever observed, so `recovery_duration_seconds` is never set here.
-        See docs/INCIDENT_RECONCILIATION_DESIGN.md Section 1."""
+    def _supersede(incident: Incident, now: datetime, replaced_by: str, reason: str) -> None:
+        """Closes an incident whose own Pod was replaced -- deliberately not
+        `_resolve()`: no recovery of *this* object was ever observed, so
+        `recovery_duration_seconds` is never set here. See
+        docs/INCIDENT_RECONCILIATION_DESIGN.md Section 1."""
         incident.last_observed_at = now
         incident.status = IncidentStatus.SUPERSEDED
         incident.resolved_at = now
         incident.add_audit(
             "incident_superseded",
             actor="observer",
-            replaced_by_deployment=replaced_by_deployment,
-            reason="pod confirmed gone (live 404); owning Deployment observed healthy",
+            replaced_by=replaced_by,
+            reason=reason,
         )
         # Same `active_metric_category`-not-`category` rule `_resolve` uses,
         # and for the same reason -- see its own comment.
@@ -370,5 +444,5 @@ class IncidentManager:
         incident.active_metric_category = None
         logger.info(
             "superseded incident",
-            extra={"incident_id": incident.incident_id, "replaced_by_deployment": replaced_by_deployment},
+            extra={"incident_id": incident.incident_id, "replaced_by": replaced_by},
         )

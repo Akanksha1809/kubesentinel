@@ -458,7 +458,7 @@ class TestSupersedeStalePodIncidents:
         # Load-bearing: never fabricate a recovery that was never observed.
         assert superseded.recovery_duration_seconds is None
         assert superseded.audit_log[-1].event_type == "incident_superseded"
-        assert superseded.audit_log[-1].details["replaced_by_deployment"] == "demo-deployment"
+        assert superseded.audit_log[-1].details["replaced_by"] == "demo-deployment"
 
     def test_decrements_the_active_incidents_gauge(self, manager_with_clients):
         manager, repo, clients = manager_with_clients
@@ -577,3 +577,158 @@ class TestSupersedeStalePodIncidents:
         manager.observe(*_healthy_deployment_ref_and_evidence())
 
         clients.apps.list_namespaced_replica_set.assert_not_called()
+
+
+_DAEMONSET_UID = "daemonset-uid-1"
+
+
+def _stale_daemonset_pod_incident_ref(
+    pod_uid: str = "pod-uid-old",
+    owner_uid: str = _DAEMONSET_UID,
+    pod_name: str = "demo-daemonset-old-abcde",
+    node_name: str = "node-a",
+) -> ResourceRef:
+    return ResourceRef(
+        namespace="kubesentinel-lab",
+        kind="Pod",
+        name=pod_name,
+        uid=pod_uid,
+        owner_kind="DaemonSet",
+        owner_name="demo-daemonset",
+        owner_uid=owner_uid,
+        node_name=node_name,
+    )
+
+
+def _healthy_daemonset_pod_ref_and_evidence(
+    pod_uid: str = "pod-uid-new",
+    owner_uid: str = _DAEMONSET_UID,
+    pod_name: str = "demo-daemonset-new-fghij",
+    node_name: str = "node-a",
+):
+    ref = ResourceRef(
+        namespace="kubesentinel-lab",
+        kind="Pod",
+        name=pod_name,
+        uid=pod_uid,
+        owner_kind="DaemonSet",
+        owner_name="demo-daemonset",
+        owner_uid=owner_uid,
+        node_name=node_name,
+    )
+    evidence = pod_evidence(make_pod(container_statuses=[running_container_status()]))
+    return ref, evidence
+
+
+class TestSupersedeStaleDaemonSetPodIncidents:
+    """The DaemonSet analog of TestSupersedeStalePodIncidents above --
+    triggered by a single healthy Pod observation, not a watched
+    controller's own health, so the equivalent safety checks are
+    node-scoped and daemonset-scoped instead of ReplicaSet-chain-scoped."""
+
+    def test_no_clients_wired_up_is_a_safe_no_op(self, manager):
+        incident = manager.observe(*_healthy_daemonset_pod_ref_and_evidence())
+        assert incident is None  # a healthy new Pod with no prior incident of its own opens nothing
+
+    def test_no_candidates_makes_zero_api_calls(self, manager_with_clients):
+        manager, _repo, clients = manager_with_clients
+        manager.observe(*_healthy_daemonset_pod_ref_and_evidence())
+        clients.core.read_namespaced_pod.assert_not_called()
+
+    def test_supersedes_a_stale_incident_on_the_same_node_confirmed_gone(self, manager_with_clients):
+        manager, repo, clients = manager_with_clients
+        stale_ref = _stale_daemonset_pod_incident_ref()
+        cs = waiting_container_status(reason="CrashLoopBackOff", restart_count=5)
+        stale = manager.observe(stale_ref, pod_evidence(make_pod(container_statuses=[cs])))
+        assert stale.status == IncidentStatus.DIAGNOSED
+
+        clients.core.read_namespaced_pod.side_effect = ApiException(status=404, reason="Not Found")
+
+        manager.observe(*_healthy_daemonset_pod_ref_and_evidence())
+
+        superseded = repo.get(stale.incident_id)
+        assert superseded.status == IncidentStatus.SUPERSEDED
+        assert superseded.resolved_at is not None
+        # Load-bearing: never fabricate a recovery that was never observed.
+        assert superseded.recovery_duration_seconds is None
+        assert superseded.audit_log[-1].event_type == "incident_superseded"
+        assert superseded.audit_log[-1].details["replaced_by"] == "demo-daemonset"
+        assert "same node" in superseded.audit_log[-1].details["reason"]
+
+    def test_decrements_the_active_incidents_gauge(self, manager_with_clients):
+        manager, repo, clients = manager_with_clients
+        stale_ref = _stale_daemonset_pod_incident_ref()
+        cs = waiting_container_status(reason="CrashLoopBackOff", restart_count=5)
+        stale = manager.observe(stale_ref, pod_evidence(make_pod(container_statuses=[cs])))
+        incidents_active.labels(category=stale.category).set(1)
+
+        clients.core.read_namespaced_pod.side_effect = ApiException(status=404, reason="Not Found")
+        manager.observe(*_healthy_daemonset_pod_ref_and_evidence())
+
+        assert incidents_active.labels(category=stale.category)._value.get() == 0
+
+    def test_does_not_supersede_an_incident_on_a_different_node(self, manager_with_clients):
+        # The exact safety property this design needs: a genuinely still-
+        # unhealthy Pod on a different node must never be touched just
+        # because *some other* node's Pod came back healthy.
+        manager, repo, clients = manager_with_clients
+        stale_ref = _stale_daemonset_pod_incident_ref(node_name="node-a")
+        cs = waiting_container_status(reason="CrashLoopBackOff", restart_count=5)
+        stale = manager.observe(stale_ref, pod_evidence(make_pod(container_statuses=[cs])))
+
+        clients.core.read_namespaced_pod.side_effect = ApiException(status=404, reason="Not Found")
+        manager.observe(*_healthy_daemonset_pod_ref_and_evidence(node_name="node-b"))
+
+        still_open = repo.get(stale.incident_id)
+        assert still_open.status != IncidentStatus.SUPERSEDED
+        clients.core.read_namespaced_pod.assert_not_called()
+
+    def test_does_not_supersede_an_incident_owned_by_a_different_daemonset(self, manager_with_clients):
+        manager, repo, clients = manager_with_clients
+        stale_ref = _stale_daemonset_pod_incident_ref(owner_uid="some-other-daemonset-uid")
+        cs = waiting_container_status(reason="CrashLoopBackOff", restart_count=5)
+        stale = manager.observe(stale_ref, pod_evidence(make_pod(container_statuses=[cs])))
+
+        clients.core.read_namespaced_pod.side_effect = ApiException(status=404, reason="Not Found")
+        manager.observe(*_healthy_daemonset_pod_ref_and_evidence())  # different owner_uid, same node
+
+        still_open = repo.get(stale.incident_id)
+        assert still_open.status != IncidentStatus.SUPERSEDED
+        clients.core.read_namespaced_pod.assert_not_called()
+
+    def test_does_not_supersede_when_the_old_pod_still_exists(self, manager_with_clients):
+        manager, repo, clients = manager_with_clients
+        stale_ref = _stale_daemonset_pod_incident_ref()
+        cs = waiting_container_status(reason="CrashLoopBackOff", restart_count=5)
+        stale = manager.observe(stale_ref, pod_evidence(make_pod(container_statuses=[cs])))
+
+        clients.core.read_namespaced_pod.return_value = make_pod(container_statuses=[cs])  # still there
+
+        manager.observe(*_healthy_daemonset_pod_ref_and_evidence())
+
+        still_open = repo.get(stale.incident_id)
+        assert still_open.status != IncidentStatus.SUPERSEDED
+
+    def test_does_not_supersede_on_an_inconclusive_live_check(self, manager_with_clients):
+        manager, repo, clients = manager_with_clients
+        stale_ref = _stale_daemonset_pod_incident_ref()
+        cs = waiting_container_status(reason="CrashLoopBackOff", restart_count=5)
+        stale = manager.observe(stale_ref, pod_evidence(make_pod(container_statuses=[cs])))
+
+        clients.core.read_namespaced_pod.side_effect = ApiException(status=500, reason="Internal Error")
+
+        manager.observe(*_healthy_daemonset_pod_ref_and_evidence())
+
+        still_open = repo.get(stale.incident_id)
+        assert still_open.status != IncidentStatus.SUPERSEDED
+
+    def test_never_treats_the_triggering_pod_itself_as_a_candidate(self, manager_with_clients):
+        # A pod that is its own candidate (same uid) must be excluded --
+        # it's handled by the ordinary resolve path later in the same
+        # observe() call, never by this sweep.
+        manager, _repo, clients = manager_with_clients
+        ref, evidence = _healthy_daemonset_pod_ref_and_evidence()
+
+        manager.observe(ref, evidence)
+
+        clients.core.read_namespaced_pod.assert_not_called()
