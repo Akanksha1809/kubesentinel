@@ -279,6 +279,22 @@ class NodeOvercommitment(BaseModel):
     unlimited_memory_container_count: int = 0
     overcommitted_cpu: bool = False
     overcommitted_memory: bool = False
+    # Real, currently-observed usage from the Kubernetes Metrics API
+    # (`metrics.k8s.io/nodes`) -- the most actionable of the three
+    # signals here, since requested/limits are both configuration, not
+    # fact. `None` whenever no metrics-server is installed or reachable
+    # (this project's own lab has none) -- never a zero-filled
+    # substitute for "no usage data available."
+    actual_cpu_millicores: int | None = None
+    actual_memory_bytes: int | None = None
+    actual_cpu_ratio: float | None = None
+    actual_memory_ratio: float | None = None
+    # True once actual usage exceeds `optimization_node_pressure_ratio_threshold`
+    # of this Node's own allocatable -- unlike `overcommitted_*` above,
+    # this is never a configuration anomaly, it is this Node genuinely
+    # under real load right now.
+    under_pressure_cpu: bool = False
+    under_pressure_memory: bool = False
 
 
 class ClusterOvercommitmentSummary(BaseModel):
@@ -297,6 +313,13 @@ class ClusterOvercommitmentSummary(BaseModel):
     cluster_limits_memory_ratio: float | None = None
     overcommitted_cpu: bool = False
     overcommitted_memory: bool = False
+    # Cluster-wide real usage, same honest-absence rule as the per-Node
+    # fields above: None whenever Node metrics weren't available this
+    # pass, never a number that silently excludes unreachable Nodes.
+    cluster_actual_cpu_ratio: float | None = None
+    cluster_actual_memory_ratio: float | None = None
+    under_pressure_cpu: bool = False
+    under_pressure_memory: bool = False
 
 
 class AnalysisRunSummary(BaseModel):

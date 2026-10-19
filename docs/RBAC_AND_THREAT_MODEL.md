@@ -241,22 +241,59 @@ rules:
     verbs: ["get", "list"]
 ```
 
-This entire boundary -- all seven Roles/ClusterRoles plus the kube-system
-exception, both directions -- is now covered by
-`tests/integration/test_rbac_boundary.py`: 38 automated checks. The
-security auditor's own RBAC rules needed a real, found-live correction
-of their own, worth recording here rather than only in TODO.md: the
-built-in-subject exclusion (`CLUSTER_ADMIN_BINDING`) first assumed only
-the well-known `system:masters` Group needed excluding, but this
-project's own real kind cluster has a *second* built-in cluster-admin
-Group binding -- `kubeadm:cluster-admins`, bound to the Group kubeadm
-itself uses for `admin.conf` -- confirmed by reading this cluster's own
-real `ClusterRoleBindings` (`kubectl get clusterrolebindings`) rather
-than trusting the one better-known identity. Fixed by excluding Group
-subjects by *prefix* (`system:`, `kubeadm:`) rather than one hardcoded
-exact name; `test_builtin_rbac_bootstrap_bindings_are_never_flagged` in
+```yaml
+# rbac/optimization-clusterrole.yaml (current, in full) -- a new
+# ClusterRole, closing the optimization engine's own previously-named
+# gap: MetricsApiProvider.get_current_node_usage() had existed since
+# this engine's own early milestones but had no caller and no grant for
+# this cluster-scoped resource. THE FOURTH documented cluster-scope
+# exception in this project, after the Node ClusterRole (Capability A),
+# the network engine's kube-system-bound RoleBinding (Capability D),
+# and the security auditor's ClusterRole (Capability F) --
+# `metrics.k8s.io/nodes` is Node-level, not namespaced, so no namespaced
+# Role (rbac/optimization-role.yaml, which already grants the
+# namespaced `metrics.k8s.io/pods`) can grant it.
+rules:
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["nodes"]
+    verbs: ["get", "list"]
+```
+
+This entire boundary -- every Role/ClusterRole in this project, plus
+the kube-system exception, both directions -- is now covered by
+`tests/integration/test_rbac_boundary.py`: 39 automated checks (37
+passing in an environment without metrics-server installed, like this
+project's own lab; 2 honestly skip rather than fail, since
+"metrics-server isn't reachable" is not an RBAC question either way).
+The security auditor's own RBAC rules needed a real, found-live
+correction of their own, worth recording here rather than only in
+TODO.md: the built-in-subject exclusion (`CLUSTER_ADMIN_BINDING`) first
+assumed only the well-known `system:masters` Group needed excluding,
+but this project's own real kind cluster has a *second* built-in
+cluster-admin Group binding -- `kubeadm:cluster-admins`, bound to the
+Group kubeadm itself uses for `admin.conf` -- confirmed by reading this
+cluster's own real `ClusterRoleBindings` (`kubectl get
+clusterrolebindings`) rather than trusting the one better-known
+identity. Fixed by excluding Group subjects by *prefix* (`system:`,
+`kubeadm:`) rather than one hardcoded exact name;
+`test_builtin_rbac_bootstrap_bindings_are_never_flagged` in
 `tests/integration/test_security_live.py` pins both exclusions against
 this project's own real cluster.
+
+A second real, found-live correction, caught while adding the Node-metrics
+ClusterRole above: `test_can_get_pod_metrics_via_real_authenticated_call`
+(the Pod-metrics sibling of this section's own
+`test_can_get_node_metrics_via_real_authenticated_call`) only treated a
+`503` as "metrics-server unavailable, not an RBAC question" -- but this
+exact lab's own permanent state (no metrics-server installed at all, not
+installed-but-unreachable) makes the real apiserver return a plain `404`
+for the unregistered aggregated API path instead, which the test's own
+`except` block re-raised as a hard failure rather than skipping. Running
+it live (confirming `get_current_node_usage()`'s own RBAC grant) surfaced
+that this sibling test had been silently broken in this project's own
+lab the whole time it existed. Fixed to treat `404` the same as `503` --
+both mean "the aggregated API itself can't answer right now," neither is
+a `403` and neither says anything about this ServiceAccount's own grant.
 
 ## What will be added, and when
 

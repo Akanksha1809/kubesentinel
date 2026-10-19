@@ -1,0 +1,27 @@
+# Read-only ClusterRole for the resource optimization engine's Node-level
+# usage check (RESOURCE_OPTIMIZATION_DESIGN.md Section 15.5) --
+# `optimization/overcommitment.py`'s own previously-named gap closed:
+# `MetricsApiProvider.get_current_node_usage()` has existed since this
+# engine's early milestones but had no caller and no grant for this
+# cluster-scoped resource until now.
+#
+# `metrics.k8s.io/nodes` is Node-level, not namespaced -- no namespaced
+# Role (rbac/optimization-role.yaml, which already grants the
+# namespaced `metrics.k8s.io/pods`) can grant it, no matter how narrow.
+# The FOURTH documented cluster-scope exception in this project, after
+# the Node ClusterRole (Capability A, rbac/clusterrole.yaml), the
+# network engine's kube-system-bound RoleBinding (Capability D), and the
+# security auditor's ClusterRole/ClusterRoleBinding read (Capability F,
+# rbac/security-clusterrole.yaml).
+#
+# "get"/"list" only -- same one-shot-snapshot-per-analyze()-call shape
+# every other read in this engine already has; the Metrics API has no
+# "watch" verb to grant in the first place.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kubesentinel-node-metrics
+rules:
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["nodes"]
+    verbs: ["get", "list"]

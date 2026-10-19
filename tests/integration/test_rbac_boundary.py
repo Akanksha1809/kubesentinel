@@ -140,17 +140,45 @@ def test_can_get_pod_metrics_via_real_authenticated_call(kubesentinel_sa_clients
     # gives a wrong answer for this aggregated API (see
     # KUBERNETES_CONCEPTS.md) -- a real request through a real client
     # authenticated as this exact ServiceAccount is the only trustworthy
-    # check. A 503 here (metrics-server itself down/unreachable, a real
+    # check. 503 (metrics-server installed but unreachable, a real
     # environmental state this project has hit live under shared-VM
-    # contention) is not an RBAC failure, so it's treated as inconclusive,
-    # not a hard failure.
+    # contention) and 404 (metrics-server not installed at all -- this
+    # exact lab's own permanent state, found live while adding the sibling
+    # Node-metrics check below: the aggregated API path itself isn't being
+    # served, so the main apiserver's own routing returns a plain 404, not
+    # a 503 from the aggregation layer) are both "not an RBAC question" --
+    # neither is a 403, so neither says anything about this ServiceAccount's
+    # own grant.
     _, _, _, custom_objects = kubesentinel_sa_clients
     try:
         result = custom_objects.list_namespaced_custom_object(
             group="metrics.k8s.io", version="v1beta1", namespace=LAB_NAMESPACE, plural="pods"
         )
     except ApiException as exc:
-        if exc.status == 503:
+        if exc.status in (404, 503):
+            pytest.skip(f"metrics-server unavailable right now (not an RBAC question): {exc}")
+        if exc.status == 403:
+            pytest.fail(f"expected RBAC to allow this, got 403: {exc}")
+        raise
+    assert result is not None
+
+
+# --- Node-metrics ClusterRole (rbac/optimization-clusterrole.yaml): read-only, cluster-scoped ---
+
+
+def test_can_get_node_metrics_via_real_authenticated_call(kubesentinel_sa_clients):
+    # Same real-authenticated-call technique as the pod-metrics test above,
+    # for the same reason: `kubectl auth can-i` is unreliable for this
+    # aggregated API when metrics-server isn't registered at all --
+    # confirmed live (`kubectl auth can-i list nodes.metrics.k8s.io`
+    # itself reports the resource type isn't recognized, not a RBAC
+    # decision). `metrics.k8s.io/nodes` is cluster-scoped, so this call
+    # takes no namespace at all, unlike the Pod-metrics sibling above.
+    _, _, _, custom_objects = kubesentinel_sa_clients
+    try:
+        result = custom_objects.list_cluster_custom_object(group="metrics.k8s.io", version="v1beta1", plural="nodes")
+    except ApiException as exc:
+        if exc.status in (404, 503):
             pytest.skip(f"metrics-server unavailable right now (not an RBAC question): {exc}")
         if exc.status == 403:
             pytest.fail(f"expected RBAC to allow this, got 403: {exc}")

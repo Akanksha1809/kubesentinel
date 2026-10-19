@@ -3996,3 +3996,107 @@ that loop still doesn't cover.
 documentation only, no application code. Full regression suite
 unaffected: ruff clean, mypy clean, 958 unit tests passed (unchanged
 from Milestone 36).
+
+## Milestone 38: Node-metrics ClusterRole -- real Node usage closes the overcommitment analysis's third ratio -- DONE
+
+Closes the one item `docs/IMPLEMENTATION_STATUS.md`'s Capability B
+section still named "still deliberately not built" immediately after
+Milestone 36's own closure: "a Node-metrics ClusterRole (nothing calls
+`MetricsApiProvider.get_current_node_usage()`...)". The method itself
+had existed since this engine's early milestones; only a caller and an
+RBAC grant for the cluster-scoped `metrics.k8s.io/nodes` resource were
+missing. See `RESOURCE_OPTIMIZATION_DESIGN.md` §15.5.
+
+**Added**:
+
+- `rbac/optimization-clusterrole.yaml` + `-clusterrolebinding.yaml` --
+  the fourth documented cluster-scope exception in this project, after
+  the Node ClusterRole (Capability A), the network engine's
+  kube-system-bound RoleBinding (Capability D), and the security
+  auditor's ClusterRole (Capability F). `get`/`list` only on
+  `metrics.k8s.io/nodes`.
+- `models/optimization.py` -- `NodeOvercommitment`/
+  `ClusterOvercommitmentSummary` each gain `actual_cpu_millicores`/
+  `actual_memory_bytes`/`actual_cpu_ratio`/`actual_memory_ratio`/
+  `under_pressure_cpu`/`under_pressure_memory` (cluster-wide: no
+  per-Node breakdown fields, just the aggregate ratio/flags) -- all
+  fully optional, additive fields on an already JSON-blob-serialized
+  model, no schema migration, same precedent Milestone 36 already set
+  for this exact persistence shape.
+- `config.py` -- `optimization_node_pressure_ratio_threshold` (default
+  `0.9`), deliberately separate from `optimization_overcommitment_limits_ratio_threshold`
+  (default `1.0`): "overcommitted on paper" (configuration) and "under
+  real pressure" (fact) are different claims with different natural
+  thresholds, not one number reused for both.
+- `optimization/overcommitment.py::compute_cluster_overcommitment()` --
+  a new optional `node_usage: list[NodeUsageSample] | None` parameter,
+  matched to each `NodeSnapshot` by `node_name`. Same "every Node must
+  have a value or the cluster-wide number is unknown, never a partial
+  sum" discipline Milestone 36 already established for the
+  configuration-based ratios, applied here to actual usage too. A Node
+  with no matched sample gets `None` actual-usage fields, never `0`.
+- `optimization/service.py::analyze()` -- calls
+  `self._metrics_provider.get_current_node_usage()` in the same pass
+  that already fetches `node_snapshots`, independently degradable: a
+  `MetricsProviderError` here leaves `node_usage=None` without aborting
+  the rest of `analyze()`, the same tolerance this method's own
+  Pod-usage sibling call already has.
+- CLI (`optimization-summary`): a new "Cluster real usage" line,
+  red/green by `under_pressure_cpu`/`under_pressure_memory`, or an
+  honest "unknown (no metrics-server reachable)" when `node_usage` was
+  `None` this pass.
+
+**A real, found-live bug fixed in the same pass, in a file this work
+only touched to add a sibling test**:
+`tests/integration/test_rbac_boundary.py::test_can_get_pod_metrics_via_real_authenticated_call`
+only treated a `503` response as "metrics-server unavailable, not an
+RBAC question" -- but this project's own lab has no metrics-server
+installed at all (not installed-but-unreachable), so the real apiserver
+returns a plain `404` for the unregistered aggregated API path instead,
+which this test's own `except` block was re-raising as a hard failure.
+Running it live while adding the new Node-metrics sibling test
+(`test_can_get_node_metrics_via_real_authenticated_call`) surfaced that
+this test had been silently broken in this project's own lab the whole
+time it existed -- confirmed failing before the fix
+(`kubernetes.client.exceptions.ApiException: (404)`), re-confirmed
+skipping (not failing) after it. Fixed to treat `404` the same as
+`503`. `docs/RBAC_AND_THREAT_MODEL.md` records this alongside the new
+ClusterRole's own entry.
+
+**Tests**: 7 new unit tests (`test_optimization_overcommitment.py`: 5,
+covering matched/unmatched/missing usage samples and the pressure
+threshold; `test_optimization_service.py`: 2, confirming `analyze()`'s
+wiring and persistence of the new fields) plus 1 new integration test
+(`test_can_get_node_metrics_via_real_authenticated_call`) and 1 existing
+integration test fixed (above). Full regression suite: ruff clean,
+mypy clean, **965 unit tests passed** (958 + 7).
+`tests/integration/test_rbac_boundary.py`: 37 passed, 2 skipped (the
+two metrics-dependent checks, honestly, in this metrics-server-less
+lab) -- confirmed live, not just written.
+
+**Live-verified against the real cluster, honestly negative, named
+explicitly rather than implied**: applied the new
+ClusterRole/ClusterRoleBinding to the real `kind-kubesentinel` cluster
+and ran `kubesentinel optimize`/`optimization-summary` against it.
+`kubectl auth can-i list nodes.metrics.k8s.io` itself reports the
+resource type isn't recognized ("the server doesn't have a resource
+type 'nodes' in group 'metrics.k8s.io'") -- the same
+"metrics-server isn't installed in this lab" fact this project has
+documented at every other `metrics.k8s.io` touchpoint. The CLI
+correctly shows "Cluster real usage: unknown (no metrics-server
+reachable)" and the real JSON response confirms every `actual_*`/
+`cluster_actual_*` field reads `None`, never `0` -- the honest-absence
+path, confirmed live. The populated-data path (a real sample matched
+to a Node, a ratio computed, the pressure threshold tripped) is
+confirmed by unit test only, named here explicitly rather than implied
+by a live run that structurally couldn't exercise it in this
+environment.
+
+**Documentation**: `RESOURCE_OPTIMIZATION_DESIGN.md` (new §15.5).
+`docs/IMPLEMENTATION_STATUS.md` (Capability B's table gained a new
+"Node-metrics ClusterRole / real Node usage" row marked Implemented;
+the "still deliberately not built" paragraph updated to say nothing is
+left deliberately unbuilt in this capability as of this closure).
+`docs/RBAC_AND_THREAT_MODEL.md` (new ClusterRole block; the
+"all seven Roles/ClusterRoles... 38 automated checks" count updated to
+eight/39; the found-live 404-handling bug recorded alongside it).

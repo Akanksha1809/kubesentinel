@@ -157,6 +157,13 @@ class Settings(BaseSettings):
     # threshold, not a correctness bound the way the scheduler's own
     # requests-vs-allocatable check is.
     optimization_overcommitment_limits_ratio_threshold: float = 1.0
+    # A Node (or the cluster-wide total) is flagged as genuinely under
+    # real pressure once its actual-usage-vs-allocatable ratio exceeds
+    # this -- unlike the limits threshold above, this is measuring fact,
+    # not configuration, so a lower default (0.9) is appropriate: real
+    # usage this close to allocatable is already a meaningful signal,
+    # not a hypothetical worst case.
+    optimization_node_pressure_ratio_threshold: float = 0.9
 
     @property
     def optimization_excluded_namespace_list(self) -> list[str]:

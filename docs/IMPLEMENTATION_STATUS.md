@@ -94,26 +94,23 @@ evidence.
 | Read-only by default | Implemented, checked not just asserted | A live integration test patches the HTTP transport itself and asserts a full `analyze()` pass (inventory + metrics-server + persistence) issues only `GET` |
 | No aggressive downsizing from one sample | Implemented | `EvidenceQuality` gating, unit- and live-tested against real metrics-server data (Milestone 18) |
 | No automatic limit increase from one OOM event | Implemented | `OOM_HISTORY` flags and vetoes a *decrease*; it never proposes an *increase* either -- the row simply carries no safe proposed number either direction until there's enough evidence |
-| Cluster-level overcommitment analysis | **Implemented** (closed as later, separate follow-up work; was named "deliberately not built" at the original audit) | `optimization/overcommitment.py::compute_cluster_overcommitment()` -- a new top-level `ClusterOvercommitmentSummary`, never a `ResourceRecommendation` (it's cluster-wide, not per-container). Reports requested-vs-allocatable (should never exceed 1.0; a scheduler-accounting anomaly if it does) and limits-vs-allocatable (the real, actionable signal -- never admission-enforced, flagged past a configurable threshold, default 1.0) separately, per Node and cluster-wide, reusing the exact `NodeSnapshot`s already fetched in `analyze()` for the capacity-headroom check (zero new cluster read, zero new RBAC). A container with no limit at all is tracked via `unlimited_cpu_container_count`/`unlimited_memory_container_count` (new fields on `NodeSnapshot`, extended onto the same per-Node, per-Pod loop that already computes `requested`) -- never folded into the limits sum as if it contributed 0, since a missing limit is a real, unbounded ceiling. See `RESOURCE_OPTIMIZATION_DESIGN.md` §15. |
+| Cluster-level overcommitment analysis | **Implemented** (closed as later, separate follow-up work; was named "deliberately not built" at the original audit) | `optimization/overcommitment.py::compute_cluster_overcommitment()` -- a new top-level `ClusterOvercommitmentSummary`, never a `ResourceRecommendation` (it's cluster-wide, not per-container). Reports requested-vs-allocatable (should never exceed 1.0; a scheduler-accounting anomaly if it does) and limits-vs-allocatable (never admission-enforced, flagged past a configurable threshold, default 1.0) separately, per Node and cluster-wide, reusing the exact `NodeSnapshot`s already fetched in `analyze()` for the capacity-headroom check (zero new cluster read for these two). A container with no limit at all is tracked via `unlimited_cpu_container_count`/`unlimited_memory_container_count` (new fields on `NodeSnapshot`, extended onto the same per-Node, per-Pod loop that already computes `requested`) -- never folded into the limits sum as if it contributed 0, since a missing limit is a real, unbounded ceiling. See `RESOURCE_OPTIMIZATION_DESIGN.md` §15.1-§15.4. |
+| Node-metrics ClusterRole / real Node usage | **Implemented** (closed in the same follow-up as the row above; was named "still deliberately not built" immediately after that row's own original closure) | `MetricsApiProvider.get_current_node_usage()` -- unused since this engine's own Milestone 2 -- now has both a caller (`OptimizationService.analyze()`, the same pass that fetches `node_snapshots`) and a grant for the cluster-scoped `metrics.k8s.io/nodes` resource (new `rbac/optimization-clusterrole.yaml`/`-clusterrolebinding.yaml`, the fourth documented cluster-scope exception in this project). Feeds a *third*, independent ratio onto `NodeOvercommitment`/`ClusterOvercommitmentSummary` -- real, currently-measured usage vs. allocatable, the actionable complement to the two configuration-based ratios above, flagged separately as `under_pressure_cpu`/`under_pressure_memory` past `optimization_node_pressure_ratio_threshold` (default 0.9) since "overcommitted on paper" and "under real pressure" are not the same claim. `None` (never 0) on every actual-usage field whenever no metrics-server is reachable. See `RESOURCE_OPTIMIZATION_DESIGN.md` §15.5. |
 
 Workload-kind handling: Deployments/StatefulSets/standalone Pods are fully
 supported; Jobs and DaemonSets are deliberately treated conservatively
 (`JOB_CONSERVATIVE`/`DAEMONSET_CONSERVATIVE` flags suppress any proposed
 number, never silently).
 
-**Still deliberately not built**, named explicitly rather than left
-unstated: a Node-metrics ClusterRole (nothing calls
-`MetricsApiProvider.get_current_node_usage()`, which has existed since this
-engine's own Milestone 2 but has no caller -- the overcommitment analysis
-above answers the "is this Node oversubscribed" question from `NodeSnapshot`'s
-allocatable/requested/limits accounting alone, with no need for live Node
-usage metrics). The apply/execute path named here as deferred in this
-milestone's own original scope, and the cluster-level overcommitment
-analysis also named here as deferred, are both closed now, as later,
+**Nothing left deliberately unbuilt in this capability** as of this
+closure -- both items this section used to name ("cluster-level
+overcommitment analysis" and "a Node-metrics ClusterRole") are now
+Implemented, above. The apply/execute path named here as deferred in
+this milestone's own original scope is also closed, as earlier,
 separate, explicitly-requested follow-up work -- see
-`RESOURCE_OPTIMIZATION_DESIGN.md` §14/§15, TODO.md's own later milestone
-entries for each, and "Shared policy layer" below for how the apply path
-fits that layer rather than duplicating it.
+`RESOURCE_OPTIMIZATION_DESIGN.md` §14, TODO.md's own later milestone
+entries for each, and "Shared policy layer" below for how the apply
+path fits that layer rather than duplicating it.
 
 **Live-verified against the real cluster, not just unit-tested**: ran
 `kubesentinel optimize`/`optimization-summary` and a real `GET
@@ -123,10 +120,18 @@ Confirmed real numbers (4000m CPU / ~4.79Gi memory allocatable, ~960m CPU
 on the one real Node) and, genuinely found rather than assumed: 8 of the
 real containers currently running have no CPU limit and 6 have no memory
 limit, both correctly carried through as `unlimited_*_container_count`
-rather than silently deflating the ratio. Both ratios land below the
-default 1.0 threshold, so `overcommitted_cpu`/`overcommitted_memory` both
-correctly read `False` today -- an honest negative result from real
-cluster data.
+rather than silently deflating the ratio. Both configuration ratios land
+below the default 1.0 threshold, so `overcommitted_cpu`/`overcommitted_memory`
+both correctly read `False` today -- an honest negative result from real
+cluster data. The real-usage ratio was confirmed negative in a different,
+more fundamental way: this lab genuinely has no metrics-server installed
+at all (`kubectl auth can-i list nodes.metrics.k8s.io` itself reports the
+API group isn't recognized), so every `actual_*`/`cluster_actual_*` field
+correctly reads `None`, never `0` -- the honest-absence path, confirmed
+live; the populated-data path (a real sample matched, a ratio computed,
+the pressure threshold tripped) is confirmed by unit test instead, named
+here explicitly rather than implied by a live run that couldn't actually
+exercise it.
 
 ## Capability C: Kubernetes Scheduling & Placement Advisor
 

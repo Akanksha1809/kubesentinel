@@ -812,3 +812,55 @@ dimensions, so `overcommitted_cpu`/`overcommitted_memory` both
 correctly read `False` -- this lab cluster is not actually
 overcommitted today, an honest negative result from real data, not a
 forced positive to prove the feature does something.
+
+### 15.5 The actionable third ratio: real usage, not just configuration
+
+§6 (above) named a second gap alongside the one closed in §15.1-15.4:
+"a Node-metrics ClusterRole -- nothing calls
+`MetricsApiProvider.get_current_node_usage()`." Closed here, in the same
+pass as the configuration-based ratios, since both answer the same
+family of question ("is this Node under pressure") from two different
+kinds of evidence.
+
+Requested-vs-allocatable and limits-vs-allocatable (§15.1) are both
+*configuration* -- what the cluster has been told, not what is actually
+happening. `get_current_node_usage()` queries `metrics.k8s.io/nodes`
+for real, currently-measured CPU/memory usage per Node -- the most
+actionable of the three signals, because it can never be wrong the way
+a stale or over-cautious request/limit can be. The method itself had
+existed since this engine's early milestones; the only two things
+missing were a caller and a grant for the cluster-scoped
+`metrics.k8s.io/nodes` resource, closed together here (new
+`rbac/optimization-clusterrole.yaml`/`-clusterrolebinding.yaml`, the
+fourth documented cluster-scope exception in this project).
+
+Called from the same `analyze()` pass that already fetches
+`node_snapshots` for the capacity-headroom check and the configuration
+ratios above -- one more read, independently degradable: a
+`MetricsProviderError` here (no metrics-server, same honest 404 this
+project's own lab has produced at every one of this method's siblings)
+leaves `node_usage=None`, which `compute_cluster_overcommitment` turns
+into `None` actual-usage fields on every Node, never a `0` that would
+misread as "confirmed idle." `optimization_node_pressure_ratio_threshold`
+(default `0.9`) flags `under_pressure_cpu`/`under_pressure_memory`
+separately from `overcommitted_cpu`/`overcommitted_memory` -- the two
+are not the same claim: a Node can be heavily overcommitted on paper
+while genuinely idle, or lightly overcommitted on paper while under
+real pressure from a handful of containers actually using what they
+were given.
+
+**Live-verified against the real cluster, honestly negative**: applied
+the new ClusterRole/ClusterRoleBinding live and ran `kubesentinel
+optimize`/`optimization-summary` against the real `kind-kubesentinel`
+cluster. `kubectl auth can-i list nodes.metrics.k8s.io` itself reports
+the API group isn't even recognized ("the server doesn't have a
+resource type 'nodes' in group 'metrics.k8s.io'") -- the same
+"metrics-server isn't installed in this lab" fact already documented at
+`get_current_pod_usage()`'s own live-verification entries. The CLI
+correctly shows "Cluster real usage: unknown (no metrics-server
+reachable)" and the real JSON confirms every `actual_*`/`cluster_actual_*`
+field is `None`, never `0`. The populated-data path (a real usage
+sample matched to a Node, a ratio computed, the pressure threshold
+tripped) is therefore confirmed by unit test, not by this lab's own
+live cluster -- named here explicitly rather than implied by a live run
+that couldn't actually exercise it.

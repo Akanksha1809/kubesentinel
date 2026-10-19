@@ -126,6 +126,19 @@ class OptimizationService:
                 logger.info("node inventory unavailable for this analyze() pass's capacity headroom check: %s", exc)
                 node_snapshots = []
 
+            # Real Node usage via the Metrics API -- the actionable half of
+            # the overcommitment analysis below, independent of
+            # node_snapshots above. Degrades to `None` (never an empty
+            # list treated as "confirmed zero usage") whenever no
+            # metrics-server is installed or reachable this pass, the same
+            # provider this engine's own Pod-usage collection already
+            # tolerates failing.
+            try:
+                node_usage = self._metrics_provider.get_current_node_usage()
+            except MetricsProviderError as exc:
+                logger.info("node usage unavailable for this analyze() pass's overcommitment check: %s", exc)
+                node_usage = None
+
             all_recommendations: list[ResourceRecommendation] = []
             for workload in workloads:
                 related_incident_ids = self._open_incident_ids_for(workload)
@@ -166,7 +179,7 @@ class OptimizationService:
         # above used -- zero new cluster read. `None` whenever that read
         # itself failed/returned nothing this pass, never a zero-filled
         # summary (see compute_cluster_overcommitment's own docstring).
-        overcommitment = compute_cluster_overcommitment(node_snapshots, self._settings, now=now)
+        overcommitment = compute_cluster_overcommitment(node_snapshots, self._settings, node_usage=node_usage, now=now)
 
         summary = AnalysisRunSummary(
             analyzed_at=now,

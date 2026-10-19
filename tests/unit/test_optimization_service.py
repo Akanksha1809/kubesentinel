@@ -743,3 +743,64 @@ class TestAnalyzeOvercommitment:
         persisted = repo.get_latest_analysis_run()
         assert persisted.overcommitment is not None
         assert persisted.overcommitment.overcommitted_cpu is True
+
+    def test_node_usage_unavailable_leaves_actual_fields_none(self, repo):
+        from kubernetes.client.rest import ApiException
+
+        from kubesentinel.models.optimization import ResourceQuantity
+        from kubesentinel.models.scheduling import NodeSnapshot
+
+        clients = _clients(pods=[_standalone_pod()])
+        node = NodeSnapshot(
+            name="node-1",
+            allocatable=ResourceQuantity(cpu_millicores=2000, memory_bytes=4 * 1024**3),
+            requested=ResourceQuantity(cpu_millicores=500, memory_bytes=1024**3),
+            limits=ResourceQuantity(cpu_millicores=500, memory_bytes=1024**3),
+        )
+        clients.core.list_node.return_value = _items([SimpleNamespace()])
+        clients.core.list_pod_for_all_namespaces.return_value = _items([])
+        # get_current_node_usage() also goes through list_cluster_custom_object
+        # -- force it to fail distinctly from the pod-usage call above, which
+        # already succeeds via metrics_unavailable=False in _clients().
+        clients.custom_objects.list_cluster_custom_object.side_effect = ApiException(status=404, reason="Not Found")
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("kubesentinel.optimization.service.build_node_inventory", lambda _clients: [node])
+            summary = OptimizationService(clients, repo, _settings()).analyze(namespaces=[NAMESPACE])
+
+        assert summary.overcommitment is not None
+        assert summary.overcommitment.nodes[0].actual_cpu_millicores is None
+        assert summary.overcommitment.cluster_actual_cpu_ratio is None
+
+    def test_node_usage_available_populates_actual_fields_on_the_persisted_summary(self, repo):
+        from kubesentinel.models.optimization import ResourceQuantity
+        from kubesentinel.models.scheduling import NodeSnapshot
+        from kubesentinel.optimization.metrics_providers import NodeUsageSample
+
+        clients = _clients(pods=[_standalone_pod()], metrics_unavailable=False)
+        node = NodeSnapshot(
+            name="node-1",
+            allocatable=ResourceQuantity(cpu_millicores=1000, memory_bytes=1000),
+            requested=ResourceQuantity(cpu_millicores=200, memory_bytes=200),
+            limits=ResourceQuantity(cpu_millicores=200, memory_bytes=200),
+        )
+        clients.core.list_node.return_value = _items([SimpleNamespace()])
+        clients.core.list_pod_for_all_namespaces.return_value = _items([])
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("kubesentinel.optimization.service.build_node_inventory", lambda _clients: [node])
+            service = OptimizationService(clients, repo, _settings())
+            service._metrics_provider.get_current_node_usage = lambda: [
+                NodeUsageSample(
+                    node_name="node-1",
+                    cpu_millicores=600,
+                    memory_bytes=400,
+                    timestamp=datetime.now(timezone.utc),
+                )
+            ]
+            summary = service.analyze(namespaces=[NAMESPACE])
+
+        assert summary.overcommitment.nodes[0].actual_cpu_millicores == 600
+        assert summary.overcommitment.nodes[0].actual_cpu_ratio == 0.6
+        persisted = repo.get_latest_analysis_run()
+        assert persisted.overcommitment.nodes[0].actual_cpu_ratio == 0.6

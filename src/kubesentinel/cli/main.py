@@ -535,6 +535,18 @@ def optimization_summary(json_output: bool = typer.Option(False, "--json")) -> N
                 f"memory [{memory_style}]{_fmt_ratio(overcommitment['cluster_limits_memory_ratio'])}[/{memory_style}] "
                 f"across {len(overcommitment['nodes'])} node(s)"
             )
+            actual_cpu_ratio = overcommitment.get("cluster_actual_cpu_ratio")
+            actual_memory_ratio = overcommitment.get("cluster_actual_memory_ratio")
+            if actual_cpu_ratio is None and actual_memory_ratio is None:
+                console.print("Cluster real usage: [yellow]unknown (no metrics-server reachable)[/yellow]")
+            else:
+                pressure_cpu_style = "red" if overcommitment["under_pressure_cpu"] else "green"
+                pressure_memory_style = "red" if overcommitment["under_pressure_memory"] else "green"
+                console.print(
+                    f"Cluster real usage (actual vs. allocatable): "
+                    f"CPU [{pressure_cpu_style}]{_fmt_ratio(actual_cpu_ratio)}[/{pressure_cpu_style}], "
+                    f"memory [{pressure_memory_style}]{_fmt_ratio(actual_memory_ratio)}[/{pressure_memory_style}]"
+                )
     else:
         console.print("[yellow]No analysis has been run yet -- run `kubesentinel optimize` first.[/yellow]")
 

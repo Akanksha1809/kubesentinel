@@ -1,6 +1,9 @@
+from datetime import datetime, timezone
+
 from kubesentinel.config import Settings
 from kubesentinel.models.optimization import ResourceQuantity
 from kubesentinel.models.scheduling import NodeSnapshot
+from kubesentinel.optimization.metrics_providers import NodeUsageSample
 from kubesentinel.optimization.overcommitment import compute_cluster_overcommitment
 
 
@@ -117,3 +120,74 @@ class TestComputeClusterOvercommitment:
         result = compute_cluster_overcommitment([node], Settings())
 
         assert len(result.nodes) == 1
+
+    def test_no_node_usage_leaves_actual_fields_none(self):
+        node = _node(allocatable=ResourceQuantity(cpu_millicores=1000, memory_bytes=1000))
+
+        result = compute_cluster_overcommitment([node], Settings())
+
+        row = result.nodes[0]
+        assert row.actual_cpu_millicores is None
+        assert row.actual_memory_bytes is None
+        assert row.actual_cpu_ratio is None
+        assert row.under_pressure_cpu is False
+        assert result.cluster_actual_cpu_ratio is None
+
+    def test_matched_node_usage_computes_actual_ratio(self):
+        node = _node(
+            name="node-1", allocatable=ResourceQuantity(cpu_millicores=1000, memory_bytes=1000)
+        )
+        usage = [
+            NodeUsageSample(
+                node_name="node-1", cpu_millicores=600, memory_bytes=400, timestamp=datetime.now(timezone.utc)
+            )
+        ]
+
+        result = compute_cluster_overcommitment([node], Settings(), node_usage=usage)
+
+        row = result.nodes[0]
+        assert row.actual_cpu_millicores == 600
+        assert row.actual_cpu_ratio == 0.6
+        assert row.actual_memory_ratio == 0.4
+
+    def test_actual_usage_over_pressure_threshold_flags_under_pressure(self):
+        node = _node(name="node-1", allocatable=ResourceQuantity(cpu_millicores=1000, memory_bytes=1000))
+        usage = [
+            NodeUsageSample(
+                node_name="node-1", cpu_millicores=950, memory_bytes=100, timestamp=datetime.now(timezone.utc)
+            )
+        ]
+
+        result = compute_cluster_overcommitment(
+            [node], Settings(optimization_node_pressure_ratio_threshold=0.9), node_usage=usage
+        )
+
+        assert result.nodes[0].under_pressure_cpu is True
+        assert result.nodes[0].under_pressure_memory is False
+        assert result.under_pressure_cpu is True
+        assert result.under_pressure_memory is False
+
+    def test_usage_sample_for_different_node_name_is_not_matched(self):
+        node = _node(name="node-1", allocatable=ResourceQuantity(cpu_millicores=1000, memory_bytes=1000))
+        usage = [
+            NodeUsageSample(
+                node_name="node-2", cpu_millicores=600, memory_bytes=400, timestamp=datetime.now(timezone.utc)
+            )
+        ]
+
+        result = compute_cluster_overcommitment([node], Settings(), node_usage=usage)
+
+        assert result.nodes[0].actual_cpu_millicores is None
+
+    def test_one_node_missing_usage_makes_cluster_actual_ratio_unknown_not_partial(self):
+        node_a = _node(name="node-a", allocatable=ResourceQuantity(cpu_millicores=1000, memory_bytes=1000))
+        node_b = _node(name="node-b", allocatable=ResourceQuantity(cpu_millicores=1000, memory_bytes=1000))
+        usage = [
+            NodeUsageSample(
+                node_name="node-a", cpu_millicores=500, memory_bytes=500, timestamp=datetime.now(timezone.utc)
+            )
+        ]
+
+        result = compute_cluster_overcommitment([node_a, node_b], Settings(), node_usage=usage)
+
+        assert result.cluster_actual_cpu_ratio is None
