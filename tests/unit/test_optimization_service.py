@@ -127,6 +127,31 @@ class TestAnalyze:
         assert len(repo.list_workload_snapshots()) == 1
         assert len(repo.list_recommendations()) >= 1
 
+    def test_metrics_unavailable_sets_the_shared_evidence_completeness_to_degraded(self, repo):
+        from kubesentinel.models.completeness import EvidenceCompleteness
+
+        clients = _clients(pods=[_standalone_pod()])
+        service = OptimizationService(clients, repo, _settings())
+
+        summary = service.analyze(namespaces=[NAMESPACE])
+
+        # The shared vocabulary (models/completeness.py) set from the
+        # exact same metrics_available/warning this model already had --
+        # never a second, independently-derived answer.
+        assert summary.evidence_completeness == EvidenceCompleteness.DEGRADED
+        assert summary.warnings == [summary.warning]
+
+    def test_metrics_available_sets_the_shared_evidence_completeness_to_complete(self, repo):
+        from kubesentinel.models.completeness import EvidenceCompleteness
+
+        clients = _clients(pods=[_standalone_pod()], metrics_unavailable=False)
+        service = OptimizationService(clients, repo, _settings())
+
+        summary = service.analyze(namespaces=[NAMESPACE])
+
+        assert summary.evidence_completeness == EvidenceCompleteness.COMPLETE
+        assert summary.warnings == []
+
     def test_analyze_without_metrics_server_still_reports_data_quality(self, repo):
         clients = _clients(pods=[_standalone_pod(missing_resources=True)])
         service = OptimizationService(clients, repo, _settings())

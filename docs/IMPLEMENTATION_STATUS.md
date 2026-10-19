@@ -647,16 +647,46 @@ an exact match until the deadline, confirmed live afterward.
 
 ## Observability
 
-**Implemented for Capabilities A, B, and C**, following one consistent,
-bounded-cardinality labeling discipline across all three (`category`,
-`action_type`, `reason`, `component`, `status`, `provider`, `result` --
-never an incident ID, recommendation ID, finding ID, or Pod name as a
-label; confirmed by reading every `Counter`/`Gauge`/`Histogram` definition
-in `metrics/registry.py`). `observability/prometheus.yml` +
-`grafana-dashboard.json` exist and are verified against real `/metrics`
-output. No per-module "degraded / unknown / not applicable" distinction
-exists as a first-class concept yet (today a missing metrics provider is
-communicated via a `warning` string + `metrics_available: false` on the
-optimization engine's own summary, not a shared three-state model other
-future capabilities could reuse directly) -- worth deciding explicitly
-before C/D/E/F each invent their own version of the same idea.
+**Implemented for every capability** (corrected here from "A, B, and C"
+at the original audit -- D, E, and F each already followed the exact
+same convention by the time they shipped, this line just hadn't been
+updated to say so), following one consistent, bounded-cardinality
+labeling discipline throughout (`category`, `action_type`, `reason`,
+`component`, `status`, `provider`, `result` -- never an incident ID,
+recommendation ID, finding ID, or Pod name as a label; confirmed by
+reading every `Counter`/`Gauge`/`Histogram` definition in
+`metrics/registry.py`, including `scheduling_analysis_total`,
+`network_analysis_total`/`network_probe_total`,
+`security_audit_total`/`security_findings_total`). `observability/prometheus.yml`
++ `grafana-dashboard.json` exist and are verified against real
+`/metrics` output.
+
+**Closed as later, separate follow-up work -- was left as an explicit,
+undecided question at the original audit**: "No per-module 'degraded /
+unknown / not applicable' distinction exists as a first-class concept
+yet... worth deciding explicitly before C/D/E/F each invent their own
+version of the same idea." They did, exactly as predicted --
+`AnalysisRunSummary.metrics_available`+`.warning` (Capability B),
+`SecurityAuditResult.warnings` with no completeness verdict alongside
+it (Capability F), and `SchedulingFinding`/`NetworkFinding` with no
+equivalent at all (C/D). The decision: a shared, typed
+`EvidenceCompleteness` enum (`COMPLETE`/`DEGRADED`/`UNKNOWN`/
+`NOT_APPLICABLE`) via a common `EvidenceCompletenessMixin` base model,
+included by `AnalysisRunSummary`, `SecurityAuditResult`, and
+`SchedulingFinding` -- additive, never a rename: every pre-existing
+field (`warning`, `metrics_available`, `SecurityAuditResult`'s own
+already-identically-named `warnings`) is kept exactly as it was.
+Closing a real gap found while wiring this up, not just a cosmetic
+addition: `SchedulingFinding` had no way to surface a sub-read failure
+at all -- `analyze_hypothetical`'s own ResourceQuota/LimitRange reads
+already degraded on failure but only logged it, never told the caller,
+so a finding could silently report "no ResourceQuota in this
+namespace" when the true state was "couldn't check." `NetworkFinding`
+is deliberately *not* included in this round: `network/service.py::analyze_pod`
+is genuinely all-or-nothing (no sub-read there is individually
+try/except-wrapped the way optimization's/security's/scheduling's own
+inventory builders already are), so there is no partial-degrade state
+to attach a `warnings` field to without first changing that
+engine's own error-handling granularity -- named explicitly as a real,
+structural difference, not silently assumed covered. See
+`docs/EVIDENCE_COMPLETENESS.md` for the full design.

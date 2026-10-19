@@ -15,6 +15,8 @@ from enum import Enum
 
 from pydantic import BaseModel, Field
 
+from kubesentinel.models.completeness import EvidenceCompletenessMixin
+
 
 class RecommendationCategory(str, Enum):
     CPU = "CPU"
@@ -322,12 +324,18 @@ class ClusterOvercommitmentSummary(BaseModel):
     under_pressure_memory: bool = False
 
 
-class AnalysisRunSummary(BaseModel):
+class AnalysisRunSummary(EvidenceCompletenessMixin):
     """One `/analyze` pass's own metadata -- the thing `GET /optimization/summary`
     uses to answer "how fresh is this, and did metrics actually work" without
     ever re-scanning the cluster on a GET. Only the latest run is kept (see
     `persistence/optimization_repo.py`) -- this is a freshness marker, not a
-    history log."""
+    history log.
+
+    `metrics_available`/`warning` are this model's own original fields,
+    kept exactly as they were; `warnings`/`evidence_completeness`
+    (inherited from `EvidenceCompletenessMixin`) are the newer, shared
+    vocabulary set alongside them from the same information, never a
+    replacement -- see `models/completeness.py`."""
 
     analyzed_at: datetime
     namespaces: list[str] = Field(default_factory=list)

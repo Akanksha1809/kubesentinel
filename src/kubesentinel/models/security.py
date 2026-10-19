@@ -1,9 +1,13 @@
 """Security and configuration auditor models (Milestone 6 of the platform
 spec). See docs/SECURITY_AUDITING.md for exactly what's evaluated for
 real (container security context, RBAC over-permissiveness, NetworkPolicy
-coverage, PodDisruptionBudget coverage) vs. explicitly deferred (CVE
-scanning, Pod Security Admission namespace labels, ServiceAccount token
-automount, compliance framework scoring).
+coverage, PodDisruptionBudget coverage, CVE/image vulnerability scanning,
+Pod Security Admission namespace labels) vs. what's still out of scope
+(ServiceAccount token automount, compliance framework scoring) -- the
+first two in that "vs." clause were deferred at this module's original
+Milestone 6 scope and have since been closed as later, separate,
+explicitly-requested follow-up work; this docstring is corrected to
+match, not left describing a state this engine no longer has.
 
 Kept separate from `models/network.py`/`models/scheduling.py` deliberately
 -- a `SecurityFinding` has no single owning workload for most of its rule
@@ -19,6 +23,8 @@ from datetime import datetime, timezone
 from enum import Enum
 
 from pydantic import BaseModel, Field
+
+from kubesentinel.models.completeness import EvidenceCompletenessMixin
 
 
 class SecuritySeverity(str, Enum):
@@ -55,21 +61,24 @@ class SecurityFinding(BaseModel):
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
-class SecurityAuditResult(BaseModel):
+class SecurityAuditResult(EvidenceCompletenessMixin):
     """One `audit()` pass's own metadata plus every finding it produced --
     mirrors `AnalysisRunSummary`'s own "freshness marker, only the latest
     run is kept" shape at the run level, while individual `SecurityFinding`
     rows are separately, individually persisted and addressable (see
-    `persistence/security_repo.py`)."""
+    `persistence/security_repo.py`).
+
+    `warnings` (a rule family that could not be evaluated at all, e.g.
+    403 listing ClusterRoleBindings, distinct from "evaluated and found
+    nothing") is inherited from `EvidenceCompletenessMixin` -- this
+    model's own field of that exact name/shape already matched the
+    shared vocabulary's own `warnings` field before the mixin existed,
+    so adopting it needed no rename. `evidence_completeness` (also
+    inherited) is new; see `security/engine.py::SecurityAuditEngine.audit()`
+    for where it's set."""
 
     audit_id: str
     analyzed_at: datetime
     namespaces: list[str] = Field(default_factory=list)
     findings: list[SecurityFinding] = Field(default_factory=list)
     rules_evaluated: list[str] = Field(default_factory=list)
-    # A rule family that could not be evaluated at all (e.g. 403 listing
-    # ClusterRoleBindings) is named here, distinct from "evaluated and
-    # found nothing" -- the same AnalysisRunSummary.warning discipline,
-    # generalized to per-rule-family granularity since this engine runs
-    # several independent rule families in one pass.
-    warnings: list[str] = Field(default_factory=list)

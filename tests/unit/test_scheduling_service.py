@@ -159,6 +159,53 @@ class TestAnalyzeHypothetical:
 
         assert finding.any_node_schedulable is True
 
+    def test_limit_range_list_failure_is_surfaced_as_a_warning_not_silently_swallowed(self, repo):
+        # The real gap this closed: before, this failure was only
+        # logged, never told to the caller -- the finding would report
+        # "no LimitRange in this namespace" (satisfied=True) when the
+        # true state was "couldn't check."
+        from kubesentinel.models.completeness import EvidenceCompleteness
+
+        node = make_node(name="node-1", allocatable={"cpu": "2", "memory": "4Gi"})
+        clients = _clients(nodes=[node])
+        clients.core.list_namespaced_limit_range.side_effect = ApiException(status=403, reason="Forbidden")
+        service = SchedulingService(clients, repo)
+        raw_spec = {"containers": [{"name": "app", "resources": {"requests": {"cpu": "100m", "memory": "64Mi"}}}]}
+
+        finding = service.analyze_hypothetical(NAMESPACE, raw_spec)
+
+        assert len(finding.warnings) == 1
+        assert "LimitRange" in finding.warnings[0]
+        assert finding.evidence_completeness == EvidenceCompleteness.DEGRADED
+
+    def test_quota_list_failure_is_surfaced_as_a_warning_too(self, repo):
+        from kubesentinel.models.completeness import EvidenceCompleteness
+
+        node = make_node(name="node-1", allocatable={"cpu": "2", "memory": "4Gi"})
+        clients = _clients(nodes=[node])
+        clients.core.list_namespaced_resource_quota.side_effect = ApiException(status=403, reason="Forbidden")
+        service = SchedulingService(clients, repo)
+        raw_spec = {"containers": [{"name": "app", "resources": {"requests": {"cpu": "100m", "memory": "64Mi"}}}]}
+
+        finding = service.analyze_hypothetical(NAMESPACE, raw_spec)
+
+        assert len(finding.warnings) == 1
+        assert "ResourceQuota" in finding.warnings[0]
+        assert finding.evidence_completeness == EvidenceCompleteness.DEGRADED
+
+    def test_no_failures_means_complete_evidence(self, repo):
+        from kubesentinel.models.completeness import EvidenceCompleteness
+
+        node = make_node(name="node-1", allocatable={"cpu": "2", "memory": "4Gi"})
+        clients = _clients(nodes=[node])
+        service = SchedulingService(clients, repo)
+        raw_spec = {"containers": [{"name": "app", "resources": {"requests": {"cpu": "100m", "memory": "64Mi"}}}]}
+
+        finding = service.analyze_hypothetical(NAMESPACE, raw_spec)
+
+        assert finding.warnings == []
+        assert finding.evidence_completeness == EvidenceCompleteness.COMPLETE
+
 
 class TestGetAndList:
     def test_get_missing_finding_raises(self, repo):

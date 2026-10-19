@@ -56,6 +56,26 @@ class TestSecurityAuditEngine:
 
         assert result.warnings == ["could not list ClusterRoleBindings: Forbidden (status=403)"]
 
+    def test_inventory_warnings_set_evidence_completeness_to_degraded(self):
+        from kubesentinel.models.completeness import EvidenceCompleteness
+
+        engine = SecurityAuditEngine(Settings(), rules=[])
+        inventory = SecurityInventory(warnings=["could not list ClusterRoleBindings: Forbidden (status=403)"])
+
+        result = engine.audit(inventory, namespaces=[])
+
+        assert result.evidence_completeness == EvidenceCompleteness.DEGRADED
+
+    def test_no_inventory_warnings_is_complete_evidence(self):
+        from kubesentinel.models.completeness import EvidenceCompleteness
+
+        engine = SecurityAuditEngine(Settings(), rules=[])
+        inventory = SecurityInventory()
+
+        result = engine.audit(inventory, namespaces=[])
+
+        assert result.evidence_completeness == EvidenceCompleteness.COMPLETE
+
     def test_determinism(self):
         engine = SecurityAuditEngine(Settings(), rules=[_FakeRule([_finding()])])
         inventory = SecurityInventory()

@@ -121,16 +121,26 @@ class SchedulingService:
         try:
             nodes = build_node_inventory(self._clients)
             pods = build_pod_label_inventory(self._clients)
+            warnings: list[str] = []
             try:
                 quotas = self._clients.core.list_namespaced_resource_quota(namespace=namespace).items
             except ApiException as exc:
                 logger.info("could not list ResourceQuota in %s, skipping quota check: %s", namespace, exc)
                 quotas = []
+                # Surfaced to the caller, not just logged -- a silent
+                # degrade here would let a finding report "no
+                # ResourceQuota in this namespace" (satisfied=True) when
+                # the true state is "couldn't check," the exact
+                # absence-of-evidence-as-evidence-of-absence this
+                # project's own discipline elsewhere never allows. See
+                # models/scheduling.py::SchedulingFinding's own docstring.
+                warnings.append(f"could not list ResourceQuota in {namespace}, quota check skipped: {exc.reason}")
             try:
                 limit_ranges = self._clients.core.list_namespaced_limit_range(namespace=namespace).items
             except ApiException as exc:
                 logger.info("could not list LimitRange in %s, skipping LimitRange check: %s", namespace, exc)
                 limit_ranges = []
+                warnings.append(f"could not list LimitRange in {namespace}, LimitRange check skipped: {exc.reason}")
 
             finding = analyze_pod_scheduling(
                 pod_spec,
@@ -140,6 +150,7 @@ class SchedulingService:
                 pod_uid=None,
                 quotas=quotas,
                 limit_ranges=limit_ranges,
+                warnings=warnings,
                 check_quota=True,
             )
         except Exception:  # noqa: BLE001 - any failure here means "failed", not a finding

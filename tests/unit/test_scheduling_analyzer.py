@@ -46,6 +46,24 @@ class TestFindingShape:
         assert finding.node_results[0].schedulable is True
         assert "node-1" in finding.reasoning
 
+    def test_no_warnings_is_complete_evidence(self):
+        from kubesentinel.models.completeness import EvidenceCompleteness
+
+        node = _node()
+        finding = analyze_pod_scheduling(_pod_spec(), [node], namespace="ns")
+        assert finding.warnings == []
+        assert finding.evidence_completeness == EvidenceCompleteness.COMPLETE
+
+    def test_caller_supplied_warnings_are_carried_through_as_degraded(self):
+        from kubesentinel.models.completeness import EvidenceCompleteness
+
+        node = _node()
+        finding = analyze_pod_scheduling(
+            _pod_spec(), [node], namespace="ns", warnings=["could not list LimitRange in ns: Forbidden"]
+        )
+        assert finding.warnings == ["could not list LimitRange in ns: Forbidden"]
+        assert finding.evidence_completeness == EvidenceCompleteness.DEGRADED
+
     def test_unschedulable_when_no_node_fits(self):
         node = _node(allocatable=ResourceQuantity(cpu_millicores=10, memory_bytes=10))
         finding = analyze_pod_scheduling(_pod_spec(), [node], namespace="ns")

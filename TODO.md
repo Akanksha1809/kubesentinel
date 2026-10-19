@@ -4466,3 +4466,115 @@ to describe the closure and the live-verification run). `README.md`
 (new optional-extras paragraph). `docs/IMPLEMENTATION_STATUS.md`
 (Capability C's "Environment constraint" paragraph rewritten the same
 way, pointing at Section 11 for the full writeup).
+
+## Milestone 44: Shared evidence-completeness vocabulary -- DONE
+
+Closes the open question `docs/MASTER_ARCHITECTURE.md`'s own
+"Observability shape" section explicitly left undecided: "there is no
+shared three-state 'healthy / degraded / unknown-because-unavailable'
+model across capabilities today... worth deciding whether this becomes
+a shared, typed enum... or stays per-capability by deliberate choice.
+Not decided by this document -- flagged for the milestone that first
+needs it." All six capabilities now exist, and -- exactly as that note
+predicted -- each had independently invented its own version:
+`AnalysisRunSummary.metrics_available`+`.warning` (B),
+`SecurityAuditResult.warnings` with no completeness verdict alongside
+it (F), and `SchedulingFinding`/`NetworkFinding` with no equivalent at
+all (C/D). See `docs/EVIDENCE_COMPLETENESS.md` for the full design.
+
+**The decision**: a shared, typed `EvidenceCompleteness` enum
+(`COMPLETE`/`DEGRADED`/`UNKNOWN`/`NOT_APPLICABLE`) via a common
+`EvidenceCompletenessMixin` base model -- the exact "common base the
+per-capability summary models each include" shape
+`MASTER_ARCHITECTURE.md`'s own parenthetical had already suggested.
+
+**A near-miss worth recording**: the new shared module was first
+written to `models/evidence.py`, the obvious name -- until the Write
+tool's own existing-file check caught that this name already belongs
+to `models/evidence.py::Evidence`/`EvidenceKind`, the troubleshooting
+engine's own foundational "an observed fact pulled from the API" model
+since Milestone 1, a completely unrelated concept. Renamed to
+`models/completeness.py` before anything was overwritten.
+
+**Added**:
+
+- `models/completeness.py` -- `EvidenceCompleteness` (the enum) and
+  `EvidenceCompletenessMixin` (the shared base, `warnings: list[str]` +
+  `evidence_completeness: EvidenceCompleteness`).
+- `AnalysisRunSummary`/`SecurityAuditResult`/`SchedulingFinding` each
+  now inherit from the mixin. Additive, never a rename: every existing
+  field (`warning`, `metrics_available`, `SecurityAuditResult`'s own
+  already-identically-shaped `warnings`) is kept exactly as it was --
+  `SecurityAuditResult` needed only to drop its now-redundant local
+  `warnings` declaration, picking up the mixin's identical one in its
+  place.
+- `optimization/service.py::analyze()` / `security/engine.py::SecurityAuditEngine.audit()`
+  -- each sets `evidence_completeness` from the exact information its
+  own pre-existing field already carries, never a second,
+  independently-derived answer to the same question.
+- `scheduling/service.py::analyze_hypothetical` /
+  `scheduling/analyzer.py::analyze_pod_scheduling` -- the one genuine
+  behavior change, not just a new field. The ResourceQuota/LimitRange
+  read failures this method already caught and degraded from were only
+  ever logged (`logger.info`), never surfaced to the caller -- a
+  finding could silently report "no ResourceQuota in this namespace"
+  (`satisfied=True`) when the true state was "couldn't check." Now
+  each failure is collected into a `warnings` list threaded through
+  `analyze_pod_scheduling`'s own new `warnings` parameter, setting
+  `evidence_completeness` on the returned finding.
+- Two stale claims corrected while in the area, found by this same
+  investigation, not left for later: `models/security.py`'s own module
+  docstring still listed CVE scanning and Pod Security Admission labels
+  as "explicitly deferred" after both were closed (Milestones 32/40);
+  `docs/IMPLEMENTATION_STATUS.md`'s Observability section still said
+  metrics were "Implemented for Capabilities A, B, and C" after D/E/F
+  each already adopted the identical convention.
+
+**What this round deliberately does not touch, named explicitly**:
+`NetworkFinding` -- `network/service.py::analyze_pod` is genuinely
+all-or-nothing (no sub-read there is individually try/except-wrapped
+the way optimization's/security's/scheduling's own inventory builders
+already are), so there is no partial-degrade state to attach a
+`warnings` field to without first changing that engine's own
+error-handling granularity, a larger change than this round's own
+scope. `Hypothesis.confidence` (a genuinely different question) and
+`UsageSummary.throttled: bool | None` (an already-well-designed,
+narrower, per-container tri-state) are both named as real candidates
+this vocabulary could theoretically subsume later, deliberately not
+retrofitted now for no behavioral gain.
+
+**Tests**: 13 new unit tests (`test_models_completeness.py`: 4, the
+shared mixin/enum's own basics; `test_scheduling_service.py`: 3,
+confirming the real behavior change -- a quota/LimitRange read failure
+now surfaces as a warning, and the no-failure case stays `COMPLETE`;
+`test_scheduling_analyzer.py`: 2, the `warnings` parameter threading;
+`test_optimization_service.py`: 2; `test_security_engine.py`: 2).
+Every pre-existing test passed unchanged before any new one was added
+-- confirming the retrofit is genuinely additive, not a breaking
+change to any persisted field or existing caller. Full regression
+suite: ruff clean, mypy clean, **1024 unit tests passed** (1011 + 13).
+
+**Live-verified against the real cluster, all three retrofitted
+models**: ran `kubesentinel optimize`, `kubesentinel security-audit
+--json`, and a real `POST /scheduling/simulate` call against the
+actual `kind-kubesentinel` cluster. Optimization:
+`evidence_completeness: DEGRADED`, `warnings` matching the pre-existing
+`warning` field exactly (this lab's own permanent no-metrics-server
+state). Security: `evidence_completeness: COMPLETE`, `warnings: []`
+-- every RBAC-gated read succeeded on this real cluster. Scheduling:
+`evidence_completeness: COMPLETE`, `warnings: []` for a real
+simulation with no sub-read failures. The failure path (a
+ResourceQuota/LimitRange read denied by RBAC) stays covered by unit
+tests with a real `ApiException(403)`, deliberately not reproduced by
+revoking this project's own real RBAC mid-session -- an unnecessarily
+risky action on a shared cluster for a path already provably correct
+under test.
+
+**Documentation**: `docs/EVIDENCE_COMPLETENESS.md` (new -- the full
+design, the decision, what it touches, what it deliberately doesn't).
+`docs/MASTER_ARCHITECTURE.md` (its own open question rewritten to
+record the decision). `docs/IMPLEMENTATION_STATUS.md` (the Observability
+section's own matching paragraph rewritten the same way; the stale
+"Capabilities A, B, and C" metrics claim corrected to all six).
+`README.md` (new doc-index entry; the stale "14-rule catalog" mention
+for Capability F corrected to 15).

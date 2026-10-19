@@ -526,9 +526,10 @@ docs/            Architecture, diagnostic rules, RBAC/threat model, failure lab,
 - [SCHEDULING_ANALYSIS.md](docs/SCHEDULING_ANALYSIS.md) -- the scheduling advisor's own design: what's evaluated for real vs. only detected
 - [NETWORK_DIAGNOSTICS.md](docs/NETWORK_DIAGNOSTICS.md) -- the network troubleshooting engine's own design: evidence chain, scope split, what's deliberately deferred
 - [CAPACITY_PLANNING.md](docs/CAPACITY_PLANNING.md) -- the capacity planning & autoscaling advisor's own design: HPA status, scale headroom, what's a pattern match vs. a diagnosis
-- [SECURITY_AUDITING.md](docs/SECURITY_AUDITING.md) -- the security & configuration auditor's own design: the 14-rule catalog, the build-vs-integrate decision, what's deliberately deferred
+- [SECURITY_AUDITING.md](docs/SECURITY_AUDITING.md) -- the security & configuration auditor's own design: the 15-rule catalog, the build-vs-integrate decision, what's deliberately deferred
 - [CHAOS_RESILIENCE_LAB.md](docs/CHAOS_RESILIENCE_LAB.md) -- the evaluation harness's own design: ground truth, push-vs-pull timing, recovery/false-positive scope
 - [OPERATOR_DESIGN.md](docs/OPERATOR_DESIGN.md) -- the Kubernetes operator's own design: why one CRD, what the controller deliberately never decides, reconciliation step by step
+- [EVIDENCE_COMPLETENESS.md](docs/EVIDENCE_COMPLETENESS.md) -- the shared `EvidenceCompleteness` vocabulary across capabilities: the decision, what it touches, what it deliberately doesn't
 - [DIAGNOSTIC_RULES.md](docs/DIAGNOSTIC_RULES.md) -- every rule, its evidence, and its confidence logic
 - [FAILURE_LAB.md](docs/FAILURE_LAB.md) -- each lab scenario: how it fails, what's expected, how to clean up
 - [RBAC_AND_THREAT_MODEL.md](docs/RBAC_AND_THREAT_MODEL.md) -- least privilege, trust boundaries

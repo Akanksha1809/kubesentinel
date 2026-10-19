@@ -197,16 +197,29 @@ should follow the exact naming convention already established:
 `kubesentinel_<capability>_<noun>_total`/`_active`/`_duration_seconds`,
 matching `kubesentinel_optimization_*`'s own naming exactly.
 
-One real gap, named in `IMPLEMENTATION_STATUS.md` and repeated here because
-it's an architectural decision, not an implementation detail: there is no
-shared three-state "healthy / degraded / unknown-because-unavailable"
-model across capabilities today. The optimization engine expresses this
-ad hoc (`metrics_available: bool` + a `warning: str | None`). Before a
-third and fourth capability each invent their own slightly-different
-version of the same idea, it's worth deciding whether this becomes a
-shared, typed enum (e.g. on a common base the per-capability summary
-models each include) or stays per-capability by deliberate choice. Not
-decided by this document -- flagged for the milestone that first needs it.
+**Decided, as a later, separate follow-up**: this document's own open
+question -- "there is no shared three-state 'healthy / degraded /
+unknown-because-unavailable' model across capabilities today... worth
+deciding whether this becomes a shared, typed enum... or stays
+per-capability by deliberate choice. Not decided by this document --
+flagged for the milestone that first needs it." All six capabilities
+now exist, each having independently invented its own version exactly
+as this note anticipated. The decision: a shared, typed
+`EvidenceCompleteness` enum (`COMPLETE`/`DEGRADED`/`UNKNOWN`/
+`NOT_APPLICABLE`, `models/completeness.py`) via a common
+`EvidenceCompletenessMixin` base model -- the exact "common base the
+per-capability summary models each include" shape this note's own
+parenthetical suggested. Additive, never a rename: every existing
+per-capability field (`AnalysisRunSummary.warning`/`metrics_available`,
+`SecurityAuditResult`'s own pre-existing `warnings`) is kept exactly as
+it was. `SchedulingFinding` gained a genuinely new `warnings` field
+(closing a real silent-degrade gap found while wiring this up);
+`NetworkFinding` is deliberately not included, since that engine's own
+`analyze_pod` is all-or-nothing with no partial-degrade state to attach
+one to -- named explicitly, not silently assumed covered. See
+`docs/EVIDENCE_COMPLETENESS.md` for the full design and
+`docs/IMPLEMENTATION_STATUS.md`'s own Observability section for the
+closure writeup.
 
 ## What this document does not cover
 

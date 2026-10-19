@@ -19,6 +19,7 @@ from kubesentinel.metrics.registry import (
     optimization_recommendations_total,
 )
 from kubesentinel.models.action import ActionStatus, ActionTarget, ActionType, RemediationAction
+from kubesentinel.models.completeness import EvidenceCompleteness
 from kubesentinel.models.optimization import (
     AnalysisRunSummary,
     RecommendationStatus,
@@ -189,6 +190,12 @@ class OptimizationService:
             metrics_available=metrics_available,
             warning=warning,
             overcommitment=overcommitment,
+            # The shared vocabulary (models/completeness.py), set from the
+            # exact same information `warning`/`metrics_available` above
+            # already carry -- never a second, independently-derived
+            # answer to the same question.
+            warnings=[warning] if warning else [],
+            evidence_completeness=EvidenceCompleteness.COMPLETE if metrics_available else EvidenceCompleteness.DEGRADED,
         )
         self._repo.save_analysis_run(summary)
         return summary

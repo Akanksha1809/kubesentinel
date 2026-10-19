@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 from kubesentinel.config import Settings
+from kubesentinel.models.completeness import EvidenceCompleteness
 from kubesentinel.models.security import SecurityAuditResult
 from kubesentinel.security.inventory import SecurityInventory
 from kubesentinel.security.rules.availability import MissingPdbForMultiReplicaWorkloadRule
@@ -65,11 +66,18 @@ class SecurityAuditEngine:
         for rule in self._rules:
             all_findings.extend(rule.evaluate(inventory))
 
+        warnings = list(inventory.warnings)
         return SecurityAuditResult(
             audit_id=str(uuid4()),
             analyzed_at=datetime.now(timezone.utc),
             namespaces=namespaces,
             findings=all_findings,
             rules_evaluated=[rule.rule_id for rule in self._rules],
-            warnings=list(inventory.warnings),
+            warnings=warnings,
+            # The shared vocabulary (models/completeness.py): a non-empty
+            # `warnings` here always means at least one rule family's own
+            # inventory read failed this pass (never populated for any
+            # other reason), so DEGRADED is the correct read whenever it
+            # is non-empty, never a separate judgment call.
+            evidence_completeness=EvidenceCompleteness.DEGRADED if warnings else EvidenceCompleteness.COMPLETE,
         )

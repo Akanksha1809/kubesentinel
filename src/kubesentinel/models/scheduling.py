@@ -16,6 +16,7 @@ from enum import Enum
 
 from pydantic import BaseModel, Field
 
+from kubesentinel.models.completeness import EvidenceCompletenessMixin
 from kubesentinel.models.optimization import ResourceQuantity
 
 
@@ -133,7 +134,19 @@ class NodeFitResult(BaseModel):
     constraint_results: list[ConstraintResult] = Field(default_factory=list)
 
 
-class SchedulingFinding(BaseModel):
+class SchedulingFinding(EvidenceCompletenessMixin):
+    """`warnings`/`evidence_completeness` (inherited from
+    `EvidenceCompletenessMixin`) are new here -- this model previously
+    had no way to surface a sub-read failure at all. Closes a real gap
+    found while wiring this up: `analyze_hypothetical`'s own
+    ResourceQuota/LimitRange reads already degraded on failure
+    (`logger.info`, continue with an empty list) but never told the
+    caller -- a finding could silently report "no ResourceQuota in this
+    namespace" (`satisfied=True`) when the true state was "couldn't
+    check," the exact absence-of-evidence-as-evidence-of-absence this
+    project's own discipline elsewhere never allows. See
+    `scheduling/service.py::analyze_hypothetical`."""
+
     finding_id: str
     namespace: str
     pod_name: str | None = None  # None for a hypothetical (not-yet-created) spec

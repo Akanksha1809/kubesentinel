@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 
 from kubernetes import client as k8s_client
 
+from kubesentinel.models.completeness import EvidenceCompleteness
 from kubesentinel.models.optimization import ResourceQuantity
 from kubesentinel.models.scheduling import (
     EVALUATED_CONSTRAINT_TYPES,
@@ -106,6 +107,7 @@ def analyze_pod_scheduling(
     pod_uid: str | None = None,
     quotas: list | None = None,
     limit_ranges: list | None = None,
+    warnings: list[str] | None = None,
     check_quota: bool = False,
     pod_name: str | None = None,
     workload_kind: str | None = None,
@@ -129,9 +131,16 @@ def analyze_pod_scheduling(
     no other Pods) when the caller has no use for those three checks.
     `pod_uid` excludes the candidate's own Pod from matching against
     itself when analyzing a real, already-existing Pod; a hypothetical
-    spec has no UID and passes `None` (nothing to exclude)."""
+    spec has no UID and passes `None` (nothing to exclude).
+
+    `warnings` carries any sub-read failure the caller already caught
+    and degraded from (e.g. `analyze_hypothetical`'s own ResourceQuota/
+    LimitRange reads) -- this function never performs a cluster read
+    itself, so it only ever *reports* `warnings`/`evidence_completeness`
+    on the returned finding, never discovers or silences one."""
     now = now or datetime.now(timezone.utc)
     pods = pods or []
+    warnings = warnings or []
     pod_request = _pod_spec_request(pod_spec)
     tolerations = pod_spec.tolerations or []
     node_selector = pod_spec.node_selector
@@ -226,4 +235,6 @@ def analyze_pod_scheduling(
         unevaluated_constraints=unevaluated,
         any_node_schedulable=any_node_schedulable,
         reasoning=" ".join(reasoning_parts),
+        warnings=warnings,
+        evidence_completeness=EvidenceCompleteness.DEGRADED if warnings else EvidenceCompleteness.COMPLETE,
     )
