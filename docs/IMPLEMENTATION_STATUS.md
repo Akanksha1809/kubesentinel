@@ -369,11 +369,14 @@ catch.
 `docs/SECURITY_AUDITING.md` is the design). A new `security/` package:
 `inventory.py` (one-shot read, Pods grouped by owning workload via the
 reused `optimization/ownership.py::resolve_pod_owner`, RBAC objects,
-NetworkPolicies, Deployments/StatefulSets/PodDisruptionBudgets), 14 rules
-across `rules/{container,rbac,network_policy,availability}.py` (a 14th,
-`EffectiveRbacEscalationRule`, closes `docs/SECURITY_AUDITING.md`
+NetworkPolicies, Deployments/StatefulSets/PodDisruptionBudgets,
+Namespace labels), 15 rules across
+`rules/{container,rbac,network_policy,availability,pod_security}.py` (a
+14th, `EffectiveRbacEscalationRule`, closes `docs/SECURITY_AUDITING.md`
 Section 12's own named "effective permissions across combined bindings"
-gap -- see Section 13),
+gap -- see Section 13; a 15th, `NamespaceWithoutPodSecurityStandardRule`,
+closes this same table's own "Pod Security Admission namespace labels"
+row, below),
 `engine.py` (mirrors `diagnostics/engine.py::DiagnosticEngine` exactly),
 `service.py` (the one module with side effects). `RbacAuthorizationV1Api`
 and `PolicyV1Api` added to `ClusterClients` (new, additive).
@@ -388,7 +391,7 @@ and `PolicyV1Api` added to `ClusterClients` (new, additive).
 | Applicable/inconclusive distinction | Implemented at the run level | `SecurityAuditResult.warnings`: a rule family whose own inventory read failed (e.g. 403 listing ClusterRoleBindings) is named there, distinct from "evaluated and found nothing" |
 | Build vs. integrate an external scanner | Decided: build the *core* catalog natively | no kube-linter/Kubescape integration for container-security/RBAC/NetworkPolicy/PDB -- consistent with every other capability being a native, in-repo rule engine; see docs/SECURITY_AUDITING.md Section 2. CVE scanning specifically is the one named exception, below. |
 | CVE/image vulnerability scanning | Implemented, opt-in | `IMAGE_HAS_KNOWN_VULNERABILITIES` via a local Trivy binary (`security/image_scanning.py`, docs/SECURITY_AUDITING.md Section 14) -- off by default (`security_enable_image_scanning=False`); a missing `trivy` binary or a failed scan degrades to a `warnings` entry, never aborts the audit. The only module in this engine that isn't a pure `SecurityRule` (it shells out) and the only one with a new, non-Kubernetes-RBAC dependency (outbound network access for Trivy's own vulnerability DB and image pulls) |
-| Pod Security Admission namespace labels | **Not built**, deliberately | redundant with the already-built, more granular container-level checks -- a candidate for a later pass, not forgotten |
+| Pod Security Admission namespace labels | **Implemented** (closed as later, separate follow-up work; was named "deliberately not built... redundant" at the original audit -- that framing undersold it) | `NamespaceWithoutPodSecurityStandardRule` (`security/rules/pod_security.py`, `NAMESPACE_WITHOUT_POD_SECURITY_STANDARD`, LOW): a namespace with running Pods and none of `pod-security.kubernetes.io/{enforce,audit,warn}` set. Not actually redundant with the container-level checks, on reflection -- those are *detective* (confirm a problem after a Pod already exists); this is *preventive* (would reject an unsafe Pod spec at admission, before creation). `SecurityInventory.namespace_labels` (new cluster-scoped `Namespace` LIST, `rbac/security-clusterrole.yaml` grown with a `namespaces` `get`/`list` rule rather than a new ClusterRole -- Namespace is cluster-scoped for the same reason ClusterRole/ClusterRoleBinding already are in that same file) feeds it; same `optimization_excluded_namespace_list` exclusion `NamespaceWithoutNetworkPolicyRule` already reuses. See `docs/SECURITY_AUDITING.md` §15. |
 
 **Two real findings caught live during this milestone's own
 verification, by this project's own Milestone 20-23 audit standard**:

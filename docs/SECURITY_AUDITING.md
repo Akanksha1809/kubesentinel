@@ -533,3 +533,70 @@ tools -- missing Trivy is never a reason that script exits non-zero,
 matching this feature's own "genuinely optional" guarantee one level up
 the stack, in the one place a user would check before assuming
 something is broken.
+
+## 15. Pod Security Admission namespace labels
+
+Closes this doc's own previously-named gap, under Section 4's spec
+checklist: "Pod Security Admission namespace labels | Not built,
+deliberately | redundant with the already-built, more granular
+container-level checks." That framing undersold the gap on reflection
+-- see below.
+
+### 15.1 Not actually redundant: detective vs. preventive
+
+Every container-security rule in `rules/container.py`
+(`PRIVILEGED_CONTAINER`, `RUN_AS_ROOT`, `ALLOW_PRIVILEGE_ESCALATION`,
+...) is **detective**: it confirms a problem that already exists in a
+Pod spec this engine already read. Pod Security Admission is
+**preventive**: a namespace with `pod-security.kubernetes.io/enforce`
+set rejects an unsafe Pod spec *at admission time*, before it is ever
+created. A namespace can fail every one of this engine's existing
+detective checks while also having zero preventive coverage at all --
+`NamespaceWithoutPodSecurityStandardRule` (`rules/pod_security.py`,
+`NAMESPACE_WITHOUT_POD_SECURITY_STANDARD`, LOW) is the only thing in
+this engine that would ever say so. Same shape as
+`NamespaceWithoutNetworkPolicyRule`'s own precedent (Section 3.3): a
+namespace-level coverage gap, not a per-container finding.
+
+### 15.2 What it checks, and what it deliberately doesn't
+
+Fires for a namespace with running Pods where none of
+`pod-security.kubernetes.io/enforce`, `.audit`, or `.warn` is set --
+*any one* of the three counts as "this namespace's operator made a
+deliberate PSA decision," even `audit`/`warn` alone (which log or warn
+without blocking anything) are still evidence of an intentional
+choice, never treated the same as nothing being set at all. Does not
+evaluate *which* standard (`privileged`/`baseline`/`restricted`) is
+set, or whether it's strict enough for what the namespace actually
+runs -- that would require re-deriving the Pod Security Standards'
+own admission logic a second time, a different, larger feature than
+"does this namespace have a policy at all." Same
+`optimization_excluded_namespace_list` exclusion every other
+namespace-level rule in this engine already reuses (`kube-system`
+and friends are not the user's to fix).
+
+### 15.3 RBAC: growing the existing ClusterRole, not a new exception
+
+`Namespace` is itself cluster-scoped, so no namespaced `Role`
+(`rbac/security-role.yaml`) can grant reading it, no matter how
+narrow -- the same reasoning `rbac/security-clusterrole.yaml` already
+documents for `ClusterRole`/`ClusterRoleBinding`. Added as a second
+rule inside that *same* file rather than a new ClusterRole: it's the
+same capability, the same ServiceAccount, the same already-documented
+cluster-scope exception, not a new, fourth one for this capability.
+`get`/`list` only, consistent with every other read in this engine.
+
+### 15.4 Live-verified against the real cluster, full round-trip
+
+Confirmed against the actual `kind-kubesentinel` cluster, not just
+unit-tested: `kubesentinel-lab` genuinely has no
+`pod-security.kubernetes.io/*` label (confirmed via `kubectl get
+namespace kubesentinel-lab -o jsonpath='{.metadata.labels}'`). With a
+real Pod running in it, `kubesentinel security-audit` produced the real
+`NAMESPACE_WITHOUT_POD_SECURITY_STANDARD` finding with the real
+namespace name and the real evidence string. Applying
+`kubectl label namespace kubesentinel-lab
+pod-security.kubernetes.io/enforce=baseline` and re-running the audit
+made the finding disappear (LOW count dropped by exactly one); removing
+the label again restored it -- a genuine round-trip against real
+cluster state, not asserted from one side only.

@@ -32,6 +32,7 @@ from kubesentinel.security.rules.container import (
     SecretAsEnvVarRule,
 )
 from kubesentinel.security.rules.network_policy import NamespaceWithoutNetworkPolicyRule, UnrestrictedIngressPolicyRule
+from kubesentinel.security.rules.pod_security import NamespaceWithoutPodSecurityStandardRule
 from kubesentinel.security.rules.rbac import ClusterAdminBindingRule, EffectiveRbacEscalationRule, WildcardRbacRuleRule
 
 
@@ -51,6 +52,7 @@ def default_rules(settings: Settings) -> list[SecurityRule]:
         NamespaceWithoutNetworkPolicyRule(settings),
         UnrestrictedIngressPolicyRule(),
         MissingPdbForMultiReplicaWorkloadRule(settings),
+        NamespaceWithoutPodSecurityStandardRule(settings),
     ]
 
 

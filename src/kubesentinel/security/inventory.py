@@ -3,7 +3,9 @@ spec per owning workload (deduped the same way
 `optimization/inventory.py::build_workload_inventory` already groups
 Pods, reusing `optimization/ownership.py::resolve_pod_owner` rather than
 re-deriving owner resolution a fourth time), RBAC objects, NetworkPolicy
-objects, and Deployments/StatefulSets/PodDisruptionBudgets.
+objects, Deployments/StatefulSets/PodDisruptionBudgets, and (closing this
+engine's own previously-named "Pod Security Admission namespace labels"
+gap) each namespace's own labels.
 
 One-shot, no watch loop -- the same shape every other engine in this
 project uses. A sub-read that fails (e.g. 403 listing ClusterRoleBindings)
@@ -58,6 +60,13 @@ class SecurityInventory:
     roles: list[V1Role] = field(default_factory=list)
     network_policies_by_namespace: dict[str, list[V1NetworkPolicy]] = field(default_factory=dict)
     namespaces_with_pods: set[str] = field(default_factory=set)
+    #: Real `Namespace.metadata.labels`, keyed by namespace name -- used by
+    #: `NamespaceWithoutPodSecurityStandardRule` to check for the three
+    #: `pod-security.kubernetes.io/{enforce,audit,warn}` labels. A
+    #: namespace absent from this dict (sub-read failure, recorded in
+    #: `warnings` below) is never treated as "confirmed no labels" by that
+    #: rule -- see its own docstring.
+    namespace_labels: dict[str, dict[str, str]] = field(default_factory=dict)
     deployments: list[V1Deployment] = field(default_factory=list)
     stateful_sets: list[V1StatefulSet] = field(default_factory=list)
     pod_disruption_budgets: list[V1PodDisruptionBudget] = field(default_factory=list)
@@ -160,5 +169,18 @@ def build_security_inventory(clients: ClusterClients, namespaces: list[str] | No
             inventory.pod_disruption_budgets = clients.policy.list_pod_disruption_budget_for_all_namespaces().items
         except ApiException as exc:
             inventory.warnings.append(f"could not list PodDisruptionBudgets: {exc.reason} (status={exc.status})")
+
+    # Namespace is cluster-scoped -- one LIST call, never per-namespace,
+    # same shape the ClusterRoleBinding/ClusterRole reads above already
+    # have. All-or-nothing: either every real Namespace's labels land
+    # here (an empty dict `{}` for one with genuinely no labels), or this
+    # one call fails and `namespace_labels` stays entirely empty --
+    # `NamespaceWithoutPodSecurityStandardRule` must never conflate the
+    # latter with "confirmed no labels on every namespace."
+    try:
+        for ns in clients.core.list_namespace().items:
+            inventory.namespace_labels[ns.metadata.name] = dict(ns.metadata.labels or {})
+    except ApiException as exc:
+        inventory.warnings.append(f"could not list Namespaces: {exc.reason} (status={exc.status})")
 
     return inventory

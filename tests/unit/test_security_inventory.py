@@ -13,10 +13,11 @@ def _items(objs):
     return SimpleNamespace(items=objs)
 
 
-def _clients(pods=(), deployments=(), stateful_sets=(), cluster_role_bindings=(), cluster_roles=(), fail=None):
+def _clients(pods=(), deployments=(), stateful_sets=(), cluster_role_bindings=(), cluster_roles=(), namespaces=(), fail=None):
     clients = MagicMock()
     clients.core.list_namespaced_pod.return_value = _items(list(pods))
     clients.core.list_pod_for_all_namespaces.return_value = _items(list(pods))
+    clients.core.list_namespace.return_value = _items(list(namespaces))
     clients.apps.list_namespaced_replica_set.return_value = _items([])
     clients.apps.list_replica_set_for_all_namespaces.return_value = _items([])
     clients.apps.list_namespaced_deployment.return_value = _items(list(deployments))
@@ -116,3 +117,31 @@ class TestBuildSecurityInventory:
 
         clients.core.list_namespaced_pod.assert_called_once_with(namespace=NAMESPACE)
         clients.core.list_pod_for_all_namespaces.assert_not_called()
+
+    def test_namespace_labels_populated_from_real_namespace_objects(self):
+        from kubernetes.client import V1Namespace, V1ObjectMeta
+
+        ns = V1Namespace(metadata=V1ObjectMeta(name=NAMESPACE, labels={"pod-security.kubernetes.io/enforce": "baseline"}))
+        clients = _clients(namespaces=[ns])
+
+        inventory = build_security_inventory(clients, namespaces=[NAMESPACE])
+
+        assert inventory.namespace_labels[NAMESPACE] == {"pod-security.kubernetes.io/enforce": "baseline"}
+
+    def test_namespace_with_no_labels_gets_an_empty_dict_not_missing(self):
+        from kubernetes.client import V1Namespace, V1ObjectMeta
+
+        ns = V1Namespace(metadata=V1ObjectMeta(name=NAMESPACE, labels=None))
+        clients = _clients(namespaces=[ns])
+
+        inventory = build_security_inventory(clients, namespaces=[NAMESPACE])
+
+        assert inventory.namespace_labels[NAMESPACE] == {}
+
+    def test_namespace_list_failure_recorded_as_warning_not_a_crash(self):
+        clients = _clients(fail="core.list_namespace")
+
+        inventory = build_security_inventory(clients, namespaces=[NAMESPACE])
+
+        assert inventory.namespace_labels == {}
+        assert any("Namespaces" in w for w in inventory.warnings)

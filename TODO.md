@@ -4172,3 +4172,85 @@ behind.
 `docs/IMPLEMENTATION_STATUS.md` (Capability D's "Service types /
 routing" row updated from Partial to Implemented; a new "Live-verified
 again" paragraph added for this closure specifically).
+
+## Milestone 40: Pod Security Admission namespace labels -- DONE
+
+Closes Capability F's own named gap in `docs/SECURITY_AUDITING.md` and
+`docs/IMPLEMENTATION_STATUS.md`: "Pod Security Admission namespace
+labels | Not built, deliberately | redundant with the already-built,
+more granular container-level checks." On reflection while scoping
+this, that framing undersold the gap -- see `docs/SECURITY_AUDITING.md`
+§15.1 for why it's not actually redundant.
+
+**The distinction that justified doing this at all**: every existing
+container-security rule (`PRIVILEGED_CONTAINER`, `RUN_AS_ROOT`, ...) is
+*detective* -- it confirms a problem that already exists in a Pod spec
+already created. Pod Security Admission is *preventive* -- a namespace
+with `pod-security.kubernetes.io/enforce` set rejects an unsafe Pod
+spec at admission time, before it is ever created. A namespace can
+fail every detective check this engine already has while having zero
+preventive coverage at all, and nothing in this engine would have said
+so until now.
+
+**Added**:
+
+- `security/rules/pod_security.py::NamespaceWithoutPodSecurityStandardRule`
+  (`NAMESPACE_WITHOUT_POD_SECURITY_STANDARD`, LOW) -- fires for a
+  namespace with running Pods where none of
+  `pod-security.kubernetes.io/{enforce,audit,warn}` is set. Any one of
+  the three counts as "a deliberate PSA decision was made," even
+  `audit`/`warn` alone. Reuses the exact `optimization_excluded_namespace_list`
+  exclusion `NamespaceWithoutNetworkPolicyRule` already established for
+  this same "system namespaces aren't the user's to fix" concern.
+  Registered in `security/engine.py::default_rules()` -- this engine's
+  15th rule.
+- `security/inventory.py` -- `SecurityInventory.namespace_labels`, a
+  new cluster-scoped `Namespace` LIST (`clients.core.list_namespace()`).
+  All-or-nothing, same discipline every other sub-read in this engine
+  already has: either every real namespace's labels land here (an
+  empty dict for one with genuinely none), or the one call fails and
+  the dict stays entirely empty, recorded in `warnings` -- the rule
+  above treats a namespace missing from the dict as "unknown," never
+  "confirmed no labels."
+- `rbac/security-clusterrole.yaml` -- grown with a `namespaces`
+  `get`/`list` rule, not a new ClusterRole: Namespace is cluster-scoped
+  for the same reason `ClusterRole`/`ClusterRoleBinding` already are in
+  that same file, so this stays the one cluster-scope exception for
+  this capability rather than becoming a second one.
+
+**Tests**: 9 new unit tests (`test_security_inventory.py`: 3, covering
+`namespace_labels` population/empty/failure; `test_security_pod_security_rule.py`:
+6, the rule's own fires/doesn't-fire/exclusion/unknown-vs-empty cases)
+plus 2 new integration tests
+(`test_can_list_and_get_namespaces`/`test_cannot_patch_or_delete_namespaces`)
+in `tests/integration/test_rbac_boundary.py`. `test_security_engine.py`'s
+own exhaustive rule-ID enumeration test updated to include the new rule.
+Full regression suite: ruff clean, mypy clean, **985 unit tests
+passed** (976 + 9).
+`tests/integration/test_rbac_boundary.py`: 41 total (39 passed, 2
+skipped -- the same metrics-dependent pair already honestly skipping in
+this metrics-server-less lab), run live against the real cluster, not
+just added.
+
+**Live-verified against the real cluster, full round-trip, not just
+unit-tested**: confirmed via `kubectl get namespace kubesentinel-lab -o
+jsonpath='{.metadata.labels}'` that this lab's own namespace genuinely
+has no `pod-security.kubernetes.io/*` label. With a real throwaway Pod
+running in it, `kubesentinel security-audit` produced the real
+`NAMESPACE_WITHOUT_POD_SECURITY_STANDARD` finding with the real
+namespace name. Applied `kubectl label namespace kubesentinel-lab
+pod-security.kubernetes.io/enforce=baseline`, re-ran the audit, and
+confirmed the finding genuinely disappeared (LOW count dropped by
+exactly one); removed the label again and confirmed it reappeared --
+both directions proven against real cluster state, not asserted from
+one side only. Cleaned up afterward (label removed, demo Pod deleted);
+confirmed the namespace's labels match its original pre-milestone state
+exactly.
+
+**Documentation**: `docs/SECURITY_AUDITING.md` (new §15).
+`docs/IMPLEMENTATION_STATUS.md` (Capability F's intro paragraph's rule
+count updated 14 -> 15; the "Pod Security Admission namespace labels"
+row updated from Not built to Implemented, with the detective-vs-
+preventive correction named explicitly). `docs/RBAC_AND_THREAT_MODEL.md`
+(the existing `security-clusterrole.yaml` block grown in place rather
+than duplicated; the "39 automated checks" count updated to 41).

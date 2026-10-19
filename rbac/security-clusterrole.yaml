@@ -12,9 +12,15 @@
 # inventory snapshot per audit() call, the same as every other
 # optimization/scheduling/network/capacity engine before it.
 #
+# `namespaces` (core API group): added for
+# `NamespaceWithoutPodSecurityStandardRule` (closing this engine's own
+# previously-named "Pod Security Admission namespace labels" gap) --
+# Namespace is itself cluster-scoped, same reasoning as
+# ClusterRole/ClusterRoleBinding above, not a new, separate exception.
+#
 # Deliberately excludes: any write verb. No code anywhere in
-# `security/` creates, patches, or deletes a Role/ClusterRole/binding --
-# see docs/SECURITY_AUDITING.md Section 7.
+# `security/` creates, patches, or deletes a Role/ClusterRole/binding,
+# or a Namespace -- see docs/SECURITY_AUDITING.md Section 7.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -22,4 +28,7 @@ metadata:
 rules:
   - apiGroups: ["rbac.authorization.k8s.io"]
     resources: ["clusterroles", "clusterrolebindings"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["namespaces"]
     verbs: ["get", "list"]

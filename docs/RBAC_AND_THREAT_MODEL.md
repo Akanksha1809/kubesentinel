@@ -218,9 +218,19 @@ for this ordinary, non-aggregated API group.
 # engine's kube-system-bound RoleBinding (Capability D) -- ClusterRole/
 # ClusterRoleBinding are themselves cluster-scoped resources, so no
 # namespaced Role can grant read access to them, no matter how narrow.
+#
+# `namespaces` (core API group) grown onto this same ClusterRole later,
+# for NamespaceWithoutPodSecurityStandardRule (docs/SECURITY_AUDITING.md
+# §15) -- Namespace is also cluster-scoped, same reasoning as the rule
+# above, so this stays the one cluster-scope exception for this
+# capability rather than becoming a second ClusterRole for the same
+# ServiceAccount.
 rules:
   - apiGroups: ["rbac.authorization.k8s.io"]
     resources: ["clusterroles", "clusterrolebindings"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["namespaces"]
     verbs: ["get", "list"]
 ```
 
@@ -261,7 +271,7 @@ rules:
 
 This entire boundary -- every Role/ClusterRole in this project, plus
 the kube-system exception, both directions -- is now covered by
-`tests/integration/test_rbac_boundary.py`: 39 automated checks (37
+`tests/integration/test_rbac_boundary.py`: 41 automated checks (39
 passing in an environment without metrics-server installed, like this
 project's own lab; 2 honestly skip rather than fail, since
 "metrics-server isn't reachable" is not an RBAC question either way).

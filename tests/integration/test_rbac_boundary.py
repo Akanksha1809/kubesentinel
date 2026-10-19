@@ -304,6 +304,22 @@ def test_cannot_patch_clusterroles_or_clusterrolebindings():
     assert kubectl_can_i("patch", "clusterrolebindings.rbac.authorization.k8s.io") is False
 
 
+def test_can_list_and_get_namespaces(kubesentinel_sa_clients):
+    # Added for NamespaceWithoutPodSecurityStandardRule -- Namespace is
+    # cluster-scoped, same reasoning as ClusterRole/ClusterRoleBinding
+    # above, granted in the same ClusterRole rather than a new one.
+    core, _, _, _ = kubesentinel_sa_clients
+    assert core.list_namespace(limit=1) is not None
+    assert kubectl_can_i("get", "namespaces") is True
+
+
+def test_cannot_patch_or_delete_namespaces():
+    # Read-only: security/inventory.py only ever reads Namespace labels,
+    # never creates, patches, or deletes a Namespace anywhere.
+    assert kubectl_can_i("patch", "namespaces") is False
+    assert kubectl_can_i("delete", "namespaces") is False
+
+
 # --- Security auditor Role (rbac/security-role.yaml): read-only, lab namespace only ---
 
 
