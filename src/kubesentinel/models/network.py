@@ -42,6 +42,14 @@ class PortMatchResult(BaseModel):
     matched_container_port: int | None = None
     matched: bool
     reasoning: str
+    #: Set only for `NodePort`/`LoadBalancer`-type Services (`ServicePort.nodePort`,
+    #: auto-allocated by the API server) -- `None` for `ClusterIP`/`ExternalName`,
+    #: which have no node-level port at all. Purely informational: there is no
+    #: real-world failure mode for this specific field this engine's own
+    #: evidence can detect (the API server either allocates it successfully
+    #: or the Service is never created), unlike `LoadBalancer`'s own external
+    #: IP assignment below, which genuinely can and does get stuck.
+    node_port: int | None = None
 
 
 class ServiceMatchResult(BaseModel):
@@ -57,6 +65,23 @@ class ServiceMatchResult(BaseModel):
     #: a real, distinct finding, not noise.
     endpointslice_consistent: bool = True
     port_results: list[PortMatchResult] = Field(default_factory=list)
+    #: `Service.spec.type`, always populated ("ClusterIP" is Kubernetes'
+    #: own default when the field is unset, never left as `None` here).
+    #: Every check above (selector match, EndpointSlice consistency, port
+    #: resolution) is identical across all four types -- `NodePort`/
+    #: `LoadBalancer` are strict supersets of `ClusterIP` routing, not a
+    #: different code path -- so this is additive visibility, not a
+    #: reason to branch the existing checks.
+    service_type: str = "ClusterIP"
+    #: Real `status.loadBalancer.ingress[].ip`/`.hostname` values, only
+    #: ever populated for `service_type == "LoadBalancer"`. An empty list
+    #: on a `LoadBalancer` Service is a genuine, common real-world state
+    #: (no cloud controller present, or a provisioning failure/delay) --
+    #: surfaced in `NetworkFinding.reasoning` as informational evidence,
+    #: never as a classification change: a pending external IP says
+    #: nothing about whether in-cluster Service routing to the target Pod
+    #: (what this engine's classification actually answers) is working.
+    load_balancer_ingress: list[str] = Field(default_factory=list)
 
 
 class NetworkPolicyRelevance(BaseModel):

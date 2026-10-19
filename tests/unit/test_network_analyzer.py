@@ -21,6 +21,8 @@ def _service(
     ready=None,
     consistent=True,
     port_results=None,
+    service_type="ClusterIP",
+    load_balancer_ingress=None,
 ) -> ServiceMatchResult:
     return ServiceMatchResult(
         service_name=name,
@@ -28,6 +30,8 @@ def _service(
         matched_pod_names=matched if matched is not None else [POD],
         ready_pod_names=ready if ready is not None else [POD],
         endpointslice_consistent=consistent,
+        service_type=service_type,
+        load_balancer_ingress=load_balancer_ingress or [],
         port_results=port_results or [PortMatchResult(service_port=80, target_port="80", matched=True, reasoning="ok")],
     )
 
@@ -165,3 +169,55 @@ class TestReasoningAndShape:
         )
         assert finding.workload_kind == "Deployment"
         assert finding.workload_name == "my-app"
+
+
+class TestLoadBalancerPendingIsInformationalOnly:
+    def test_pending_load_balancer_noted_in_reasoning_but_stays_healthy(self):
+        finding = analyze_network(
+            namespace=NAMESPACE,
+            target_pod_name=POD,
+            dns_health=_dns(),
+            service_results=[_service(service_type="LoadBalancer", load_balancer_ingress=[])],
+            applicable_policies=[],
+        )
+        assert finding.classification == NetworkFindingClassification.HEALTHY
+        assert "LoadBalancer but has no assigned external" in finding.reasoning
+
+    def test_assigned_load_balancer_ingress_produces_no_pending_note(self):
+        finding = analyze_network(
+            namespace=NAMESPACE,
+            target_pod_name=POD,
+            dns_health=_dns(),
+            service_results=[_service(service_type="LoadBalancer", load_balancer_ingress=["lb.example.com"])],
+            applicable_policies=[],
+        )
+        assert finding.classification == NetworkFindingClassification.HEALTHY
+        assert "has no assigned external" not in finding.reasoning
+
+    def test_cluster_ip_service_never_gets_a_pending_note(self):
+        finding = analyze_network(
+            namespace=NAMESPACE,
+            target_pod_name=POD,
+            dns_health=_dns(),
+            service_results=[_service(service_type="ClusterIP")],
+            applicable_policies=[],
+        )
+        assert "LoadBalancer" not in finding.reasoning
+
+    def test_pending_load_balancer_noted_even_when_classification_is_configuration_error(self):
+        # The informational note must survive alongside every other
+        # classification branch, not just the HEALTHY happy path --
+        # confirmed here against a Service that also fails port
+        # resolution (a real, unrelated CONFIGURATION_ERROR).
+        bad_port = PortMatchResult(service_port=80, target_port="http", matched=False, reasoning="does not match")
+        finding = analyze_network(
+            namespace=NAMESPACE,
+            target_pod_name=POD,
+            dns_health=_dns(),
+            service_results=[
+                _service(service_type="LoadBalancer", load_balancer_ingress=[], port_results=[bad_port])
+            ],
+            applicable_policies=[],
+        )
+        assert finding.classification == NetworkFindingClassification.CONFIGURATION_ERROR
+        assert "LoadBalancer but has no assigned external" in finding.reasoning

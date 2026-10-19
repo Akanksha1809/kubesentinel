@@ -602,3 +602,66 @@ framing throughout Sections 2-11) -- probing arbitrary Pod-to-Pod
 connectivity would be a different, broader feature. Only one port per
 probe call, by design (12.1) -- not a technical limitation, a deliberate
 scope fence against this becoming a general port-scanning tool.
+
+## 13. Service type awareness (closing the "Service types / routing: Partial" gap)
+
+`docs/IMPLEMENTATION_STATUS.md` named this capability's own narrowest
+spot: "ClusterIP routing... is the implemented path;
+`NodePort`/`LoadBalancer`/`ExternalName` type-specific routing is not
+separately modeled." Closed here, additively.
+
+### 13.1 Why no new routing logic was needed
+
+`NodePort` and `LoadBalancer` are not alternate routing paths this
+engine needs to re-derive -- they are strict supersets of `ClusterIP`.
+Every Service of either type still gets a `ClusterIP`, still gets
+selected the same way, still gets the same `EndpointSlice`, still
+resolves `targetPort` the same way. The *only* genuinely new state is
+each type's own extra piece: `NodePort`'s auto-allocated node-level
+port (`ServicePort.nodePort`), and `LoadBalancer`'s external address
+assignment (`status.loadBalancer.ingress`). Both are therefore additive
+fields on the existing `PortMatchResult`/`ServiceMatchResult` models
+(`service_type`, `PortMatchResult.node_port`,
+`ServiceMatchResult.load_balancer_ingress`), not a parallel analysis
+path -- `service_inventory.py::_match_one_service` reads three more
+fields off the same already-fetched `V1Service` object it already had.
+
+`ExternalName` needed no new handling at all: it has no selector and no
+backend Pods, so it already, correctly, never appears in
+`selecting_services` for any target Pod -- this capability's own
+existing "no Service selects this Pod" path already covers it, and
+inventing a dedicated check for a Service type that structurally can
+never route inbound traffic to a Pod would be exactly the kind of
+scaffolding-ahead-of-need this project avoids elsewhere.
+
+### 13.2 A pending LoadBalancer is informational, never a classification change
+
+A `LoadBalancer` Service with no assigned external IP/hostname yet
+(`status.loadBalancer.ingress` empty) is a genuinely common real-world
+state -- no cloud controller present (this project's own kind lab, with
+no MetalLB installed, has exactly this state permanently), a quota
+limit, or a provisioning delay. It is appended to `NetworkFinding.reasoning`
+as its own sentence, but it never changes `classification`: this
+capability's classification answers "does in-cluster Service routing
+to the target Pod work," and that question's answer is unaffected by
+whether the Service's *external* address has been assigned yet -- the
+Service still routes via its `ClusterIP` exactly like any other Service
+in the meantime. Claiming a stronger connection between "LoadBalancer
+pending" and "this Pod is unreachable" would be exactly the kind of
+overclaim Section 2's own `POLICY_MAY_RESTRICT` precedent already
+guards against for NetworkPolicy evidence.
+
+### 13.3 Live-verified against the real cluster, not just unit-tested
+
+Applied a real Deployment with a `LoadBalancer`-type Service and a
+`NodePort`-type Service, both selecting it, to the actual
+`kind-kubesentinel` cluster (kind's own default setup, no MetalLB or
+any other cloud-LB controller installed). Confirmed via `kubectl get
+svc` and `kubesentinel network-check` together: the `LoadBalancer`
+Service's `EXTERNAL-IP` genuinely stayed `<pending>`, and the engine's
+own `load_balancer_ingress` correctly read `[]` with the informational
+reasoning sentence present, while `classification` stayed `HEALTHY`
+(in-cluster routing to the Pod was never actually broken). The
+`NodePort` Service's real, API-server-allocated `nodePort` (`32641` in
+this run) was correctly read back via `PortMatchResult.node_port`,
+matching `kubectl get svc`'s own output exactly.

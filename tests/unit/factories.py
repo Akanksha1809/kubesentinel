@@ -37,9 +37,12 @@ from kubernetes.client import (
     V1PodTemplateSpec,
     V1ReplicaSet,
     V1ReplicaSetSpec,
+    V1LoadBalancerIngress,
+    V1LoadBalancerStatus,
     V1Service,
     V1ServicePort,
     V1ServiceSpec,
+    V1ServiceStatus,
     V1Taint,
 )
 
@@ -109,18 +112,29 @@ def make_service(
     selector: dict | None = None,
     ports: list[V1ServicePort] | None = None,
     cluster_ip: str | None = None,
+    service_type: str | None = None,
+    load_balancer_ingress: list[V1LoadBalancerIngress] | None = None,
 ) -> V1Service:
     """`ports` defaults to empty -- added for the network troubleshooting
     engine's own tests (docs/NETWORK_DIAGNOSTICS.md); every pre-existing
     caller that only cares about the selector is unaffected.
     `cluster_ip` defaults to None (unset), added for the active
     connectivity probe's own tests (Section 12) -- every pre-existing
-    caller is unaffected."""
+    caller is unaffected. `service_type`/`load_balancer_ingress` default
+    to None/empty, added for the Service-type-awareness tests
+    (NETWORK_DIAGNOSTICS.md's own Service-types gap) -- every
+    pre-existing caller is unaffected."""
     return V1Service(
         metadata=V1ObjectMeta(name=name, namespace=namespace, uid=uid, resource_version="100"),
         spec=V1ServiceSpec(
-            selector=selector if selector is not None else {"app": name}, ports=ports or [], cluster_ip=cluster_ip
+            selector=selector if selector is not None else {"app": name},
+            ports=ports or [],
+            cluster_ip=cluster_ip,
+            type=service_type,
         ),
+        status=V1ServiceStatus(load_balancer=V1LoadBalancerStatus(ingress=load_balancer_ingress or []))
+        if load_balancer_ingress
+        else None,
     )
 
 

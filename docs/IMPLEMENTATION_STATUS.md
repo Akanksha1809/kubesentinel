@@ -228,7 +228,7 @@ read-only since Milestone 2) gets its first write use.
 | DNS configuration and CoreDNS health | Implemented | `check_dns_health()`: the `coredns` Deployment's real ready/desired replica counts and the `kube-dns` Service's real EndpointSlice ready-endpoint count, both read live |
 | NetworkPolicies and relevant selectors | Implemented, static only | `build_applicable_policies()`: real `podSelector` evaluation (empty selector matches *every* Pod in the namespace -- the opposite of a Service's empty selector, implemented explicitly, not left to a fallthrough) and ingress/egress rule-presence summary. See the kindnet caveat below -- never a stronger claim than `POLICY_MAY_RESTRICT` |
 | Namespace boundaries | Implemented | every lookup (`list_namespaced_service`/`_pod`/`_network_policy`/EndpointSlice) is scoped to the target Pod's own namespace; the one exception (`kube-system` for coredns/kube-dns) is RBAC-scoped to exactly those two named resources, not a general grant |
-| Service types / routing | Partial | ClusterIP routing (selector -> EndpointSlice -> Pod) is the implemented path; `NodePort`/`LoadBalancer`/`ExternalName` type-specific routing is not separately modeled |
+| Service types / routing | **Implemented** (closed as later, separate follow-up work; was "Partial" at the original audit) | `NodePort`/`LoadBalancer` need no separate routing logic -- both are strict supersets of `ClusterIP` (same selector/EndpointSlice/port-resolution checks already cover them), so `service_inventory.py` now additionally reads `Service.spec.type`, `ServicePort.nodePort`, and (for `LoadBalancer`) `status.loadBalancer.ingress` onto the existing `ServiceMatchResult`/`PortMatchResult` models -- additive fields, not a parallel analysis path. A pending `LoadBalancer` external address is surfaced in `NetworkFinding.reasoning` as informational evidence only, never a `classification` change: in-cluster routing to the target Pod is unaffected by whether its external address has been assigned yet. `ExternalName` needed no handling at all -- it has no selector/backend Pods, so it already, correctly, never appears as a selecting Service. See `docs/NETWORK_DIAGNOSTICS.md` §13. |
 | Ingress / Gateway | **Not applicable** | confirmed live (`kubectl get ingressclass`, `kubectl get crd`) that zero such resources or CRDs exist anywhere in this project's cluster or manifest history -- an honest "not applicable," not a built-but-silent gap |
 | Relevant Events | Detected via reuse | `resolve_pod_owner` (workload resolution) is reused as-is; Event correlation itself is the troubleshooting engine's own existing surface (`observer`/`diagnostics`), not duplicated here |
 | Evidence-based request-path explanation | Implemented | `NetworkFinding.reasoning` always states the specific evidence behind the classification, and always appends the "not a confirmed end-to-end connectivity test" caveat -- API inspection cannot prove a packet actually arrives |
@@ -275,6 +275,18 @@ case already taught, applied here from the start rather than re-discovered
 the hard way). A live integration test
 (`tests/integration/test_network_live.py`) patches the HTTP transport
 itself and confirms a full `analyze_pod()` pass issues only `GET`.
+
+**Live-verified again for the Service-type closure above**: applied a
+real `LoadBalancer`-type Service and a real `NodePort`-type Service,
+both selecting a real Deployment, to the actual `kind-kubesentinel`
+cluster (no MetalLB or any other cloud-LB controller installed).
+Confirmed via `kubectl get svc` and `kubesentinel network-check`
+together: the `LoadBalancer` Service's `EXTERNAL-IP` genuinely stayed
+`<pending>`, matched exactly by the engine's own `load_balancer_ingress: []`
+plus its informational reasoning sentence, while `classification`
+correctly stayed `HEALTHY` throughout. The `NodePort` Service's real,
+API-server-allocated `nodePort` was read back via `PortMatchResult.node_port`,
+matching `kubectl get svc`'s own output exactly.
 
 ## Capability E: Capacity Planning & Autoscaling Advisor
 

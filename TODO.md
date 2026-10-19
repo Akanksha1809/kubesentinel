@@ -4099,4 +4099,76 @@ the "still deliberately not built" paragraph updated to say nothing is
 left deliberately unbuilt in this capability as of this closure).
 `docs/RBAC_AND_THREAT_MODEL.md` (new ClusterRole block; the
 "all seven Roles/ClusterRoles... 38 automated checks" count updated to
-eight/39; the found-live 404-handling bug recorded alongside it).
+39 checks; the found-live 404-handling bug recorded alongside it).
+
+## Milestone 39: Network engine Service-type awareness (NodePort/LoadBalancer) -- DONE
+
+Closes Capability D's own named gap in `docs/IMPLEMENTATION_STATUS.md`:
+"Service types / routing | Partial | ClusterIP routing... is the
+implemented path; `NodePort`/`LoadBalancer`/`ExternalName` type-specific
+routing is not separately modeled." See `docs/NETWORK_DIAGNOSTICS.md`
+§13 for the full design.
+
+**The key realization that kept this additive, not a rewrite**:
+`NodePort`/`LoadBalancer` are strict supersets of `ClusterIP` -- every
+existing check (selector match, EndpointSlice consistency, port
+resolution) already applies identically to all three. The only
+genuinely new state is each type's own extra field: `NodePort`'s
+auto-allocated node port, and `LoadBalancer`'s external address
+assignment. `ExternalName` needed zero new handling -- it has no
+selector/backend Pods, so it already, correctly, never appears as a
+selecting Service for any target Pod.
+
+**Added**:
+
+- `models/network.py` -- `PortMatchResult.node_port: int | None`
+  (`ServicePort.nodePort`, set only for `NodePort`/`LoadBalancer`);
+  `ServiceMatchResult.service_type: str` (always populated, "ClusterIP"
+  is Kubernetes' own default) and `.load_balancer_ingress: list[str]`
+  (real `status.loadBalancer.ingress[].ip`/`.hostname` values, only for
+  `LoadBalancer`; hostname preferred over IP when a real cloud
+  controller sets both).
+- `network/service_inventory.py::_match_one_service` -- reads
+  `svc.spec.type`/`svc.spec.ports[].node_port`/
+  `svc.status.load_balancer.ingress` off the same already-fetched
+  `V1Service` object it already had. Zero new cluster read, zero new
+  RBAC (Services were already fully read).
+- `network/analyzer.py` -- a selecting `LoadBalancer` Service with no
+  assigned ingress yet gets one informational sentence appended to
+  `NetworkFinding.reasoning`, in every classification branch, never a
+  `classification` change: in-cluster routing to the target Pod (what
+  `classification` actually answers) is unaffected by whether the
+  Service's *external* address has been assigned.
+
+**Tests**: 11 new unit tests (`test_network_service_inventory.py`: 7,
+`service_type`/`node_port`/`load_balancer_ingress` extraction across
+`ClusterIP`/`NodePort`/`LoadBalancer`; `test_network_analyzer.py`: 4,
+confirming the pending-LoadBalancer note survives every classification
+branch without changing it) -- `make_service()` (tests/unit/factories.py)
+and the analyzer test file's own `_service()` helper both gained new
+optional parameters, every pre-existing caller unaffected. Full
+regression suite: ruff clean, mypy clean, **976 unit tests passed**
+(965 + 11).
+
+**Live-verified against the real cluster, not just unit-tested**:
+applied a real Deployment with a real `LoadBalancer`-type Service and a
+real `NodePort`-type Service, both selecting it, to the actual
+`kind-kubesentinel` cluster (no MetalLB or any cloud-LB controller
+installed -- this lab's own permanent state, not a contrived gap).
+`kubectl get svc` confirmed the `LoadBalancer` Service's `EXTERNAL-IP`
+genuinely stayed `<pending>`; `kubesentinel network-check` independently
+reported `load_balancer_ingress: []` with the informational reasoning
+sentence present, while `classification` correctly stayed `HEALTHY`
+throughout -- the exact "pending external IP never implies broken
+in-cluster routing" behavior §13.2 describes, confirmed against real
+state rather than assumed. The `NodePort` Service's real,
+API-server-allocated `nodePort` (`32641` in this run) was read back
+correctly via `PortMatchResult.node_port`, matching `kubectl get svc`'s
+own output exactly. Cleaned up afterward; `kubectl get all -l
+kubesentinel.io/scenario` in `kubesentinel-lab` confirmed nothing left
+behind.
+
+**Documentation**: `docs/NETWORK_DIAGNOSTICS.md` (new §13).
+`docs/IMPLEMENTATION_STATUS.md` (Capability D's "Service types /
+routing" row updated from Partial to Implemented; a new "Live-verified
+again" paragraph added for this closure specifically).

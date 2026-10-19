@@ -16,6 +16,15 @@ NetworkPolicy's rules would, as written, restrict traffic -- see Section 2
 for why this is never phrased as a certainty), then HEALTHY. A target Pod
 that no Service selects at all has nothing to validate -- INCONCLUSIVE,
 not HEALTHY (that would imply something was checked and passed).
+
+A selecting Service's own `LoadBalancer` external-IP assignment (if
+pending) is appended to `reasoning` as informational evidence only --
+never a classification change. It answers a different question
+(external ingress readiness) from what `classification` itself answers
+(in-cluster Service routing to the target Pod), and the latter is
+unaffected by the former: a `LoadBalancer` Service still routes via its
+ClusterIP exactly like any other Service while its external address is
+still pending.
 """
 
 from __future__ import annotations
@@ -97,6 +106,22 @@ def analyze_network(
                 classification = NetworkFindingClassification.HEALTHY
                 names = ", ".join(s.service_name for s in selecting_services)
                 reasoning_parts.append(f"Selected by {names}, Ready, ports resolve, no applicable NetworkPolicy.")
+
+        # Informational only -- never changes `classification` above. A
+        # pending external IP/hostname is an external-ingress concern,
+        # orthogonal to the in-cluster Service routing this finding's own
+        # classification answers (which still works via the Service's
+        # ClusterIP regardless of whether its LoadBalancer has an external
+        # address yet).
+        pending_load_balancers = [
+            svc for svc in selecting_services if svc.service_type == "LoadBalancer" and not svc.load_balancer_ingress
+        ]
+        for svc in pending_load_balancers:
+            reasoning_parts.append(
+                f"Service '{svc.service_name}' is type LoadBalancer but has no assigned external "
+                "IP/hostname yet -- external access isn't ready, though in-cluster Service routing "
+                "to this Pod is unaffected."
+            )
 
     reasoning_parts.append(
         "This is evidence-based analysis of Kubernetes object state, not a confirmed end-to-end "

@@ -1,8 +1,14 @@
 """Builds the Service-side state the network engine needs: which Pods a
 Service's selector actually matches (computed independently, not inferred
 from endpoint counts), whether the real EndpointSlice controller output
-agrees, and whether each `targetPort` actually resolves against the
-matched Pods' declared container ports.
+agrees, whether each `targetPort` actually resolves against the matched
+Pods' declared container ports, and -- closing this engine's own
+previously-named "Service types / routing: Partial" gap -- the Service's
+own `type` and, for `LoadBalancer`, its real external ingress assignment.
+`NodePort`/`LoadBalancer` need no separate routing logic of their own:
+both are strict supersets of `ClusterIP` (the selector/EndpointSlice/port
+checks above already cover them identically), so this is additive
+visibility onto the existing checks, not a parallel code path.
 
 Read-only: only ever `list_namespaced_service`/`list_namespaced_pod` plus a
 raw-JSON EndpointSlice LIST (see `_list_endpointslices_raw`'s own
@@ -151,7 +157,15 @@ def _match_one_service(svc: V1Service, pods: list[V1Pod], endpointslices: list[d
         result = _resolve_target_port(target_port, representative_pod)
         result.service_port = svc_port.port
         result.service_port_name = svc_port.name
+        result.node_port = svc_port.node_port
         port_results.append(result)
+
+    service_type = svc.spec.type or "ClusterIP"
+    load_balancer_ingress: list[str] = []
+    if service_type == "LoadBalancer" and svc.status and svc.status.load_balancer and svc.status.load_balancer.ingress:
+        load_balancer_ingress = [
+            ingress.hostname or ingress.ip for ingress in svc.status.load_balancer.ingress if ingress.hostname or ingress.ip
+        ]
 
     return ServiceMatchResult(
         service_name=svc.metadata.name,
@@ -162,4 +176,6 @@ def _match_one_service(svc: V1Service, pods: list[V1Pod], endpointslices: list[d
         endpointslice_ready_count=ready_count,
         endpointslice_consistent=endpointslice_consistent,
         port_results=port_results,
+        service_type=service_type,
+        load_balancer_ingress=load_balancer_ingress,
     )
