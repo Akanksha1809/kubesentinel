@@ -191,6 +191,39 @@ gauge meant to reflect *current state* needs an explicit reconciliation against
 the source of truth on every process start, not just incremental deltas
 assumed to always start from zero.
 
+## Why `Incident.active_metric_category` exists as a field separate from
+`category`
+
+**Closed -- was a known limitation, named explicitly in TODO.md's Milestone-1
+list, item 4: "`incidents_active` gauge can drift if an incident's diagnosed
+category changes between open and resolve (decrement uses the category *at
+resolve time*, which may differ from the one used at increment time)."** A
+real, not theoretical, gap: `_open_new` incremented whichever category
+`_apply_diagnosis` computed at open; `_resolve`/`_supersede` decremented
+whichever category `incident.category` held at resolve time -- and nothing
+in between ever adjusted the gauge if diagnosis re-categorized an
+already-open incident as more evidence arrived (e.g. `CRASH_LOOP_BACKOFF` ->
+`OOM_KILLED` once a later observation's termination evidence revealed the
+real cause). The original category's slot never decremented (stuck "active"
+forever); the new category's slot would later decrement without this
+incident ever having incremented it.
+
+The fix tracks, on the `Incident` itself, which category label the gauge
+currently credits this incident's open slot to -- `active_metric_category`,
+kept in sync by `IncidentManager._rebalance_active_metric` on every
+`_open_new`/`_update_existing` call (dec the old label, inc the new one,
+only when they actually differ), and read back (never re-derived from
+`category`) by `_resolve`/`_supersede` when decrementing. `reconcile_metrics()`
+backfills this field for any incident persisted before it existed (defaults
+to `None`) -- without that backfill, the very first `_update_existing` call
+on an old row would see `None != category` and wrongly treat an unrelated
+observation as a fresh category change, double-counting the gauge instead of
+leaving it alone. Confirmed live against the real cluster: a Pod made to
+transition `CRASH_LOOP_BACKOFF` -> `ERR_IMAGE_PULL` while remaining the same
+open incident correctly showed the first category's gauge drop back to 0
+and the second category's gauge read exactly 1, via the real `/metrics`
+endpoint.
+
 ## Why `RemediationService.propose()` gets a dedicated lock instead of a
 broader locking scheme
 

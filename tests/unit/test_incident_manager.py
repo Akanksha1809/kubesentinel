@@ -221,6 +221,88 @@ def test_reconcile_metrics_excludes_resolved_incidents(manager):
     assert incidents_active.labels(category="CRASH_LOOP_BACKOFF")._value.get() == 0
 
 
+def test_category_change_while_open_rebalances_the_active_gauge(manager):
+    # Regression test for a real gauge-drift bug (TODO.md's Milestone-1
+    # known-limitations list, item 4): `_open_new` incremented whichever
+    # category was current at open; `_resolve` decremented whichever
+    # category was current at resolve. If diagnosis re-categorized an
+    # incident while it stayed open, the two didn't match -- the original
+    # category's slot got stuck "active" forever and the new category's
+    # slot would later decrement without this incident ever having
+    # incremented it.
+    # `incidents_active` is a process-wide Prometheus gauge, not reset
+    # between tests -- pin a known baseline first, the same pattern
+    # `test_reconcile_metrics_sets_active_gauge_from_persisted_open_incidents`
+    # above already uses, rather than assume a clean start.
+    incidents_active.labels(category="CRASH_LOOP_BACKOFF").set(0)
+    incidents_active.labels(category="OOM_KILLED").set(0)
+
+    ref = _ref("uid-rebalance-1")
+    crash_loop_cs = waiting_container_status(reason="CrashLoopBackOff", restart_count=5)
+    opened = manager.observe(ref, pod_evidence(make_pod(container_statuses=[crash_loop_cs])))
+    assert opened.category == "CRASH_LOOP_BACKOFF"
+    assert incidents_active.labels(category="CRASH_LOOP_BACKOFF")._value.get() == 1
+
+    recategorized = manager.observe(ref, _oom_evidence())  # same Pod, OOM evidence now present too
+    assert recategorized.incident_id == opened.incident_id
+    assert recategorized.category == "OOM_KILLED"
+
+    # The old category's slot must drop back to 0, not stay stuck at 1.
+    assert incidents_active.labels(category="CRASH_LOOP_BACKOFF")._value.get() == 0
+    # The new category's slot must show exactly the one incident now
+    # credited to it, not have gone negative from an unmatched dec() later.
+    assert incidents_active.labels(category="OOM_KILLED")._value.get() == 1
+    assert recategorized.active_metric_category == "OOM_KILLED"
+
+
+def test_resolving_after_a_category_change_decrements_the_category_it_is_actually_credited_under(manager):
+    incidents_active.labels(category="CRASH_LOOP_BACKOFF").set(0)
+    incidents_active.labels(category="OOM_KILLED").set(0)
+
+    ref = _ref("uid-rebalance-2")
+    crash_loop_cs = waiting_container_status(reason="CrashLoopBackOff", restart_count=5)
+    manager.observe(ref, pod_evidence(make_pod(container_statuses=[crash_loop_cs])))
+    manager.observe(ref, _oom_evidence())  # re-categorized to OOM_KILLED while still open
+
+    good_evidence = pod_evidence(make_pod(container_statuses=[running_container_status()]))
+    manager.observe(ref, good_evidence)
+    resolved = manager.observe(ref, good_evidence)  # second confirmation resolves it
+
+    assert resolved.status == IncidentStatus.RESOLVED
+    assert resolved.active_metric_category is None
+    # Must decrement OOM_KILLED (what the gauge was actually credited under
+    # after rebalancing) -- the pre-fix bug would have decremented
+    # CRASH_LOOP_BACKOFF a second time instead (already 0 after rebalance,
+    # so it would have gone negative) and left OOM_KILLED stuck at 1.
+    assert incidents_active.labels(category="OOM_KILLED")._value.get() == 0
+    assert incidents_active.labels(category="CRASH_LOOP_BACKOFF")._value.get() == 0
+
+
+def test_reconcile_metrics_backfills_active_metric_category_for_pre_existing_incidents(manager_with_clients):
+    # An incident persisted before `active_metric_category` existed loads
+    # with it defaulting to None. `reconcile_metrics()` must backfill it to
+    # match `category` (and persist that) before any later
+    # `_update_existing`/`_resolve` call runs against it -- otherwise
+    # `_rebalance_active_metric` would see `None != category` and wrongly
+    # treat an unrelated later observation as a fresh category change.
+    manager, repo, _clients = manager_with_clients
+    ref = _ref("uid-backfill-1")
+    bad_cs = waiting_container_status(reason="CrashLoopBackOff", restart_count=5)
+    opened = manager.observe(ref, pod_evidence(make_pod(container_statuses=[bad_cs])))
+    assert opened.active_metric_category == "CRASH_LOOP_BACKOFF"
+
+    # Simulate a row persisted before this field existed.
+    opened.active_metric_category = None
+    repo.save(opened)
+
+    incidents_active.labels(category="CRASH_LOOP_BACKOFF").set(0)
+    manager.reconcile_metrics()
+
+    backfilled = repo.get(opened.incident_id)
+    assert backfilled.active_metric_category == "CRASH_LOOP_BACKOFF"
+    assert incidents_active.labels(category="CRASH_LOOP_BACKOFF")._value.get() == 1
+
+
 class TestRecommendationCrossLink:
     """Milestone 1's own "stabilize the core" audit, item 3: an OOM_KILLED
     hypothesis cross-links back to an already-persisted MEMORY/DATA_QUALITY

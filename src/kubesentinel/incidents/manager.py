@@ -100,6 +100,16 @@ class IncidentManager:
         counts: dict[str, int] = {}
         for incident in open_incidents:
             counts[incident.category] = counts.get(incident.category, 0) + 1
+            if incident.active_metric_category != incident.category:
+                # Backfills `active_metric_category` for an incident
+                # persisted before that field existed (defaults to None),
+                # or whose category changed but didn't get saved before a
+                # crash -- either way, it must already match `category`
+                # before any new `_update_existing`/`_resolve` call runs
+                # against it, or `_rebalance_active_metric` would wrongly
+                # treat this as a fresh category change and double-count.
+                incident.active_metric_category = incident.category
+                self._repo.save(incident)
         for category, count in counts.items():
             incidents_active.labels(category=category).set(count)
 
@@ -156,7 +166,7 @@ class IncidentManager:
         incident.diagnosis_history.append(result)
         self._apply_diagnosis(incident, result)
         incidents_detected_total.labels(category=incident.category).inc()
-        incidents_active.labels(category=incident.category).inc()
+        self._rebalance_active_metric(incident)
         logger.info(
             "opened incident",
             extra={"incident_id": incident.incident_id, "resource": resource.name},
@@ -179,7 +189,33 @@ class IncidentManager:
         if materially_changed:
             incident.diagnosis_history.append(result)
         self._apply_diagnosis(incident, result)
+        self._rebalance_active_metric(incident)
         return incident
+
+    @staticmethod
+    def _rebalance_active_metric(incident: Incident) -> None:
+        """Keeps `incidents_active` in sync with `incident.category`, even
+        when diagnosis re-categorizes an already-open incident as more
+        evidence arrives (e.g. CRASH_LOOP_BACKOFF -> OOM_KILLED). Found
+        live: without this, `_open_new` incremented whatever category was
+        current at open, and `_resolve` decremented whatever category was
+        current at resolve -- if diagnosis changed category in between, the
+        gauge drifted: the original category's slot never decremented
+        (stuck "active" forever) and the new category's slot decremented
+        without this incident ever having incremented it.
+
+        Called on every open-or-still-open path (`_open_new`,
+        `_update_existing`), always comparing against
+        `active_metric_category` (what the gauge currently credits this
+        incident to), never against what it previously credited plus a
+        guess -- a no-op when the category hasn't actually changed."""
+        previous = incident.active_metric_category
+        if previous == incident.category:
+            return
+        if previous is not None:
+            incidents_active.labels(category=previous).dec()
+        incidents_active.labels(category=incident.category).inc()
+        incident.active_metric_category = incident.category
 
     def _apply_diagnosis(self, incident: Incident, result: DiagnosisResult) -> None:
         if result.top_hypothesis:
@@ -222,7 +258,17 @@ class IncidentManager:
         incident.resolved_at = now
         incident.recovery_duration_seconds = (now - incident.first_observed_at).total_seconds()
         incident.add_audit("incident_resolved", actor="observer")
-        incidents_active.labels(category=incident.category).dec()
+        # Decrement whichever category this incident was actually credited
+        # under (`active_metric_category`, kept in sync by
+        # `_rebalance_active_metric`), never `incident.category` directly --
+        # the two can differ if diagnosis re-categorized this incident while
+        # it was open, and decrementing the wrong label is exactly the
+        # gauge-drift bug this field exists to prevent. Falls back to
+        # `category` only for an incident persisted before this field
+        # existed and never rebalanced since (should already be backfilled
+        # by `reconcile_metrics` in practice).
+        incidents_active.labels(category=incident.active_metric_category or incident.category).dec()
+        incident.active_metric_category = None
         recovery_duration_seconds.labels(category=incident.category).observe(
             incident.recovery_duration_seconds
         )
@@ -318,7 +364,10 @@ class IncidentManager:
             replaced_by_deployment=replaced_by_deployment,
             reason="pod confirmed gone (live 404); owning Deployment observed healthy",
         )
-        incidents_active.labels(category=incident.category).dec()
+        # Same `active_metric_category`-not-`category` rule `_resolve` uses,
+        # and for the same reason -- see its own comment.
+        incidents_active.labels(category=incident.active_metric_category or incident.category).dec()
+        incident.active_metric_category = None
         logger.info(
             "superseded incident",
             extra={"incident_id": incident.incident_id, "replaced_by_deployment": replaced_by_deployment},

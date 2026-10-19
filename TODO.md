@@ -4851,3 +4851,102 @@ gap this project's own "named explicitly, not silently assumed covered"
 discipline exists to prevent from compounding silently. Full regression
 re-run as a sanity check even though no code changed: ruff clean, mypy
 clean, **1045 unit tests passed** (unchanged).
+
+## Milestone 49: `incidents_active` gauge drift on mid-incident re-categorization -- DONE
+
+Closes Milestone 1's own known-limitation item 4 (see that list, above):
+"`incidents_active` gauge can drift if an incident's diagnosed category
+changes between open and resolve (decrement uses the category *at resolve
+time*, which may differ from the one used at increment time)." Confirmed
+real, not theoretical: `_open_new` incremented whichever category
+`_apply_diagnosis` computed at open; `_resolve` (and a second,
+independent spot, `_supersede`, found while fixing this -- the stale-Pod-
+incident-reconciliation path shares the identical bug) decremented
+whichever category `incident.category` held at resolve/supersede time.
+Nothing in between ever adjusted the gauge when diagnosis re-categorized
+an already-open incident as more evidence arrived (e.g.
+`CRASH_LOOP_BACKOFF` -> `OOM_KILLED`). The original category's slot got
+stuck "active" forever; the new category's slot would later decrement
+without this incident ever having incremented it.
+
+**Added**: `models/incident.py::Incident.active_metric_category: str |
+None` -- the category label `incidents_active` currently credits this
+incident's open slot to, tracked separately from `category` precisely
+because the two can now diverge mid-incident.
+`incidents/manager.py::IncidentManager._rebalance_active_metric` (new,
+`@staticmethod`) -- compares `active_metric_category` against the
+freshly-computed `category`; a no-op when unchanged, otherwise decrements
+the old label, increments the new one, and updates the tracking field.
+Called from both `_open_new` (replacing its old direct `.inc()`) and
+`_update_existing` (new call, the actual behavior change). `_resolve` and
+`_supersede` both now decrement `incident.active_metric_category` (falling
+back to `category` only for an incident that somehow reached either
+without ever being rebalanced), then clear it to `None`.
+`reconcile_metrics()` now backfills `active_metric_category` to match
+`category` for every open incident it counts (persisting the change) --
+required so an incident persisted before this field existed (defaults to
+`None`) doesn't make the very next `_update_existing` call wrongly treat
+an unrelated observation as a fresh category change.
+
+**Tests**: 3 new unit tests in `test_incident_manager.py` --
+`test_category_change_while_open_rebalances_the_active_gauge` (the old
+category's slot drops back to 0, the new category's slot reads exactly
+1, not negative), `test_resolving_after_a_category_change_decrements_the_
+category_it_is_actually_credited_under` (resolve decrements the
+*current*, rebalanced category, not the one the incident originally
+opened under), `test_reconcile_metrics_backfills_active_metric_category_
+for_pre_existing_incidents` (a pre-migration row with the field at its
+default `None` gets backfilled and persisted before any later call could
+misread it). All three explicitly pin a known gauge baseline first
+(`incidents_active.labels(...).set(0)`) rather than assume a clean
+start -- caught live in this same pass: the first version of these tests
+passed in isolation but failed under the full suite, since
+`incidents_active` is a process-wide Prometheus gauge that an earlier
+test in the same run had already left at a nonzero value, exactly the
+cross-test-leakage pattern `test_decrements_the_active_incidents_gauge`
+already guards against. Every pre-existing test passed unchanged before
+any new one was added. Full regression: ruff clean, mypy clean, **1048
+unit tests passed** (1045 + 3), confirmed stable across repeated runs.
+
+**Live-verified against the real cluster**: ran the real FastAPI app
+(`uvicorn kubesentinel.api.app:app`) against a throwaway SQLite DB and
+the real `kind-kubesentinel` cluster. Created a bare Pod that crash-loops
+immediately (`CrashLoopBackOff`); confirmed via the real `/metrics`
+endpoint that `kubesentinel_incidents_active{category="CRASH_LOOP_BACKOFF"}
+== 1`. Patched the same Pod's image to a nonexistent tag (`image` is one
+of the few fields Kubernetes allows patching on a running Pod, so the
+Pod's UID -- and therefore the incident -- never changed) -- the
+container's `waiting.reason` flipped to `ErrImagePull`, and the real
+diagnosis engine re-categorized the same incident
+(confirmed via `/incidents`: one `incident_id` throughout) to
+`ERR_IMAGE_PULL`. `/metrics` then showed `CRASH_LOOP_BACKOFF` back to `0`
+and `ERR_IMAGE_PULL` at exactly `1` -- the precise rebalance this closure
+adds, against the real pipeline end to end (real watch -> real evidence
+extraction -> real diagnosis -> real `IncidentManager.observe()` -> real
+Prometheus registry), not just the unit-tested logic in isolation.
+Cleaned up the demo Pod, the throwaway server process, and its DB file
+afterward.
+
+**A separate, real observation found while live-verifying, deliberately
+not fixed here (out of scope for this gauge-drift closure, flagged for a
+follow-up)**: `incident.evidence` is append-only and uncapped short of
+`MAX_EVIDENCE_PER_INCIDENT` (200) -- every rule re-evaluates the *entire*
+accumulated history on every observation, not just the latest snapshot.
+Reverting the demo Pod's image back to a valid one, while it was still
+otherwise crash-looping, did **not** flip the diagnosis back to
+`CRASH_LOOP_BACKOFF`: the earlier `ErrImagePull`-shaped evidence entry
+was still sitting in the accumulated list, so `ImagePullRule` (ranked
+above `CrashLoopBackOffRule` in `DEFAULT_RULES`' own tiebreak order) kept
+matching it indefinitely, even though the Pod's *current* state no longer
+showed that reason at all. This is not the gauge-drift bug this milestone
+closes -- `_rebalance_active_metric` behaved correctly (a no-op, since
+`category` genuinely hadn't changed on that observation) -- but it is a
+real, separate, undocumented property: a diagnosis can get permanently
+"stuck" on a category whose underlying condition has since resolved,
+for as long as the incident stays open. Not found documented anywhere as
+a deliberate design choice (checked `docs/DIAGNOSTIC_RULES.md`,
+`docs/DESIGN_DECISIONS.md`, `docs/MASTER_ARCHITECTURE.md`).
+
+**Documentation**: `docs/DESIGN_DECISIONS.md` (new section, sibling to
+the existing `incidents_active`-reconciliation one, explaining the field,
+the rebalance, and the backfill).

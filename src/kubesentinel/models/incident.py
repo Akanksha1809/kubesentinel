@@ -80,6 +80,16 @@ class Incident(BaseModel):
     # Count of distinct observation windows merged into this incident record.
     occurrence_count: int = 1
 
+    # The category label `incidents_active` currently credits this incident's
+    # open slot to, or None while resolved/superseded (not currently counted).
+    # Tracked separately from `category` because diagnosis can re-categorize
+    # an already-open incident as more evidence arrives (e.g.
+    # CRASH_LOOP_BACKOFF -> OOM_KILLED) -- `incidents_active` must be
+    # decremented under whichever label it was actually incremented under,
+    # never re-derived from `category` at resolve time, or the gauge drifts.
+    # See incidents/manager.py::IncidentManager._rebalance_active_metric.
+    active_metric_category: str | None = None
+
     # Consecutive confirmed-healthy observations seen in a row. Resolution requires
     # this to reach a threshold (see incidents/manager.py), not just one healthy
     # snapshot -- a flaky workload can be briefly Ready between crashes. This is a
