@@ -216,6 +216,24 @@ def test_cannot_list_resourcequotas_outside_lab_namespace():
     assert kubectl_can_i("list", "resourcequotas", namespace="kube-system") is False
 
 
+def test_can_list_limitranges_in_lab_namespace(kubesentinel_sa_clients):
+    # Added for check_limit_range (docs/SCHEDULING_ANALYSIS.md's own
+    # named "no LimitRange" gap) -- LimitRange is namespaced, same Role
+    # as ResourceQuota above.
+    core, _, _, _ = kubesentinel_sa_clients
+    assert core.list_namespaced_limit_range(namespace=LAB_NAMESPACE, limit=1) is not None
+
+
+def test_cannot_patch_limitranges():
+    # Read-only Role: scheduling/analyzer.py only ever reads LimitRange
+    # min/max to check a hypothetical spec against it, never mutates one.
+    assert kubectl_can_i("patch", "limitranges", namespace=LAB_NAMESPACE) is False
+
+
+def test_cannot_list_limitranges_outside_lab_namespace():
+    assert kubectl_can_i("list", "limitranges", namespace="kube-system") is False
+
+
 # --- Network advisor Role (rbac/network-role.yaml): read-only, lab namespace only ---
 
 

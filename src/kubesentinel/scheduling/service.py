@@ -111,8 +111,8 @@ class SchedulingService:
 
     def analyze_hypothetical(self, namespace: str, raw_pod_spec: dict) -> SchedulingFinding:
         """Simulates whether a not-yet-created Pod spec would be admitted
-        (namespace ResourceQuota) and schedulable -- the only path where
-        the quota check is meaningful."""
+        (namespace ResourceQuota, LimitRange) and schedulable -- the only
+        path where either admission-time check is meaningful."""
         try:
             pod_spec = deserialize_pod_spec(raw_pod_spec)
         except Exception as exc:  # noqa: BLE001 - the deserializer raises various types for malformed input
@@ -126,6 +126,11 @@ class SchedulingService:
             except ApiException as exc:
                 logger.info("could not list ResourceQuota in %s, skipping quota check: %s", namespace, exc)
                 quotas = []
+            try:
+                limit_ranges = self._clients.core.list_namespaced_limit_range(namespace=namespace).items
+            except ApiException as exc:
+                logger.info("could not list LimitRange in %s, skipping LimitRange check: %s", namespace, exc)
+                limit_ranges = []
 
             finding = analyze_pod_scheduling(
                 pod_spec,
@@ -134,6 +139,7 @@ class SchedulingService:
                 pods=pods,
                 pod_uid=None,
                 quotas=quotas,
+                limit_ranges=limit_ranges,
                 check_quota=True,
             )
         except Exception:  # noqa: BLE001 - any failure here means "failed", not a finding

@@ -63,6 +63,12 @@ reason, computed from the actual Node/Pod objects):
   request -- this is simple, exact arithmetic (no scheduler internals to
   approximate), so it's evaluated for real rather than flagged
   inconclusive.
+- **Namespace LimitRange**: `core.list_namespaced_limit_range()`'s own
+  `type: Container` `min`/`max` bounds compared against each container's
+  own explicit `requests`/`limits` (cpu/memory) -- closes this section's
+  own previously-named "Admission constraints generally: Partial -- only
+  ResourceQuota; no LimitRange" gap. See Section 12 for exactly what's
+  modeled and what's deliberately not.
 - **Required pod affinity / anti-affinity**: `Pod.spec.affinity.
   podAffinity`/`podAntiAffinity`'s own
   `requiredDuringSchedulingIgnoredDuringExecution` terms (ANDed, per real
@@ -276,3 +282,62 @@ demo can only ever show "the one node passes or fails," never "fits node B
 but not node A." Worth a second, optional multi-node `kind-config` variant
 later if a true multi-node demo becomes valuable; not needed for the
 analysis logic to be correct or tested.
+
+## 12. LimitRange admission constraint
+
+Closes this doc's own named gap in Section 2: "Admission constraints
+generally: Partial -- only ResourceQuota; no LimitRange." Same
+admission-time-only framing as `NAMESPACE_QUOTA` -- gated by the same
+`check_quota` flag, meaningful only for a hypothetical spec
+(`POST /scheduling/simulate`), never a real, already-existing Pod
+(which already passed admission, or it wouldn't exist).
+
+### 12.1 What's checked
+
+For each `type: Container` item in every `V1LimitRange` in the
+namespace, each container's own explicit `requests`/`limits` (cpu,
+memory) is checked against that item's `min`/`max`. A request or limit
+below `min`, or above `max`, is a violation -- the exact admission
+rejection a real `LimitRanger` admission plugin would produce.
+
+### 12.2 What's deliberately not modeled, named explicitly
+
+- **`default`/`defaultRequest` injection.** A real admission controller
+  silently fills in a container's missing request/limit from the
+  LimitRange's own `default`/`defaultRequest` *before* checking it
+  against `min`/`max`. This engine checks only what the container
+  spec *explicitly* sets -- a container that specifies neither request
+  nor limit at all is never flagged here, even if its namespace has a
+  `min` it would otherwise need a default to satisfy. Re-deriving the
+  full defaulting algorithm to close this precisely would be a
+  meaningfully larger feature than "does an explicit value violate a
+  bound"; named here as a real v1 boundary, not silently assumed
+  covered.
+- **`type: Pod`** (LimitRange's own aggregate-across-containers bounds)
+  and **`type: PersistentVolumeClaim`** (storage request bounds) --
+  only `type: Container` is evaluated, the same "documented v1 scope,
+  not silently ignored" precedent `check_namespace_quota` already set
+  for its own `requests.cpu`/`requests.memory`-only scope (no
+  `limits.cpu`/`limits.memory`/object-count quotas either).
+- **`maxLimitRequestRatio`** -- not evaluated.
+
+### 12.3 RBAC
+
+`LimitRange` is namespaced, same as `ResourceQuota` -- added to the
+same existing `rbac/scheduling-role.yaml` Role rather than a new one.
+`get`/`list` only.
+
+### 12.4 Live-verified against the real cluster, both directions
+
+Applied a real `LimitRange` (`min: {cpu: 200m, memory: 64Mi}`,
+`max: {cpu: 2, memory: 1Gi}`) to the actual `kind-kubesentinel`
+cluster's `kubesentinel-lab` namespace. A real `POST
+/scheduling/simulate` call with a hypothetical container requesting
+`cpu: 50m` (below the real `min`) correctly returned
+`any_node_schedulable: false`, with `reasoning` naming the exact
+violation ("`limit-range-demo`: container 'app' requests.cpu=50 below
+min 200"). A second call with a container inside the real bounds
+(`cpu: 300m` request, `500m` limit) correctly returned
+`any_node_schedulable: true` with "within every LimitRange in this
+namespace" -- both directions confirmed against real cluster state,
+not asserted from one side only. Cleaned up afterward.

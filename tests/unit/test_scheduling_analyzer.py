@@ -266,3 +266,42 @@ class TestHypotheticalSpec:
         )
         finding = analyze_pod_scheduling(_pod_spec(cpu="100m"), [node], namespace="ns", check_quota=True, quotas=[quota])
         assert finding.any_node_schedulable is False
+
+    def test_evaluated_constraints_exclude_limit_range_by_default(self):
+        node = _node()
+        finding = analyze_pod_scheduling(_pod_spec(), [node], namespace="ns")
+        assert ConstraintType.LIMIT_RANGE not in finding.evaluated_constraints
+
+    def test_check_quota_true_includes_limit_range_in_evaluated(self):
+        node = _node()
+        finding = analyze_pod_scheduling(_pod_spec(), [node], namespace="ns", check_quota=True, limit_ranges=[])
+        assert ConstraintType.LIMIT_RANGE in finding.evaluated_constraints
+
+    def test_limit_range_blocks_hypothetical_even_when_nodes_fit(self):
+        from kubernetes.client import V1LimitRange, V1LimitRangeItem, V1LimitRangeSpec, V1ObjectMeta
+
+        node = _node()
+        limit_range = V1LimitRange(
+            metadata=V1ObjectMeta(name="tight-limits"),
+            spec=V1LimitRangeSpec(limits=[V1LimitRangeItem(type="Container", min={"cpu": "200m"})]),
+        )
+        finding = analyze_pod_scheduling(
+            _pod_spec(cpu="100m"), [node], namespace="ns", check_quota=True, limit_ranges=[limit_range]
+        )
+        assert finding.any_node_schedulable is False
+        assert "LimitRange" in finding.reasoning
+
+    def test_limit_range_never_checked_without_check_quota(self):
+        from kubernetes.client import V1LimitRange, V1LimitRangeItem, V1LimitRangeSpec, V1ObjectMeta
+
+        node = _node()
+        limit_range = V1LimitRange(
+            metadata=V1ObjectMeta(name="tight-limits"),
+            spec=V1LimitRangeSpec(limits=[V1LimitRangeItem(type="Container", min={"cpu": "200m"})]),
+        )
+        # limit_ranges passed but check_quota=False (the default) -- same
+        # "admission-time check is meaningless for a real, already-
+        # existing Pod" reasoning check_namespace_quota's own analogous
+        # test already establishes.
+        finding = analyze_pod_scheduling(_pod_spec(cpu="100m"), [node], namespace="ns", limit_ranges=[limit_range])
+        assert finding.any_node_schedulable is True

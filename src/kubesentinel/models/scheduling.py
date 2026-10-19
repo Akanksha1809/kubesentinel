@@ -30,6 +30,11 @@ class ConstraintType(str, Enum):
     NODE_SELECTOR = "NODE_SELECTOR"
     REQUIRED_NODE_AFFINITY = "REQUIRED_NODE_AFFINITY"
     NAMESPACE_QUOTA = "NAMESPACE_QUOTA"
+    # Closes docs/SCHEDULING_ANALYSIS.md's own named "Admission constraints
+    # generally: Partial -- only ResourceQuota; no LimitRange" gap. Same
+    # admission-time-only framing as NAMESPACE_QUOTA just above -- gated by
+    # the same `check_quota` flag, meaningful only for a hypothetical spec.
+    LIMIT_RANGE = "LIMIT_RANGE"
     # Added to close docs/SCHEDULING_ANALYSIS.md Section 2's own named
     # gap -- the same required-vs-preferred split REQUIRED_NODE_AFFINITY/
     # PREFERRED_NODE_AFFINITY already established, applied here too.
@@ -60,6 +65,7 @@ EVALUATED_CONSTRAINT_TYPES = frozenset(
         ConstraintType.NODE_SELECTOR,
         ConstraintType.REQUIRED_NODE_AFFINITY,
         ConstraintType.NAMESPACE_QUOTA,
+        ConstraintType.LIMIT_RANGE,
         ConstraintType.REQUIRED_POD_AFFINITY,
         ConstraintType.REQUIRED_POD_ANTI_AFFINITY,
         ConstraintType.TOPOLOGY_SPREAD,

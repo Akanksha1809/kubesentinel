@@ -26,6 +26,7 @@ from kubesentinel.models.scheduling import (
     SchedulingFinding,
 )
 from kubesentinel.scheduling.constraints import (
+    check_limit_range,
     check_namespace_quota,
     check_node_selector,
     check_pod_affinity,
@@ -112,6 +113,7 @@ def analyze_pod_scheduling(
     pods: list[PodLabelSummary] | None = None,
     pod_uid: str | None = None,
     quotas: list | None = None,
+    limit_ranges: list | None = None,
     check_quota: bool = False,
     pod_name: str | None = None,
     workload_kind: str | None = None,
@@ -126,6 +128,8 @@ def analyze_pod_scheduling(
     Pod is Pending. It's only meaningful for a *hypothetical* spec, where
     it answers "would creating this Pod even be admitted" ahead of
     "would it then be schedulable." See docs/SCHEDULING_ANALYSIS.md.
+    `limit_ranges` is gated by the same flag, same reasoning -- LimitRange
+    is also an admission-time-only check.
 
     `pods` is every other already-scheduled Pod's (namespace, node,
     labels), for pod affinity/anti-affinity/topology-spread -- pass
@@ -141,11 +145,15 @@ def analyze_pod_scheduling(
     node_selector = pod_spec.node_selector
     affinity = pod_spec.affinity
 
-    evaluated = sorted(EVALUATED_CONSTRAINT_TYPES - {ConstraintType.NAMESPACE_QUOTA}, key=lambda c: c.value)
+    evaluated = sorted(
+        EVALUATED_CONSTRAINT_TYPES - {ConstraintType.NAMESPACE_QUOTA, ConstraintType.LIMIT_RANGE}, key=lambda c: c.value
+    )
     quota_result = None
+    limit_range_result = None
     if check_quota:
         quota_result = check_namespace_quota(pod_request, quotas or [])
-        evaluated = [ConstraintType.NAMESPACE_QUOTA, *evaluated]
+        limit_range_result = check_limit_range(pod_spec.containers, limit_ranges or [])
+        evaluated = [ConstraintType.NAMESPACE_QUOTA, ConstraintType.LIMIT_RANGE, *evaluated]
 
     node_results: list[NodeFitResult] = []
     for node in nodes:
@@ -189,12 +197,16 @@ def analyze_pod_scheduling(
     any_node_schedulable = any(r.schedulable for r in node_results)
     if check_quota and quota_result is not None and not quota_result.satisfied:
         any_node_schedulable = False
+    if check_quota and limit_range_result is not None and not limit_range_result.satisfied:
+        any_node_schedulable = False
 
     unevaluated = _detect_unevaluated_constraints(pod_spec)
 
     reasoning_parts = []
     if check_quota and quota_result is not None:
         reasoning_parts.append(f"Namespace quota: {quota_result.reasoning}.")
+    if check_quota and limit_range_result is not None:
+        reasoning_parts.append(f"LimitRange: {limit_range_result.reasoning}.")
     if any_node_schedulable:
         schedulable_nodes = [r.node_name for r in node_results if r.schedulable]
         reasoning_parts.append(f"Schedulable on: {', '.join(schedulable_nodes)}.")

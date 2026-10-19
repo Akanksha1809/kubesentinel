@@ -96,9 +96,13 @@ project's RBAC principle (above) exists to avoid.
 ```yaml
 # rbac/scheduling-role.yaml (current, in full) -- a fourth, separate Role,
 # for the scheduling & placement advisor (Milestone 3 of the platform spec)
+#
+# limitranges grown onto this same Role later, for check_limit_range
+# (docs/SCHEDULING_ANALYSIS.md §12) -- LimitRange is namespaced, same
+# as ResourceQuota above, so this stays one Role, not a new one.
 rules:
   - apiGroups: [""]
-    resources: ["resourcequotas"]
+    resources: ["resourcequotas", "limitranges"]
     verbs: ["get", "list"]
 ```
 
@@ -107,13 +111,13 @@ Nodes are already granted by `clusterrole.yaml` (Capability A's
 `NodeConditionRule`), Pods/Deployments by `role.yaml`, ReplicaSets by
 `remediation-role.yaml` (reused here for the same owner-reference
 resolution `optimization/ownership.py` already does) -- the scheduling
-advisor's own package needs *zero* new grants for any of that. The one
-genuinely new permission is `resourcequotas`, used only for the
-namespace-quota check in a *hypothetical*-spec simulation (`POST
-/scheduling/simulate`) -- never checked for a real, already-existing Pod,
-since a real Pod already passed admission and quota can't explain why it's
-Pending. `get`/`list` only, same "one-shot snapshot, never a watch" reason
-as `optimization-role.yaml`.
+advisor's own package needs *zero* new grants for any of that. The two
+genuinely new permissions are `resourcequotas`/`limitranges`, used only
+for the namespace-quota/LimitRange checks in a *hypothetical*-spec
+simulation (`POST /scheduling/simulate`) -- never checked for a real,
+already-existing Pod, since a real Pod already passed admission and
+neither can explain why it's Pending. `get`/`list` only, same
+"one-shot snapshot, never a watch" reason as `optimization-role.yaml`.
 
 ```yaml
 # rbac/network-role.yaml (current, in full) -- a fifth, separate Role,
@@ -271,7 +275,7 @@ rules:
 
 This entire boundary -- every Role/ClusterRole in this project, plus
 the kube-system exception, both directions -- is now covered by
-`tests/integration/test_rbac_boundary.py`: 41 automated checks (39
+`tests/integration/test_rbac_boundary.py`: 44 automated checks (42
 passing in an environment without metrics-server installed, like this
 project's own lab; 2 honestly skip rather than fail, since
 "metrics-server isn't reachable" is not an RBAC question either way).

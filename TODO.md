@@ -4254,3 +4254,81 @@ row updated from Not built to Implemented, with the detective-vs-
 preventive correction named explicitly). `docs/RBAC_AND_THREAT_MODEL.md`
 (the existing `security-clusterrole.yaml` block grown in place rather
 than duplicated; the "39 automated checks" count updated to 41).
+
+## Milestone 41: LimitRange admission constraint for the scheduling advisor -- DONE
+
+Closes Capability C's own named gap in `docs/SCHEDULING_ANALYSIS.md`
+and `docs/IMPLEMENTATION_STATUS.md`: "Admission constraints generally |
+Partial | only ResourceQuota; no LimitRange." Same admission-time-only
+framing `NAMESPACE_QUOTA` already established -- gated by the same
+`check_quota` flag, meaningful only for a hypothetical spec
+(`POST /scheduling/simulate`), never a real, already-existing Pod.
+
+**Added**:
+
+- `models/scheduling.py` -- `ConstraintType.LIMIT_RANGE`, added to
+  `EVALUATED_CONSTRAINT_TYPES` alongside `NAMESPACE_QUOTA`.
+- `scheduling/constraints.py::check_limit_range(containers,
+  limit_ranges)` -- for each `type: Container` item in every
+  `V1LimitRange` in the namespace, checks each container's own
+  *explicit* `requests`/`limits` (cpu, memory) against that item's
+  `min`/`max`. Takes the raw container list rather than
+  `check_namespace_quota`'s own aggregated `ResourceQuantity`, since
+  LimitRange is inherently per-container. Three things named explicitly
+  as not modeled, same "documented v1 scope, not silently ignored"
+  discipline `check_namespace_quota` already set: `default`/
+  `defaultRequest` injection (a container specifying neither request
+  nor limit is never flagged just because a `min` exists -- re-deriving
+  the real admission controller's own defaulting algorithm would be a
+  meaningfully larger feature), `type: Pod`/`type: PersistentVolumeClaim`
+  items, and `maxLimitRequestRatio`.
+- `scheduling/analyzer.py::analyze_pod_scheduling` -- a new
+  `limit_ranges` parameter, gated by the same `check_quota` flag as
+  `quotas`; both now factor into `any_node_schedulable` and
+  `reasoning` independently.
+- `scheduling/service.py::analyze_hypothetical` -- fetches
+  `list_namespaced_limit_range()` alongside the existing ResourceQuota
+  fetch, same degrade-don't-abort pattern (a failed LIST logs and
+  continues with an empty list rather than crashing the whole
+  simulation).
+- `rbac/scheduling-role.yaml` -- grown with `limitranges` `get`/`list`,
+  not a new Role: LimitRange is namespaced, same as ResourceQuota
+  already granted there.
+
+**Tests**: 16 new unit tests (`test_scheduling_constraints.py`: 9,
+the function's own min/max/request/limit/Pod-type/no-explicit-value
+cases; `test_scheduling_analyzer.py`: 4, the `check_quota` gating and
+blocking wiring; `test_scheduling_service.py`: 3, the real fetch call
+and its degrade-on-failure path) plus 3 new integration tests
+(`test_can_list_limitranges_in_lab_namespace`/
+`test_cannot_patch_limitranges`/`test_cannot_list_limitranges_outside_lab_namespace`)
+in `tests/integration/test_rbac_boundary.py`. Full regression suite:
+ruff clean, mypy clean, **1001 unit tests passed** (985 + 16).
+`tests/integration/test_rbac_boundary.py`: 44 total (42 passed, 2
+skipped -- the same metrics-dependent pair already honestly skipping),
+run live against the real cluster.
+
+**Live-verified against the real cluster, both directions, not just
+unit-tested**: applied a real `LimitRange` (`min: {cpu: 200m, memory:
+64Mi}`, `max: {cpu: 2, memory: 1Gi}`) to the actual `kind-kubesentinel`
+cluster's `kubesentinel-lab` namespace. A real `POST
+/scheduling/simulate` call with a hypothetical container requesting
+`cpu: 50m` (below the real `min`) correctly returned
+`any_node_schedulable: false`, naming the exact violation in
+`reasoning` ("`limit-range-demo`: container 'app' requests.cpu=50
+below min 200"); a second call with a container inside the real bounds
+(`300m` request, `500m` limit) correctly returned `true` with "within
+every LimitRange in this namespace." Both directions confirmed against
+real cluster state, not asserted from one side only. Cleaned up
+afterward.
+
+**Documentation**: `docs/SCHEDULING_ANALYSIS.md` (Section 2's own gap
+line updated; new §12 with the full design, what's modeled, what
+isn't, and the live-verification writeup).
+`docs/IMPLEMENTATION_STATUS.md` (Capability C's "Admission constraints
+generally" row updated from Partial to Implemented-for-LimitRange,
+custom-admission-webhook awareness named as the one remaining,
+structurally-unclosable item; a new "Live-verified again" paragraph
+added). `docs/RBAC_AND_THREAT_MODEL.md` (the existing
+`scheduling-role.yaml` block grown in place; the "41 automated checks"
+count updated to 44).

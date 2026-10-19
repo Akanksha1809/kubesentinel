@@ -37,7 +37,7 @@ def _pending_pod(name="pending-pod", cpu="100m", memory="64Mi"):
     return pod
 
 
-def _clients(pod=None, nodes=(), replicasets=(), quotas=(), pod_exists=True):
+def _clients(pod=None, nodes=(), replicasets=(), quotas=(), limit_ranges=(), pod_exists=True):
     clients = MagicMock()
     if pod_exists:
         clients.core.read_namespaced_pod.return_value = pod or _pending_pod()
@@ -47,6 +47,7 @@ def _clients(pod=None, nodes=(), replicasets=(), quotas=(), pod_exists=True):
     clients.core.list_pod_for_all_namespaces.return_value = _items([])
     clients.apps.list_namespaced_replica_set.return_value = _items(list(replicasets))
     clients.core.list_namespaced_resource_quota.return_value = _items(list(quotas))
+    clients.core.list_namespaced_limit_range.return_value = _items(list(limit_ranges))
     return clients
 
 
@@ -102,6 +103,16 @@ class TestAnalyzePod:
         assert ConstraintType.NAMESPACE_QUOTA not in finding.evaluated_constraints
         clients.core.list_namespaced_resource_quota.assert_not_called()
 
+    def test_limit_range_never_checked_for_a_real_pod(self, repo):
+        node = make_node(name="node-1", allocatable={"cpu": "2", "memory": "4Gi"})
+        clients = _clients(nodes=[node])
+        service = SchedulingService(clients, repo)
+
+        finding = service.analyze_pod(NAMESPACE, "pending-pod")
+
+        assert ConstraintType.LIMIT_RANGE not in finding.evaluated_constraints
+        clients.core.list_namespaced_limit_range.assert_not_called()
+
 
 class TestAnalyzeHypothetical:
     def test_hypothetical_spec_is_analyzed_and_persisted(self, repo):
@@ -125,6 +136,28 @@ class TestAnalyzeHypothetical:
         service.analyze_hypothetical(NAMESPACE, raw_spec)
 
         clients.core.list_namespaced_resource_quota.assert_called_once()
+
+    def test_limit_range_is_checked_for_a_hypothetical_spec(self, repo):
+        node = make_node(name="node-1", allocatable={"cpu": "2", "memory": "4Gi"})
+        clients = _clients(nodes=[node])
+        service = SchedulingService(clients, repo)
+        raw_spec = {"containers": [{"name": "app", "resources": {"requests": {"cpu": "100m", "memory": "64Mi"}}}]}
+
+        finding = service.analyze_hypothetical(NAMESPACE, raw_spec)
+
+        clients.core.list_namespaced_limit_range.assert_called_once()
+        assert ConstraintType.LIMIT_RANGE in finding.evaluated_constraints
+
+    def test_limit_range_list_failure_degrades_rather_than_crashes(self, repo):
+        node = make_node(name="node-1", allocatable={"cpu": "2", "memory": "4Gi"})
+        clients = _clients(nodes=[node])
+        clients.core.list_namespaced_limit_range.side_effect = ApiException(status=403, reason="Forbidden")
+        service = SchedulingService(clients, repo)
+        raw_spec = {"containers": [{"name": "app", "resources": {"requests": {"cpu": "100m", "memory": "64Mi"}}}]}
+
+        finding = service.analyze_hypothetical(NAMESPACE, raw_spec)
+
+        assert finding.any_node_schedulable is True
 
 
 class TestGetAndList:

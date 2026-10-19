@@ -200,6 +200,80 @@ def check_namespace_quota(pod_request: ResourceQuantity, quotas: list) -> Constr
     )
 
 
+def check_limit_range(containers: list, limit_ranges: list) -> ConstraintResult:
+    """`containers` is the raw `pod_spec.containers` list (needs per-
+    container detail, unlike `check_namespace_quota`'s own aggregated
+    `ResourceQuantity`); `limit_ranges` is the raw list of `V1LimitRange`
+    objects for the namespace (may be empty). Same admission-time-only
+    framing as `check_namespace_quota` just above -- only meaningful for
+    a hypothetical spec, gated by the same `check_quota` flag in
+    `analyzer.py`.
+
+    Only `type: Container` limit items are checked -- `type: Pod`'s own
+    aggregate-across-containers bounds, and `type: PersistentVolumeClaim`'s
+    storage bounds, are a documented v1 scope, not silently ignored (see
+    docs/SCHEDULING_ANALYSIS.md). Only an *explicitly set* container
+    request/limit is checked against `min`/`max`: `default`/
+    `defaultRequest` injection (what a real admission controller would
+    silently fill in for a container that specifies neither) is not
+    modeled -- a container relying on that injection to satisfy a `min`
+    is not flagged here, another documented v1 simplification, not
+    silently assumed covered. `maxLimitRequestRatio` is not evaluated."""
+    if not limit_ranges:
+        return ConstraintResult(
+            constraint_type=ConstraintType.LIMIT_RANGE, satisfied=True, reasoning="no LimitRange in this namespace"
+        )
+
+    violations: list[str] = []
+    for limit_range in limit_ranges:
+        items = (limit_range.spec.limits if limit_range.spec else None) or []
+        for item in items:
+            if item.type != "Container":
+                continue
+            min_values = item.min or {}
+            max_values = item.max or {}
+            for container in containers or []:
+                resources = container.resources
+                field_values = {
+                    "requests": (resources.requests if resources else None) or {},
+                    "limits": (resources.limits if resources else None) or {},
+                }
+                for field_name, values in field_values.items():
+                    for resource_key, parse in (("cpu", parse_cpu_to_millicores), ("memory", parse_memory_to_bytes)):
+                        if resource_key not in values:
+                            continue
+                        try:
+                            value = parse(values[resource_key])
+                        except QuantityParseError:
+                            continue
+                        if resource_key in min_values:
+                            try:
+                                min_value = parse(min_values[resource_key])
+                            except QuantityParseError:
+                                min_value = None
+                            if min_value is not None and value < min_value:
+                                violations.append(
+                                    f"{limit_range.metadata.name}: container '{container.name}' "
+                                    f"{field_name}.{resource_key}={value} below min {min_value}"
+                                )
+                        if resource_key in max_values:
+                            try:
+                                max_value = parse(max_values[resource_key])
+                            except QuantityParseError:
+                                max_value = None
+                            if max_value is not None and value > max_value:
+                                violations.append(
+                                    f"{limit_range.metadata.name}: container '{container.name}' "
+                                    f"{field_name}.{resource_key}={value} above max {max_value}"
+                                )
+
+    if violations:
+        return ConstraintResult(constraint_type=ConstraintType.LIMIT_RANGE, satisfied=False, reasoning="; ".join(violations))
+    return ConstraintResult(
+        constraint_type=ConstraintType.LIMIT_RANGE, satisfied=True, reasoning="within every LimitRange in this namespace"
+    )
+
+
 def check_required_node_affinity(affinity, node: NodeSnapshot) -> ConstraintResult:
     """`affinity` is the raw `pod.spec.affinity` (may be None). Only
     `nodeAffinity.requiredDuringSchedulingIgnoredDuringExecution` is

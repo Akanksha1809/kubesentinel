@@ -18,6 +18,11 @@
 # "get"/"list" only, never "watch" -- this engine takes a one-shot
 # inventory snapshot per analysis call, the same as the optimization
 # engine, and for the same reason (see rbac/optimization-role.yaml).
+#
+# LimitRange added later (docs/SCHEDULING_ANALYSIS.md's own named
+# "Admission constraints generally: Partial -- only ResourceQuota; no
+# LimitRange" gap) -- LimitRange is namespaced, same as ResourceQuota,
+# so this stays one Role, not a new one.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -25,5 +30,5 @@ metadata:
   namespace: kubesentinel-lab
 rules:
   - apiGroups: [""]
-    resources: ["resourcequotas"]
+    resources: ["resourcequotas", "limitranges"]
     verbs: ["get", "list"]

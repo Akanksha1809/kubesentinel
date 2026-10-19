@@ -1,7 +1,11 @@
 from kubernetes.client import (
     V1Affinity,
+    V1Container,
     V1LabelSelector,
     V1LabelSelectorRequirement,
+    V1LimitRange,
+    V1LimitRangeItem,
+    V1LimitRangeSpec,
     V1NodeAffinity,
     V1NodeSelector,
     V1NodeSelectorRequirement,
@@ -12,6 +16,7 @@ from kubernetes.client import (
     V1PodAntiAffinity,
     V1ResourceQuota,
     V1ResourceQuotaStatus,
+    V1ResourceRequirements,
     V1Toleration,
     V1TopologySpreadConstraint,
 )
@@ -19,6 +24,7 @@ from kubernetes.client import (
 from kubesentinel.models.optimization import ResourceQuantity
 from kubesentinel.models.scheduling import ConstraintType, NodeSnapshot, NodeTaint, PodLabelSummary
 from kubesentinel.scheduling.constraints import (
+    check_limit_range,
     check_namespace_quota,
     check_node_selector,
     check_pod_affinity,
@@ -256,6 +262,73 @@ class TestNamespaceQuota:
         result = check_namespace_quota(ResourceQuantity(cpu_millicores=500, memory_bytes=None), [quota])
         assert result.satisfied is False
         assert "compute-quota" in result.reasoning
+
+
+def _limit_range(name="limits", min_values=None, max_values=None, item_type="Container"):
+    return V1LimitRange(
+        metadata=V1ObjectMeta(name=name),
+        spec=V1LimitRangeSpec(limits=[V1LimitRangeItem(type=item_type, min=min_values, max=max_values)]),
+    )
+
+
+def _container(name="app", requests=None, limits=None):
+    return V1Container(name=name, resources=V1ResourceRequirements(requests=requests, limits=limits))
+
+
+class TestLimitRange:
+    def test_no_limit_ranges_is_satisfied(self):
+        result = check_limit_range([_container()], [])
+        assert result.satisfied is True
+
+    def test_request_within_min_max_is_satisfied(self):
+        lr = _limit_range(min_values={"cpu": "100m"}, max_values={"cpu": "1"})
+        result = check_limit_range([_container(requests={"cpu": "500m"})], [lr])
+        assert result.satisfied is True
+
+    def test_request_below_min_fails(self):
+        lr = _limit_range(min_values={"cpu": "100m"})
+        result = check_limit_range([_container(requests={"cpu": "50m"})], [lr])
+        assert result.satisfied is False
+        assert "below min" in result.reasoning
+
+    def test_request_above_max_fails(self):
+        lr = _limit_range(max_values={"cpu": "1"})
+        result = check_limit_range([_container(requests={"cpu": "2"})], [lr])
+        assert result.satisfied is False
+        assert "above max" in result.reasoning
+
+    def test_limit_above_max_fails(self):
+        lr = _limit_range(max_values={"memory": "512Mi"})
+        result = check_limit_range([_container(limits={"memory": "1Gi"})], [lr])
+        assert result.satisfied is False
+        assert "limits.memory" in result.reasoning
+
+    def test_limit_below_min_fails(self):
+        lr = _limit_range(min_values={"memory": "64Mi"})
+        result = check_limit_range([_container(limits={"memory": "32Mi"})], [lr])
+        assert result.satisfied is False
+        assert "limits.memory" in result.reasoning
+
+    def test_container_with_no_explicit_value_is_not_flagged(self):
+        # default/defaultRequest injection is not modeled -- a container
+        # that specifies neither request nor limit is never flagged just
+        # because a min/max exists, since this function never fabricates
+        # the value a real admission controller would inject.
+        lr = _limit_range(min_values={"cpu": "100m"})
+        result = check_limit_range([_container()], [lr])
+        assert result.satisfied is True
+
+    def test_pod_type_limit_range_item_is_not_evaluated(self):
+        lr = _limit_range(min_values={"cpu": "1"}, item_type="Pod")
+        result = check_limit_range([_container(requests={"cpu": "50m"})], [lr])
+        assert result.satisfied is True
+
+    def test_multiple_violations_all_named_in_reasoning(self):
+        lr = _limit_range(min_values={"cpu": "100m", "memory": "64Mi"})
+        result = check_limit_range([_container(requests={"cpu": "10m", "memory": "10Mi"})], [lr])
+        assert result.satisfied is False
+        assert "requests.cpu" in result.reasoning
+        assert "requests.memory" in result.reasoning
 
 
 class TestLabelSelectorMatches:

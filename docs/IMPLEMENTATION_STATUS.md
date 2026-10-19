@@ -158,7 +158,7 @@ constraint against every Node for a real or hypothetical Pod spec),
 | Unschedulable Node conditions | Implemented | `NodeSnapshot.ready`/`unschedulable` -- a cordoned or not-Ready Node is never schedulable, before any constraint is even checked |
 | Pod priority / preemption | **Not built** | explicitly out of v1 scope (real preemption victim-selection is well beyond "explain and simulate") |
 | Namespace quotas | Implemented, hypothetical-spec only | `NAMESPACE_QUOTA` -- deliberately **not** checked for a real, already-existing Pod (it already passed admission, so quota can't explain its Pending state); only meaningful for `POST /scheduling/simulate`'s hypothetical path, and the code enforces that distinction rather than checking it unconditionally |
-| Admission constraints generally | Partial | only ResourceQuota; no LimitRange, no custom admission webhook awareness |
+| Admission constraints generally | **Implemented for LimitRange** (closed as later, separate follow-up work; was "Partial -- only ResourceQuota; no LimitRange" at the original audit), still **Partial** for custom admission webhooks | `LIMIT_RANGE` -- each container's explicit requests/limits checked against every `type: Container` LimitRange item's `min`/`max` in the namespace, same hypothetical-spec-only framing as `NAMESPACE_QUOTA` just above. `default`/`defaultRequest` injection is deliberately not modeled (a container specifying neither is never flagged just because a `min` exists); `type: Pod`/`type: PersistentVolumeClaim` items and `maxLimitRequestRatio` are not evaluated -- all named explicitly, not silently ignored. No custom admission webhook awareness remains out of scope (this project has no way to introspect a third-party webhook's own logic). See `docs/SCHEDULING_ANALYSIS.md` §12. |
 | Explain blocking constraints | Implemented | per-node, per-constraint `ConstraintResult` with real arithmetic/labels in `reasoning`, not a generic message |
 | Hard vs. soft constraints distinguished | Implemented | `PreferNoSchedule`/preferred node affinity never set `satisfied=False`; the finding's `unevaluated_constraints` list is itself the hard/soft-equivalent "evaluated vs. detected" distinction for the constraints this engine doesn't score |
 | Observed vs. inferred evidence separated | Implemented | a real Pod's `scheduler_message` (the scheduler's own words) is carried alongside this engine's own independent math -- never conflated, both shown |
@@ -202,6 +202,15 @@ confirmed via real node allocatable/requested numbers read live (4000m CPU,
 Pods at analysis time), not mocked. A live integration test
 (`tests/integration/test_scheduling_live.py`) patches the HTTP transport
 itself and confirms a full `analyze_pod()` pass issues only `GET`.
+
+**Live-verified again for the LimitRange closure above**: applied a real
+`LimitRange` (`min: {cpu: 200m, memory: 64Mi}`, `max: {cpu: 2, memory:
+1Gi}`) to the real `kubesentinel-lab` namespace. A real `POST
+/scheduling/simulate` call with a container requesting `cpu: 50m` (below
+the real `min`) correctly returned `any_node_schedulable: false`, naming
+the exact violation; a second call with a container inside the real
+bounds correctly returned `true` -- both directions confirmed against
+real cluster state. Cleaned up afterward.
 
 ## Capability D: Kubernetes Network Troubleshooting Engine
 
