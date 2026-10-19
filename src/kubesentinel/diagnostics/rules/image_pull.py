@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from kubesentinel.models.diagnosis import Confidence, Hypothesis, ReasonCode
 from kubesentinel.models.evidence import Evidence, EvidenceKind
-from kubesentinel.diagnostics.rules.base import DiagnosticRule
+from kubesentinel.diagnostics.rules.base import DiagnosticRule, latest_by_source_field
 
 _REASON_MAP = {
     "ImagePullBackOff": ReasonCode.IMAGE_PULL_BACKOFF,
@@ -23,11 +23,13 @@ class ImagePullRule(DiagnosticRule):
 
     def evaluate(self, evidence: list[Evidence]) -> list[Hypothesis]:
         hypotheses: list[Hypothesis] = []
-        waiting_states = [
-            e
-            for e in evidence
-            if e.kind == EvidenceKind.CONTAINER_STATE and e.data.get("waiting_reason") in _REASON_MAP
-        ]
+        # Only each container's *latest* waiting state, never a stale one --
+        # found live: a container that moved on from ErrImagePull to a
+        # different waiting reason (e.g. CrashLoopBackOff, once the image
+        # was fixed) must stop being reported here, not keep matching an
+        # old observation forever (see latest_by_source_field's docstring).
+        current_states = latest_by_source_field(evidence, EvidenceKind.CONTAINER_STATE)
+        waiting_states = [e for e in current_states if e.data.get("waiting_reason") in _REASON_MAP]
 
         for ev in waiting_states:
             reason = ev.data["waiting_reason"]

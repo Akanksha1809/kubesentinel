@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from kubesentinel.models.diagnosis import Confidence, Hypothesis, ReasonCode
 from kubesentinel.models.evidence import Evidence, EvidenceKind
-from kubesentinel.diagnostics.rules.base import DiagnosticRule
+from kubesentinel.diagnostics.rules.base import DiagnosticRule, latest_by_source_field
 
 _BAD_WAITING_REASONS = {"CreateContainerConfigError", "CreateContainerError"}
 
@@ -23,11 +23,11 @@ class MissingConfigReferenceRule(DiagnosticRule):
 
     def evaluate(self, evidence: list[Evidence]) -> list[Hypothesis]:
         hypotheses: list[Hypothesis] = []
-        waiting_states = [
-            e
-            for e in evidence
-            if e.kind == EvidenceKind.CONTAINER_STATE and e.data.get("waiting_reason") in _BAD_WAITING_REASONS
-        ]
+        # Only each container's *latest* waiting state -- see
+        # latest_by_source_field's docstring for why a stale, superseded
+        # observation must not keep matching forever.
+        current_states = latest_by_source_field(evidence, EvidenceKind.CONTAINER_STATE)
+        waiting_states = [e for e in current_states if e.data.get("waiting_reason") in _BAD_WAITING_REASONS]
 
         for ev in waiting_states:
             container = ev.data.get("container")

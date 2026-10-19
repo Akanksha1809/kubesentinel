@@ -189,6 +189,64 @@ claim is. If the runtime had reported the explicit `OOMKilled` reason, `OOM_KILL
 would be HIGH and would rank first (registration order in `engine.DEFAULT_RULES` puts
 `OOMKilledRule` before `CrashLoopBackOffRule` as the tiebreak for equal confidence).
 
+## Why several rules filter evidence down to "latest per field" before matching
+
+`IncidentManager` accumulates every observation's evidence into one growing
+list (`incident.evidence`), never superseding an older observation of the
+same field when a newer one arrives -- deliberate, since some rules
+genuinely need that full history (`UnsatisfiedReplicasRule`'s sustained-
+deficit timing across repeated `status.replicas` snapshots, in
+`deployment.py`, is the one that does). But a rule whose own question is
+"is this CURRENTLY true" must not scan that entire history for "any
+matching entry, ever" -- found live: an incident that genuinely transitioned
+`CrashLoopBackOff -> ErrImagePull` (the Pod's image was fixed mid-crash-
+loop, no other change) stayed misdiagnosed as `CrashLoopBackOff`, because
+nothing told the rule that its own earlier match had been superseded by a
+later, different observation of the exact same field.
+
+Closed with `diagnostics/rules/base.py::latest_by_source_field(evidence,
+kind)` -- one entry per distinct `source_field` of a given `EvidenceKind`,
+whichever is latest in `evidence`'s own append order (always chronological).
+`ImagePullRule`, `MissingConfigReferenceRule`, `OOMKilledRule`, and
+`CrashLoopBackOffRule`'s own waiting-state selector (above) all call this
+first now, before applying their own match condition -- each of their
+triggers is keyed off `CONTAINER_STATE`/`CONTAINER_TERMINATION` evidence
+whose `source_field` already identifies one specific container's one
+specific field (`containerStatuses[app].state.waiting`,
+`...lastState.terminated`, etc.), so "latest per `source_field`" is exactly
+"the current value of that field." `POD_CONDITION`/`DEPLOYMENT_STATUS`/
+`NODE_CONDITION`/`PVC_STATUS`/`ENDPOINTSLICE_STATE` evidence is unaffected
+(every rule reading them already either reads only the latest entry itself,
+per container, such as `ServiceSelectorMismatchRule`'s `snapshots[-1]`, or
+(the `UnsatisfiedReplicasRule` case) deliberately needs the full history).
+`EVENT` evidence is also untouched -- its `source_field` is a constant
+(`"event"`, not a per-occurrence key), so distinct Events correctly keep
+coexisting rather than collapsing to the most recent one.
+
+Live-verified against the real cluster against the exact scenario found:
+`CrashLoopBackOff -> ErrImagePull -> CrashLoopBackOff` (patching a real
+Pod's image to a bad tag, then back) on the same, continuously-open
+incident. Before this fix, the final observation would have stayed
+diagnosed `ERR_IMAGE_PULL`; confirmed it now correctly reports
+`CRASH_LOOP_BACKOFF` again, via the real `/incidents` endpoint.
+
+**A narrower, bounded, self-correcting case deliberately not chased
+further**: during the brief window where a container is caught mid-restart
+(`state.terminated` with the generic reason `Error`, between exiting and
+actually restarting), there is briefly no current `.state.waiting` entry
+of *any* kind for that container at all -- if a watch event happens to land
+in that exact window, a rule could still match the previous observation's
+now-stale `.state.waiting` entry, since nothing newer with that same
+`source_field` exists yet to supersede it. This resolves itself on the very
+next observation once the container settles into its new waiting state
+(which does supersede the stale entry via the matching `source_field`) --
+confirmed in the live reproduction above, where this exact mid-restart
+state occurred and self-corrected within one more observation. A batch-
+level (group-by-`observed_at`-per-container) redesign could close this
+narrower residual case too, at meaningfully higher risk to the shared
+evidence model for a transient inconsistency bounded to a single
+observation cycle -- not done here.
+
 ## Not yet implemented (deliberately deferred -- see TODO.md)
 
 DNS/connectivity failures. The original spec qualifies this one ("when the available

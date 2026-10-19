@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from kubesentinel.models.diagnosis import Confidence, Hypothesis, ReasonCode
 from kubesentinel.models.evidence import Evidence, EvidenceKind
-from kubesentinel.diagnostics.rules.base import DiagnosticRule
+from kubesentinel.diagnostics.rules.base import DiagnosticRule, latest_by_source_field
 
 _SIGKILL_EXIT_CODE = 137
 _MIN_RESTARTS_FOR_INFERRED_OOM = 2
@@ -30,7 +30,15 @@ class OOMKilledRule(DiagnosticRule):
 
     def evaluate(self, evidence: list[Evidence]) -> list[Hypothesis]:
         hypotheses: list[Hypothesis] = []
-        terminations = [e for e in evidence if e.kind == EvidenceKind.CONTAINER_TERMINATION]
+        # Only each container's *latest* `.state.terminated`/`.lastState.terminated`
+        # observation, never a stale one -- found live: without this, a
+        # container OOM-killed once stays diagnosed OOM_KILLED forever,
+        # even once it's crashing for a completely different, unrelated
+        # reason (see latest_by_source_field's docstring). The two source
+        # fields (current vs. previous termination) stay distinct slots,
+        # so a container currently terminated and one only previously
+        # terminated are never conflated.
+        terminations = latest_by_source_field(evidence, EvidenceKind.CONTAINER_TERMINATION)
 
         for ev in terminations:
             reason = ev.data.get("terminated_reason") or ev.data.get("last_terminated_reason")

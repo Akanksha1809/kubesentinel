@@ -4950,3 +4950,88 @@ a deliberate design choice (checked `docs/DIAGNOSTIC_RULES.md`,
 **Documentation**: `docs/DESIGN_DECISIONS.md` (new section, sibling to
 the existing `incidents_active`-reconciliation one, explaining the field,
 the rebalance, and the backfill).
+
+## Milestone 50: A diagnosis can get permanently stuck on stale evidence -- DONE
+
+Closes the real, separate observation flagged (not fixed) at the end of
+Milestone 49: `IncidentManager` accumulates every observation's evidence
+into one growing list, never superseding an older observation of the same
+field -- so a rule whose own question is "is this CURRENTLY true" could
+scan the *entire* history for "any matching entry, ever" rather than just
+the latest one, and a container that moved on from one failure reason to
+another (or recovered, within the same still-unhealthy incident) kept
+matching its own stale evidence indefinitely.
+
+**Why evidence accumulates at all, confirmed before touching anything**:
+deliberate, not an oversight -- `UnsatisfiedReplicasRule`
+(`diagnostics/rules/deployment.py`) genuinely needs the full history,
+measuring how long a ready-replica deficit has persisted *across repeated
+observations* (`span = deficits[-1].observed_at - deficits[0].observed_at`)
+before treating it as more than a normal rollout still catching up. A
+blanket "supersede on write" fix at the `IncidentManager` level would have
+silently broken that rule's own sustained-deficit confidence logic --
+checked every other rule's own evidence usage first (`service.py`'s
+`snapshots[-1]`, `crash_loop.py`'s `terminations_by_container` dict
+comprehension) to confirm each already treats "latest" as authoritative
+for its own slot, or genuinely needs history, before deciding where the
+fix actually belonged.
+
+**The fix, scoped to exactly the rules whose own semantics are "current
+state," not "ever observed"**: new
+`diagnostics/rules/base.py::latest_by_source_field(evidence, kind)` --
+one entry per distinct `source_field` of a given `EvidenceKind`, whichever
+is latest in `evidence`'s own append order. Applied in `ImagePullRule`,
+`MissingConfigReferenceRule`, `OOMKilledRule`, and
+`CrashLoopBackOffRule`'s waiting-state selector -- each keyed off
+`CONTAINER_STATE`/`CONTAINER_TERMINATION` evidence whose `source_field`
+already identifies one specific container's one specific field, so
+"latest per `source_field`" is exactly "the current value of that field."
+`UnsatisfiedReplicasRule` and every other rule already using "latest
+wins" semantics of its own are untouched. `EVENT` evidence is untouched
+too -- its `source_field` is a constant (`"event"`), so distinct Events
+correctly keep coexisting.
+
+**Tests**: 6 new unit tests in `test_diagnostic_rules.py` --
+`test_image_pull_rule_ignores_a_superseded_waiting_state`,
+`test_image_pull_rule_fires_once_not_twice_across_two_matching_observations`,
+`test_missing_config_reference_rule_ignores_a_superseded_waiting_state`,
+`test_crash_loop_rule_fires_once_not_twice_across_two_matching_observations`,
+`test_oom_killed_rule_ignores_a_superseded_termination` (the exact
+scenario found: OOM-killed once, then crashing for a completely unrelated
+later reason, must not stay diagnosed `OOM_KILLED`),
+`test_oom_killed_rule_still_fires_across_repeated_confirmations`. Each
+test concatenates two observations' worth of evidence for the same
+container, exactly mirroring `incident.evidence` after two real
+`observe()` calls. One test's first draft used a transition to a healthy
+`Running` state, which turned out to be unreachable via the real pipeline
+(healthy observations never get merged into `incident.evidence` at all --
+see `IncidentManager.observe`) and was corrected to a realistic
+unhealthy-to-different-unhealthy transition instead. Every pre-existing
+test passed unchanged before any new one was added. Full regression: ruff
+clean, mypy clean, **1054 unit tests passed** (1048 + 6).
+
+**Live-verified against the real cluster**: reproduced the exact round
+trip -- a real Pod patched `CrashLoopBackOff -> ErrImagePull -> CrashLoopBackOff`
+(image set to a bad tag, then back to the original), same continuously-
+open incident throughout (confirmed by `incident_id`). Before this fix,
+the final observation would have stayed diagnosed `ERR_IMAGE_PULL`;
+confirmed via the real `/incidents` endpoint that it now correctly reports
+`CRASH_LOOP_BACKOFF` again, and via `/metrics` that
+`incidents_active{category="CRASH_LOOP_BACKOFF"}` is back to `1` and
+`ERR_IMAGE_PULL` back to `0` -- Milestone 49's own rebalance fix and this
+one composing correctly together on the same real transition.
+
+**A narrower, bounded, self-correcting case named explicitly, not
+chased**: a container caught mid-restart (`state.terminated`, reason
+`Error`) briefly has no current `.state.waiting` entry of any kind, so a
+watch event landing in that exact window could still match a now-stale
+waiting-state entry until the next observation supersedes it. Self-
+corrects within one more observation cycle (confirmed in the live
+reproduction above, where this exact mid-restart state occurred along the
+way) -- a batch-level redesign could close this too, at meaningfully
+higher risk to the shared evidence model for a transient inconsistency
+bounded to a single cycle. Not done here.
+
+**Documentation**: `docs/DIAGNOSTIC_RULES.md` (new section explaining why
+evidence accumulates, which rules needed the fix and why, which didn't,
+and the narrower residual case named above).

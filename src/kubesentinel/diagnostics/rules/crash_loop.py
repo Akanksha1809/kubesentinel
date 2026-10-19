@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from kubesentinel.models.diagnosis import Confidence, Hypothesis, ReasonCode
 from kubesentinel.models.evidence import Evidence, EvidenceKind
-from kubesentinel.diagnostics.rules.base import DiagnosticRule
+from kubesentinel.diagnostics.rules.base import DiagnosticRule, latest_by_source_field
 
 
 class CrashLoopBackOffRule(DiagnosticRule):
@@ -20,12 +20,13 @@ class CrashLoopBackOffRule(DiagnosticRule):
 
     def evaluate(self, evidence: list[Evidence]) -> list[Hypothesis]:
         hypotheses: list[Hypothesis] = []
-        waiting_states = [
-            e
-            for e in evidence
-            if e.kind == EvidenceKind.CONTAINER_STATE
-            and e.data.get("waiting_reason") == "CrashLoopBackOff"
-        ]
+        # Only each container's *latest* waiting state -- without this, a
+        # container that was CrashLoopBackOff several observations ago but
+        # has since moved on to something else (or recovered) would still
+        # produce a duplicate hypothesis per stale observation (see
+        # latest_by_source_field's docstring).
+        current_states = latest_by_source_field(evidence, EvidenceKind.CONTAINER_STATE)
+        waiting_states = [e for e in current_states if e.data.get("waiting_reason") == "CrashLoopBackOff"]
 
         terminations_by_container = {
             e.data.get("container"): e
