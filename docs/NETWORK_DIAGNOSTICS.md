@@ -665,3 +665,89 @@ reasoning sentence present, while `classification` stayed `HEALTHY`
 `NodePort` Service's real, API-server-allocated `nodePort` (`32641` in
 this run) was correctly read back via `PortMatchResult.node_port`,
 matching `kubectl get svc`'s own output exactly.
+
+## 14. Error-handling granularity, and joining the shared evidence-completeness vocabulary
+
+`docs/EVIDENCE_COMPLETENESS.md` named this engine's own gap explicitly
+when three other capabilities' models first adopted a shared
+`EvidenceCompleteness`/`warnings` vocabulary: `analyze_pod` was
+genuinely all-or-nothing -- `check_dns_health`/
+`build_service_match_results`/`build_applicable_policies` were called
+directly, no individual sub-read wrapped in its own `try`/`except`, so
+any single failure aborted the whole analysis (one outer `except
+Exception`, surfaced as a 503) rather than degrading. `NetworkFinding`
+had nowhere to attach a partial-failure signal until that granularity
+changed. Closed here, additively -- see `docs/EVIDENCE_COMPLETENESS.md`
+§5 for the full design; this section covers what it means for this
+engine specifically.
+
+### 14.1 The fatal/degradable split applied to `analyze_pod`
+
+The same judgment `scheduling/service.py` already applies to its own
+ResourceQuota/LimitRange reads (admission-time-only, genuinely
+optional) versus its Node/Pod reads (foundational, correctly fatal):
+
+- **Stays fatal**: the target Pod read itself (`PodNotFoundError`), and
+  `build_service_match_results` -- the core Service/Pod/EndpointSlice
+  evidence this finding is actually *about*. Either failing leaves
+  nothing meaningful to report, so `analyze_pod` still aborts (a 503,
+  unchanged).
+- **Now degradable**: ReplicaSet listing (used only for owner
+  resolution, feeding `related_incident_ids`) and
+  `build_applicable_policies` (NetworkPolicy evaluation). Each is now
+  individually wrapped in `try`/`except ApiException`; on failure,
+  `analyze_pod` degrades to `owner = None` / `applicable_policies = []`
+  respectively, appends a reason to a local `warnings: list[str]`, and
+  continues rather than aborting.
+
+### 14.2 A second, more subtle instance of the same gap, found while wiring this up
+
+`check_dns_health` already caught `ApiException` on each of its own
+three sub-reads (the coredns Deployment, the kube-dns Service, its
+EndpointSlices) and degraded to `DnsHealthResult(healthy=False, ...)`
+internally -- it never propagated a failure up to `analyze_pod` at all.
+But `healthy=False` alone conflates two different claims: "DNS is
+confirmed down" and "the read itself failed, so I couldn't tell." A
+403 reading the coredns Deployment produced a confident-looking
+`DNS_UNHEALTHY` finding, indistinguishable from a genuine outage.
+
+Fixed with a new `DnsHealthResult.check_succeeded: bool = True` field,
+set to `False` on each of the three failure branches in
+`network/dns_health.py` -- `healthy` itself is never touched, so the
+pre-existing classification behavior and its own test suite are
+unchanged. `analyze_pod` now checks this flag and, when `False`,
+appends `dns_health.reasoning` to the same `warnings` list rather than
+silently trusting a health verdict it didn't compute itself. The
+`classification` still reports `DNS_UNHEALTHY` in that case -- this
+function has no independent way to second-guess the result -- but the
+finding's `warnings`/`evidence_completeness` now tell a caller the
+difference between "DNS is actually down" and "I couldn't check."
+
+### 14.3 `NetworkFinding` now carries the shared vocabulary
+
+`models/network.py::NetworkFinding` now inherits
+`EvidenceCompletenessMixin` (`warnings: list[str]`,
+`evidence_completeness: EvidenceCompleteness`, both additive, no
+existing field renamed or removed). `analyzer.py::analyze_network`
+gained a `warnings: list[str] | None` parameter, threaded through from
+`service.py::analyze_pod`'s own collected list; it sets
+`evidence_completeness = DEGRADED if warnings else COMPLETE` on the
+returned finding. `warnings` never changes `classification` -- the
+same non-negotiable separation Section 13.2 already establishes for
+the LoadBalancer-pending note: evidence completeness and the
+diagnostic verdict are reported alongside each other, never folded
+into one signal.
+
+### 14.4 Live-verified against the real cluster
+
+Ran `kubesentinel network-check` against a real throwaway Pod on the
+actual `kind-kubesentinel` cluster with no RBAC denied: confirmed
+`evidence_completeness: COMPLETE`, `warnings: []`, and
+`dns_health.check_succeeded: true` for the no-failure path -- matching
+the pre-existing, unaffected happy path exactly. The three new failure
+paths (ReplicaSet listing denied, NetworkPolicy listing denied, a DNS
+sub-read failing) are each covered by a unit test with a real
+`ApiException(403)` rather than reproduced by revoking this project's
+own real RBAC mid-session on a shared cluster -- the same deliberate
+choice `docs/EVIDENCE_COMPLETENESS.md` §7 already documents for the
+other three retrofitted models.

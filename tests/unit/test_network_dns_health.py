@@ -99,3 +99,39 @@ class TestDnsHealth:
 
         assert result.healthy is False
         assert "could not read" in result.reasoning
+
+    def test_deployment_read_failure_sets_check_succeeded_false(self):
+        # Distinct from a *confirmed* problem: healthy=False alone can't
+        # tell a caller whether DNS is really down or this just couldn't
+        # check -- check_succeeded is the field that does.
+        clients = _clients(deployment_error=ApiException(status=403, reason="Forbidden"))
+
+        result = check_dns_health(clients)
+
+        assert result.check_succeeded is False
+
+    def test_service_read_failure_sets_check_succeeded_false(self):
+        clients = _clients(service_error=ApiException(status=403, reason="Forbidden"))
+
+        result = check_dns_health(clients)
+
+        assert result.check_succeeded is False
+
+    def test_endpointslice_read_failure_sets_check_succeeded_false(self):
+        clients = _clients()
+        clients.discovery.list_namespaced_endpoint_slice.side_effect = ApiException(status=403, reason="Forbidden")
+
+        result = check_dns_health(clients)
+
+        assert result.check_succeeded is False
+
+    def test_a_confirmed_problem_leaves_check_succeeded_true(self):
+        # Zero ready endpoints is a real, confirmed finding -- every read
+        # succeeded, the data itself just shows a real problem. Must not
+        # be conflated with a read failure.
+        clients = _clients(endpoint_ready_count=0)
+
+        result = check_dns_health(clients)
+
+        assert result.healthy is False
+        assert result.check_succeeded is True

@@ -22,7 +22,7 @@ version before this was decided:
 | B (optimization) | `AnalysisRunSummary` | `metrics_available: bool` + `warning: str \| None` (singular) |
 | F (security) | `SecurityAuditResult` | `warnings: list[str]` (a list, no completeness verdict alongside it) |
 | C (scheduling) | `SchedulingFinding` | nothing -- a sub-read failure was logged, never surfaced |
-| D (network) | `NetworkFinding` | nothing -- and structurally can't be, today (§5) |
+| D (network) | `NetworkFinding` | nothing, and structurally couldn't be without first changing `analyze_pod`'s own error-handling granularity -- closed as a later, separate follow-up (§7) |
 | A (troubleshooting) | `Hypothesis` | `confidence` (HIGH/MEDIUM/LOW/INCONCLUSIVE) -- a different question (how sure is this diagnosis), not covered by this decision |
 | E (capacity) | reuses B's `AnalysisRunSummary` | same as B |
 
@@ -55,23 +55,25 @@ against:
   least one sub-read failed or fell back -- `warnings` says which.
 - **`UNKNOWN`**: no meaningful result could be produced at all (the
   relevant backend was entirely unreachable, not just one sub-read
-  among several). Not exercised by this round's three retrofits (§4) --
-  each of them always produces *some* usable result even when degraded,
-  so `UNKNOWN` never actually applies to the whole run for any of
-  them. Named here as a real state this vocabulary supports, not one
-  this round happened to need.
+  among several). Not exercised by any of the four retrofits (§4/§7) --
+  each of them always produces *some* usable result even when degraded
+  (even `NetworkFinding`'s own DNS-check-failure case still produces a
+  full, meaningful finding for everything Service/port/policy-related),
+  so `UNKNOWN` never actually applies to the whole run for any of them.
+  Named here as a real state this vocabulary supports, not one these
+  retrofits happened to need.
 - **`NOT_APPLICABLE`**: this check's own precondition doesn't hold for
-  the target at all. Also not exercised by this round -- a run-level
-  result (an entire `analyze()`/`audit()` pass) is never itself "not
-  applicable," only a specific per-target check within it could be
-  (e.g. a CPU-throttling check on a container with no CPU limit set).
-  `UsageSummary.throttled`'s own existing `bool | None` tri-state
-  already covers exactly that narrower case well; deliberately not
-  retrofitted onto this enum in this round (§5).
+  the target at all. Also not exercised -- a run-level result (an
+  entire `analyze()`/`audit()` pass, or one Pod's own finding) is never
+  itself "not applicable," only a specific per-target check within it
+  could be (e.g. a CPU-throttling check on a container with no CPU
+  limit set). `UsageSummary.throttled`'s own existing `bool | None`
+  tri-state already covers exactly that narrower case well;
+  deliberately not retrofitted onto this enum here (§6).
 
 Named explicitly: two of the four states exist in the shared
-vocabulary for future, narrower, per-target uses -- not because this
-round's own three retrofits happened to produce them.
+vocabulary for future, narrower, per-target uses -- not because these
+retrofits happened to produce them.
 
 ## 3. Why additive, never a rename
 
@@ -85,10 +87,9 @@ say the same thing, never a breaking change to a persisted field or an
 existing caller. Confirmed: the full pre-existing unit test suite
 passed unchanged before any new test was added for this closure.
 
-## 4. What this round actually touches
+## 4. The first three models retrofitted
 
-Three models, each already having an analogous ad hoc mechanism to
-retrofit onto:
+Each already had an analogous ad hoc mechanism to retrofit onto:
 
 - **`AnalysisRunSummary`** (`optimization/service.py::analyze()`):
   `evidence_completeness = DEGRADED if not metrics_available else
@@ -119,20 +120,68 @@ retrofit onto:
   quota/LimitRange at all (by design -- an already-admitted Pod already
   passed both), so it always passes no warnings and stays `COMPLETE`.
 
-## 5. What this round deliberately does not touch, named explicitly
+## 5. `NetworkFinding`, closed as a later, separate follow-up
 
-- **`NetworkFinding`**. `network/service.py::analyze_pod` is genuinely
-  all-or-nothing: `check_dns_health`/`build_service_match_results`/
-  `build_applicable_policies` are called directly, with no individual
-  `try`/`except` around any of them -- any failure aborts the entire
-  analysis (caught by one outer `except Exception`, surfaced as a 503),
-  unlike optimization's/security's/scheduling's own inventory builders,
-  which each wrap individual sub-reads and degrade one at a time.
-  Retrofitting a `warnings` field here would require first changing
-  this engine's own error-handling granularity -- a larger, riskier
-  behavioral change than "add a field," and out of this round's scope.
-  Named here so a future pass doesn't have to rediscover why
-  `NetworkFinding` is the odd one out.
+`network/service.py::analyze_pod` was genuinely all-or-nothing:
+`check_dns_health`/`build_service_match_results`/`build_applicable_policies`
+were called directly, with no individual `try`/`except` around any of
+them -- any failure aborted the entire analysis (caught by one outer
+`except Exception`, surfaced as a 503), unlike optimization's/security's/
+scheduling's own inventory builders, which each wrap individual
+sub-reads and degrade one at a time.
+
+### 5.1 Which sub-reads are genuinely degradable, and which stay fatal
+
+Not every sub-read is an equally good degrade candidate -- the same
+judgment `scheduling/service.py` already makes for its own
+ResourceQuota/LimitRange reads (admission-time-only, genuinely
+optional) versus its core Node/Pod reads (foundational, correctly
+fatal):
+
+- **Stay fatal**: the Pod read itself, and
+  `build_service_match_results` (the core Service/Pod/EndpointSlice
+  evidence this finding is actually *about*). There is no meaningful
+  finding left to produce without either.
+- **Now degradable**: ReplicaSet listing (only used for owner
+  resolution, feeding `related_incident_ids`) and
+  `build_applicable_policies` (NetworkPolicy evaluation) -- each wrapped
+  in its own `try`/`except ApiException`, degrading to `None`/`[]`
+  respectively and appending a warning, rather than aborting the whole
+  analysis.
+
+### 5.2 A second, more subtle instance of the same gap, found in the process
+
+`check_dns_health` already caught `ApiException` on each of its own
+three sub-reads (the coredns Deployment, the kube-dns Service, its
+EndpointSlices) and degraded to `DnsHealthResult(healthy=False, ...)`
+-- it never propagated a failure up to `analyze_pod` at all. But
+`healthy=False` alone conflates two different claims: "DNS is
+confirmed down" and "I couldn't tell, the read itself failed." A 403
+reading the coredns Deployment would have produced a confident-looking
+`DNS_UNHEALTHY` finding, indistinguishable from a genuine outage.
+
+Fixed by adding `DnsHealthResult.check_succeeded: bool = True`, set to
+`False` on each of the three failure branches (never touching
+`healthy`, so the pre-existing classification behavior and its own
+test suite are unchanged). `analyze_pod` now checks this flag and
+appends `dns_health.reasoning` to the finding's own `warnings` whenever
+it is `False` -- the classification still says `DNS_UNHEALTHY` (this
+function has no way to second-guess a health result it didn't compute
+itself), but the finding's `warnings`/`evidence_completeness` now tell
+a caller the difference.
+
+### 5.3 What's still fatal, and why that's correct
+
+`PodNotFoundError` and any failure inside
+`build_service_match_results` still abort the whole analysis (a 503,
+unchanged). This is not an oversight left over from before this
+closure -- it is the same "is this sub-read foundational or genuinely
+optional" judgment applied correctly: a finding with no idea which
+Services even exist, or whether the target Pod exists at all, has
+nothing left to report.
+
+## 6. What remains deliberately untouched, named explicitly
+
 - **`Hypothesis.confidence`** (troubleshooting engine). A genuinely
   different question -- "how sure is this diagnosis," not "did every
   sub-read succeed" -- already well-served by its own four-level scale
@@ -144,16 +193,23 @@ retrofit onto:
   no-signal-available). Could theoretically be re-expressed using
   `EvidenceCompleteness` (`NOT_APPLICABLE` when no CPU limit is set at
   all, `UNKNOWN` when Prometheus is unreachable, otherwise a real
-  boolean) -- not done in this round, since the existing scheme already
-  works correctly and retrofitting it would touch a persisted,
-  already-tested field for no behavioral gain, purely cosmetic
-  consistency. A real candidate for a later pass if this vocabulary
-  ever needs a second, narrower-than-run-level example.
+  boolean) -- not done here, since the existing scheme already works
+  correctly and retrofitting it would touch a persisted, already-tested
+  field for no behavioral gain, purely cosmetic consistency. A real
+  candidate for a later pass if this vocabulary ever needs a second,
+  narrower-than-run-level example.
 
-## 6. Live-verified against the real cluster, all three retrofitted models
+With `NetworkFinding` now included, all four models this project's
+docs ever pointed to as having "invented their own version" of this
+idea (§1's own table) share the one vocabulary. The two items above
+are the only remaining named exceptions, and both are deliberate, not
+oversights.
 
-Ran `kubesentinel optimize`, `kubesentinel security-audit --json`, and
-a real `POST /scheduling/simulate` call against the actual
+## 7. Live-verified against the real cluster, all four retrofitted models
+
+Ran `kubesentinel optimize`, `kubesentinel security-audit --json`, a
+real `POST /scheduling/simulate` call, and `kubesentinel network-check`
+against a real throwaway Pod -- all against the actual
 `kind-kubesentinel` cluster. Confirmed:
 
 - Optimization: `evidence_completeness: DEGRADED`, `warnings:
@@ -164,9 +220,15 @@ a real `POST /scheduling/simulate` call against the actual
 - Security: `evidence_completeness: COMPLETE`, `warnings: []` -- every
   RBAC-gated read this engine makes succeeded on this real cluster.
 - Scheduling: `evidence_completeness: COMPLETE`, `warnings: []` for a
-  real simulation with no sub-read failures. The failure path (a
-  ResourceQuota/LimitRange read denied by RBAC) is covered by unit
-  tests with a real `ApiException(403)`, not reproduced by revoking
-  this project's own real RBAC mid-session -- deliberately avoided as
-  an unnecessarily risky action on a shared cluster for a path already
-  provably correct under test.
+  real simulation with no sub-read failures.
+- Network: `evidence_completeness: COMPLETE`, `warnings: []`,
+  `dns_health.check_succeeded: true` for a real Pod with no sub-read
+  failures.
+
+Every failure path across all four models (a ResourceQuota/LimitRange
+read denied by RBAC, a ReplicaSet/NetworkPolicy listing denied, a DNS
+sub-read failing) is covered by unit tests with a real
+`ApiException(403)`, not reproduced by revoking this project's own
+real RBAC mid-session -- deliberately avoided as an unnecessarily
+risky action on a shared cluster for paths already provably correct
+under test.

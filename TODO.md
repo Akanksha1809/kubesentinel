@@ -4578,3 +4578,85 @@ section's own matching paragraph rewritten the same way; the stale
 "Capabilities A, B, and C" metrics claim corrected to all six).
 `README.md` (new doc-index entry; the stale "14-rule catalog" mention
 for Capability F corrected to 15).
+
+## Milestone 45: NetworkFinding joins the shared evidence-completeness vocabulary -- DONE
+
+Closes the one gap Milestone 44 named explicitly rather than silently
+assumed covered: `network/service.py::analyze_pod` was genuinely
+all-or-nothing, so `NetworkFinding` had nowhere to attach a
+partial-failure signal until that engine's own error-handling
+granularity changed first. See `docs/EVIDENCE_COMPLETENESS.md` §5 and
+`docs/NETWORK_DIAGNOSTICS.md` §14 for the full design; this entry is
+the changelog.
+
+**The granularity change**: the same fatal/degradable judgment
+`scheduling/service.py` already applies to its own ResourceQuota/
+LimitRange reads versus its Node/Pod reads. **Stays fatal**: the
+target Pod read, and `build_service_match_results` -- the core
+Service/Pod/EndpointSlice evidence the finding is actually about;
+either failing still aborts the whole analysis (a 503, unchanged).
+**Now degradable**: ReplicaSet listing (owner resolution only) and
+`build_applicable_policies` (NetworkPolicy evaluation), each now
+wrapped in its own `try`/`except ApiException`, degrading to `None`/
+`[]` respectively and appending a warning rather than aborting.
+
+**A second, more subtle instance of the same gap, found while wiring
+this up**: `check_dns_health` already caught `ApiException` on each of
+its own three sub-reads and degraded to `DnsHealthResult(healthy=False,
+...)` internally, but never propagated the failure up -- `healthy=False`
+conflated "DNS is confirmed down" with "the read itself failed, I
+couldn't tell." A 403 reading the coredns Deployment produced a
+confident-looking `DNS_UNHEALTHY` finding indistinguishable from a
+genuine outage. Fixed with a new `DnsHealthResult.check_succeeded: bool
+= True` field, set `False` on each of the three failure branches --
+`healthy` itself, and its own pre-existing test suite, are unchanged.
+
+**Added**:
+
+- `models/network.py` -- `DnsHealthResult.check_succeeded: bool = True`;
+  `NetworkFinding` now inherits `EvidenceCompletenessMixin`, additive,
+  no existing field renamed.
+- `network/dns_health.py` -- `check_succeeded=False` on all three
+  `ApiException` failure branches.
+- `network/analyzer.py::analyze_network` -- new `warnings: list[str] |
+  None` parameter, setting `evidence_completeness = DEGRADED if
+  warnings else COMPLETE` on the returned finding. `warnings` never
+  changes `classification`, the same separation already established
+  for the LoadBalancer-pending note (Milestone 39).
+- `network/service.py::analyze_pod` -- collects a local `warnings`
+  list across the three new degradable paths (ReplicaSet listing, the
+  DNS `check_succeeded` flag, NetworkPolicy listing) and threads it
+  into `analyze_network`.
+
+**Tests**: 11 new unit tests. `test_network_dns_health.py`: 4 (the
+three failure branches set `check_succeeded=False`; a confirmed
+zero-endpoints problem keeps it `True`). `test_network_analyzer.py`:
+3 (`TestEvidenceCompleteness` -- no warnings is `COMPLETE`,
+caller-supplied warnings carry through as `DEGRADED`, warnings never
+change `classification`). `test_network_service.py`: 4 (no failures is
+`COMPLETE`; ReplicaSet listing failure degrades rather than crashes,
+`workload_kind is None` with a matching warning; NetworkPolicy listing
+failure degrades to `[]` with a matching warning; a DNS read failure
+surfaces as a warning while `classification` still correctly reports
+`DNS_UNHEALTHY`). Every pre-existing test passed unchanged before any
+new one was added. Full regression: ruff clean, mypy clean, **1035
+unit tests passed** (1024 + 11).
+
+**Live-verified against the real cluster**: ran `kubesentinel
+network-check` against a real throwaway Pod on the actual
+`kind-kubesentinel` cluster with no RBAC denied -- confirmed
+`evidence_completeness: COMPLETE`, `warnings: []`,
+`dns_health.check_succeeded: true` for the no-failure path, matching
+the pre-existing, unaffected happy path exactly. The three new failure
+paths stay covered by unit tests with a real `ApiException(403)`,
+deliberately not reproduced by revoking this project's own real RBAC
+mid-session on a shared cluster -- the same choice already made for
+every other retrofitted model in Milestone 44.
+
+**Documentation**: `docs/EVIDENCE_COMPLETENESS.md` (§1's table updated;
+new §5 covering this closure in full, old §5/§6 renumbered to §6/§7).
+`docs/NETWORK_DIAGNOSTICS.md` (new §14). `docs/MASTER_ARCHITECTURE.md`
+(the Milestone-44-era paragraph updated to no longer describe
+`NetworkFinding` as excluded). `docs/IMPLEMENTATION_STATUS.md` (the
+Observability section's matching paragraph updated the same way, now
+naming both real gaps found across Milestones 44/45).

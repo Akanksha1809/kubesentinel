@@ -91,7 +91,17 @@ class NetworkService:
         """Explains the given Pod's inbound Service-based connectivity
         story: which Services select it, whether its ports would resolve,
         which NetworkPolicies apply, and whether cluster DNS looks
-        healthy."""
+        healthy.
+
+        The Pod read itself and `build_service_match_results` (the core
+        Service/Pod/EndpointSlice evidence this finding is actually
+        about) stay fatal on failure -- there is no meaningful finding
+        left to produce without either. Owner resolution (for
+        `related_incident_ids`) and NetworkPolicy evaluation are
+        genuinely degradable: each failure is collected into
+        `warnings` and the analysis continues without that one piece,
+        rather than aborting the whole thing. See
+        docs/EVIDENCE_COMPLETENESS.md §5."""
         try:
             try:
                 pod = self._clients.core.read_namespaced_pod(name=pod_name, namespace=namespace)
@@ -100,13 +110,31 @@ class NetworkService:
                     raise PodNotFoundError(f"no Pod {namespace}/{pod_name}") from exc
                 raise
 
-            replicasets = self._clients.apps.list_namespaced_replica_set(namespace=namespace).items
-            replicasets_by_uid = {rs.metadata.uid: rs for rs in replicasets}
-            owner = resolve_pod_owner(pod, replicasets_by_uid)
+            warnings: list[str] = []
+
+            try:
+                replicasets = self._clients.apps.list_namespaced_replica_set(namespace=namespace).items
+                replicasets_by_uid = {rs.metadata.uid: rs for rs in replicasets}
+                owner = resolve_pod_owner(pod, replicasets_by_uid)
+            except ApiException as exc:
+                owner = None
+                warnings.append(
+                    f"could not list ReplicaSets in {namespace}, owner resolution skipped: {exc.reason}"
+                )
 
             dns_health = check_dns_health(self._clients)
+            if not dns_health.check_succeeded:
+                warnings.append(f"DNS health check incomplete: {dns_health.reasoning}")
+
             service_results = build_service_match_results(self._clients, namespace)
-            applicable_policies = build_applicable_policies(self._clients, namespace, pod)
+
+            try:
+                applicable_policies = build_applicable_policies(self._clients, namespace, pod)
+            except ApiException as exc:
+                applicable_policies = []
+                warnings.append(
+                    f"could not list NetworkPolicies in {namespace}, policy check skipped: {exc.reason}"
+                )
 
             finding = analyze_network(
                 namespace=namespace,
@@ -116,6 +144,7 @@ class NetworkService:
                 applicable_policies=applicable_policies,
                 workload_kind=owner.kind.value if owner else None,
                 workload_name=owner.name if owner else None,
+                warnings=warnings,
             )
             finding.related_incident_ids = self._open_incident_ids_for(pod.metadata.uid, owner.uid if owner else "")
         except Exception:  # noqa: BLE001 - PodNotFoundError included; any failure here means "failed", not a finding

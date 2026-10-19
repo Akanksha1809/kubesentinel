@@ -122,6 +122,73 @@ class TestAnalyzePod:
 
         assert finding.classification == NetworkFindingClassification.DNS_UNHEALTHY
 
+    def test_no_failures_is_complete_evidence(self, repo):
+        from kubesentinel.models.completeness import EvidenceCompleteness
+
+        svc = make_service(name="svc", selector={"app": "target"})
+        clients = _clients(services=[svc])
+        service = NetworkService(clients, repo, Settings())
+
+        finding = service.analyze_pod(NAMESPACE, "target")
+
+        assert finding.warnings == []
+        assert finding.evidence_completeness == EvidenceCompleteness.COMPLETE
+
+    def test_replicaset_listing_failure_degrades_rather_than_crashes(self, repo):
+        # The real gap this closed: before, any failure here aborted the
+        # whole analysis (a 503), even though owner resolution is only
+        # used for related_incident_ids -- the rest of the finding is
+        # still fully meaningful without it.
+        from kubesentinel.models.completeness import EvidenceCompleteness
+
+        svc = make_service(name="svc", selector={"app": "target"})
+        clients = _clients(services=[svc])
+        clients.apps.list_namespaced_replica_set.side_effect = ApiException(status=403, reason="Forbidden")
+        service = NetworkService(clients, repo, Settings())
+
+        finding = service.analyze_pod(NAMESPACE, "target")
+
+        assert finding.classification == NetworkFindingClassification.HEALTHY
+        assert finding.workload_kind is None
+        assert len(finding.warnings) == 1
+        assert "ReplicaSets" in finding.warnings[0]
+        assert finding.evidence_completeness == EvidenceCompleteness.DEGRADED
+
+    def test_network_policy_listing_failure_degrades_rather_than_crashes(self, repo):
+        from kubesentinel.models.completeness import EvidenceCompleteness
+
+        svc = make_service(name="svc", selector={"app": "target"})
+        clients = _clients(services=[svc])
+        clients.networking.list_namespaced_network_policy.side_effect = ApiException(status=403, reason="Forbidden")
+        service = NetworkService(clients, repo, Settings())
+
+        finding = service.analyze_pod(NAMESPACE, "target")
+
+        assert finding.classification == NetworkFindingClassification.HEALTHY
+        assert finding.applicable_network_policies == []
+        assert len(finding.warnings) == 1
+        assert "NetworkPolicies" in finding.warnings[0]
+        assert finding.evidence_completeness == EvidenceCompleteness.DEGRADED
+
+    def test_dns_check_read_failure_is_surfaced_as_a_warning(self, repo):
+        # Distinct from a genuinely confirmed DNS problem
+        # (test_dns_unhealthy_classification above): here the read
+        # itself failed, which must not be reported the same way as a
+        # confirmed-down coredns.
+        from kubesentinel.models.completeness import EvidenceCompleteness
+
+        svc = make_service(name="svc", selector={"app": "target"})
+        clients = _clients(services=[svc])
+        clients.apps.read_namespaced_deployment.side_effect = ApiException(status=403, reason="Forbidden")
+        service = NetworkService(clients, repo, Settings())
+
+        finding = service.analyze_pod(NAMESPACE, "target")
+
+        assert finding.classification == NetworkFindingClassification.DNS_UNHEALTHY
+        assert len(finding.warnings) == 1
+        assert "DNS health check incomplete" in finding.warnings[0]
+        assert finding.evidence_completeness == EvidenceCompleteness.DEGRADED
+
 
 class TestGetAndList:
     def test_get_missing_finding_raises(self, repo):

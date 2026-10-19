@@ -19,6 +19,8 @@ from enum import Enum
 
 from pydantic import BaseModel, Field
 
+from kubesentinel.models.completeness import EvidenceCompletenessMixin
+
 
 class NetworkFindingClassification(str, Enum):
     """The request-path narrative's own conclusion -- a classification of
@@ -98,9 +100,35 @@ class DnsHealthResult(BaseModel):
     kube_dns_endpoint_count: int = 0
     healthy: bool = False
     reasoning: str = ""
+    #: False whenever `check_dns_health()` could not complete one of its
+    #: own three reads (coredns Deployment, kube-dns Service, its
+    #: EndpointSlices) at all -- distinct from `healthy=False` for a
+    #: *confirmed* problem (coredns genuinely down, zero ready
+    #: endpoints). Both cases set `healthy=False` (a read failure is
+    #: never treated as "DNS is fine" by default), but only this field
+    #: tells a caller whether that `False` is a real finding or an
+    #: absence of evidence -- `network/service.py::analyze_pod` surfaces
+    #: the latter as a `NetworkFinding.warnings` entry rather than
+    #: silently reporting a confirmed-sounding "DNS_UNHEALTHY".
+    check_succeeded: bool = True
 
 
-class NetworkFinding(BaseModel):
+class NetworkFinding(EvidenceCompletenessMixin):
+    """`warnings`/`evidence_completeness` (inherited from
+    `EvidenceCompletenessMixin`) close this engine's own previously-named
+    structural gap (docs/EVIDENCE_COMPLETENESS.md §5): `analyze_pod` used
+    to be genuinely all-or-nothing, with no partial-degrade state to
+    report at all. Now a ReplicaSet-listing failure (owner resolution),
+    a NetworkPolicy-listing failure, or a DNS-health-check read failure
+    each degrade independently and are named in `warnings`, rather than
+    aborting the whole analysis or silently masquerading as a confirmed
+    result. The Pod read itself and the core Service/Pod/EndpointSlice
+    read (`build_service_match_results`) stay fatal on failure -- there
+    is no meaningful finding left to produce without either, the same
+    "which sub-reads are genuinely degradable vs. foundational"
+    judgment `scheduling/service.py` already makes for its own
+    ResourceQuota/LimitRange reads."""
+
     finding_id: str
     namespace: str
     target_pod_name: str | None = None

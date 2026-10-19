@@ -25,6 +25,15 @@ never a classification change. It answers a different question
 unaffected by the former: a `LoadBalancer` Service still routes via its
 ClusterIP exactly like any other Service while its external address is
 still pending.
+
+`warnings` (any sub-read failure the caller already degraded from)
+also never changes `classification` -- it is reported alongside it,
+not folded into it. A degraded `DNS_UNHEALTHY` verdict and a confirmed
+one both set the same classification (this function has no way to
+second-guess `dns_health.healthy` once it's already been computed),
+but only the former also carries a warning explaining that the
+underlying read actually failed, rather than DNS genuinely being
+confirmed down.
 """
 
 from __future__ import annotations
@@ -32,6 +41,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
+from kubesentinel.models.completeness import EvidenceCompleteness
 from kubesentinel.models.network import (
     DnsHealthResult,
     NetworkFinding,
@@ -50,9 +60,17 @@ def analyze_network(
     applicable_policies: list[NetworkPolicyRelevance],
     workload_kind: str | None = None,
     workload_name: str | None = None,
+    warnings: list[str] | None = None,
     now: datetime | None = None,
 ) -> NetworkFinding:
+    """`warnings` carries any sub-read failure the caller already caught
+    and degraded from (e.g. `analyze_pod`'s own ReplicaSet/NetworkPolicy
+    reads, or a failed `check_dns_health` sub-read) -- this function
+    never performs a cluster read itself, so it only ever *reports*
+    `warnings`/`evidence_completeness` on the returned finding, never
+    discovers or silences one. See docs/EVIDENCE_COMPLETENESS.md §5."""
     now = now or datetime.now(timezone.utc)
+    warnings = warnings or []
     reasoning_parts: list[str] = []
 
     selecting_services = [s for s in service_results if target_pod_name in s.matched_pod_names]
@@ -140,4 +158,6 @@ def analyze_network(
         applicable_network_policies=applicable_policies,
         classification=classification,
         reasoning=" ".join(reasoning_parts),
+        warnings=warnings,
+        evidence_completeness=EvidenceCompleteness.DEGRADED if warnings else EvidenceCompleteness.COMPLETE,
     )

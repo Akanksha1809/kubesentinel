@@ -672,21 +672,30 @@ it (Capability F), and `SchedulingFinding`/`NetworkFinding` with no
 equivalent at all (C/D). The decision: a shared, typed
 `EvidenceCompleteness` enum (`COMPLETE`/`DEGRADED`/`UNKNOWN`/
 `NOT_APPLICABLE`) via a common `EvidenceCompletenessMixin` base model,
-included by `AnalysisRunSummary`, `SecurityAuditResult`, and
-`SchedulingFinding` -- additive, never a rename: every pre-existing
-field (`warning`, `metrics_available`, `SecurityAuditResult`'s own
-already-identically-named `warnings`) is kept exactly as it was.
-Closing a real gap found while wiring this up, not just a cosmetic
-addition: `SchedulingFinding` had no way to surface a sub-read failure
-at all -- `analyze_hypothetical`'s own ResourceQuota/LimitRange reads
-already degraded on failure but only logged it, never told the caller,
-so a finding could silently report "no ResourceQuota in this
-namespace" when the true state was "couldn't check." `NetworkFinding`
-is deliberately *not* included in this round: `network/service.py::analyze_pod`
-is genuinely all-or-nothing (no sub-read there is individually
-try/except-wrapped the way optimization's/security's/scheduling's own
-inventory builders already are), so there is no partial-degrade state
-to attach a `warnings` field to without first changing that
-engine's own error-handling granularity -- named explicitly as a real,
-structural difference, not silently assumed covered. See
+included by `AnalysisRunSummary`, `SecurityAuditResult`,
+`SchedulingFinding`, and `NetworkFinding` -- additive, never a rename:
+every pre-existing field (`warning`, `metrics_available`,
+`SecurityAuditResult`'s own already-identically-named `warnings`) is
+kept exactly as it was.
+
+Two real gaps found while wiring this up, not just a cosmetic
+addition in either case: `SchedulingFinding` had no way to surface a
+sub-read failure at all -- `analyze_hypothetical`'s own ResourceQuota/
+LimitRange reads already degraded on failure but only logged it, never
+told the caller, so a finding could silently report "no ResourceQuota
+in this namespace" when the true state was "couldn't check."
+`NetworkFinding`'s own `analyze_pod` was genuinely all-or-nothing (no
+sub-read there was individually try/except-wrapped the way
+optimization's/security's/scheduling's own inventory builders already
+are) -- closed as a later, separate follow-up: ReplicaSet listing
+(owner resolution) and NetworkPolicy evaluation now each degrade
+independently rather than aborting the whole analysis, and
+`check_dns_health` (which already caught its own three sub-read
+failures internally but only ever reported `healthy=False`, conflating
+a confirmed outage with a read failure) gained a new
+`DnsHealthResult.check_succeeded` flag so that distinction is finally
+visible to a caller. The Pod read itself and
+`build_service_match_results` (the core Service/Pod/EndpointSlice
+evidence the finding is actually about) correctly stay fatal -- there
+is no meaningful finding left to produce without either. See
 `docs/EVIDENCE_COMPLETENESS.md` for the full design.

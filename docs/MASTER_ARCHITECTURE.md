@@ -212,11 +212,14 @@ per-capability summary models each include" shape this note's own
 parenthetical suggested. Additive, never a rename: every existing
 per-capability field (`AnalysisRunSummary.warning`/`metrics_available`,
 `SecurityAuditResult`'s own pre-existing `warnings`) is kept exactly as
-it was. `SchedulingFinding` gained a genuinely new `warnings` field
-(closing a real silent-degrade gap found while wiring this up);
-`NetworkFinding` is deliberately not included, since that engine's own
-`analyze_pod` is all-or-nothing with no partial-degrade state to attach
-one to -- named explicitly, not silently assumed covered. See
+it was. `SchedulingFinding`/`NetworkFinding` each gained a genuinely
+new `warnings` field (closing a real silent-degrade gap found in each
+while wiring this up -- `NetworkFinding`'s own `analyze_pod` needed its
+error-handling granularity changed first, closed as a later, separate
+follow-up: ReplicaSet/NetworkPolicy reads now degrade independently
+instead of aborting the whole analysis, and `DnsHealthResult` gained
+its own `check_succeeded` flag so a DNS sub-read failure is never
+indistinguishable from a confirmed outage). See
 `docs/EVIDENCE_COMPLETENESS.md` for the full design and
 `docs/IMPLEMENTATION_STATUS.md`'s own Observability section for the
 closure writeup.

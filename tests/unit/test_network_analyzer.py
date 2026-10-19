@@ -221,3 +221,46 @@ class TestLoadBalancerPendingIsInformationalOnly:
         )
         assert finding.classification == NetworkFindingClassification.CONFIGURATION_ERROR
         assert "LoadBalancer but has no assigned external" in finding.reasoning
+
+
+class TestEvidenceCompleteness:
+    def test_no_warnings_is_complete(self):
+        from kubesentinel.models.completeness import EvidenceCompleteness
+
+        finding = analyze_network(
+            namespace=NAMESPACE,
+            target_pod_name=POD,
+            dns_health=_dns(),
+            service_results=[_service()],
+            applicable_policies=[],
+        )
+        assert finding.warnings == []
+        assert finding.evidence_completeness == EvidenceCompleteness.COMPLETE
+
+    def test_caller_supplied_warnings_are_carried_through_as_degraded(self):
+        from kubesentinel.models.completeness import EvidenceCompleteness
+
+        finding = analyze_network(
+            namespace=NAMESPACE,
+            target_pod_name=POD,
+            dns_health=_dns(),
+            service_results=[_service()],
+            applicable_policies=[],
+            warnings=["could not list NetworkPolicies in kubesentinel-lab: Forbidden"],
+        )
+        assert finding.warnings == ["could not list NetworkPolicies in kubesentinel-lab: Forbidden"]
+        assert finding.evidence_completeness == EvidenceCompleteness.DEGRADED
+
+    def test_warnings_never_change_classification(self):
+        from kubesentinel.models.completeness import EvidenceCompleteness
+
+        finding = analyze_network(
+            namespace=NAMESPACE,
+            target_pod_name=POD,
+            dns_health=_dns(),
+            service_results=[_service()],
+            applicable_policies=[],
+            warnings=["could not list ReplicaSets: Forbidden"],
+        )
+        assert finding.classification == NetworkFindingClassification.HEALTHY
+        assert finding.evidence_completeness == EvidenceCompleteness.DEGRADED

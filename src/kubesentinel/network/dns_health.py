@@ -7,6 +7,15 @@ rbac/network-dns-role.yaml's own docstring for why.
 This answers "does the cluster's DNS server appear healthy," never "would
 resolving this specific name succeed" -- that would need an active probe,
 deliberately deferred (see docs/NETWORK_DIAGNOSTICS.md Section 2).
+
+Every one of this function's three sub-reads already degrades to
+`healthy=False` on its own `ApiException` rather than raising -- but a
+read failure and a confirmed problem are different claims, so each
+failure branch also sets `DnsHealthResult.check_succeeded=False`.
+`network/service.py::analyze_pod` surfaces that distinction as a
+`NetworkFinding.warnings` entry rather than letting a read failure
+masquerade as a confirmed `DNS_UNHEALTHY` finding -- see
+docs/EVIDENCE_COMPLETENESS.md §5.
 """
 
 from __future__ import annotations
@@ -29,6 +38,7 @@ def check_dns_health(clients: ClusterClients) -> DnsHealthResult:
     except ApiException as exc:
         return DnsHealthResult(
             healthy=False,
+            check_succeeded=False,
             reasoning=f"could not read the '{_COREDNS_DEPLOYMENT}' Deployment in '{_KUBE_SYSTEM}': {exc.reason} (status={exc.status})",
         )
 
@@ -49,6 +59,7 @@ def check_dns_health(clients: ClusterClients) -> DnsHealthResult:
                 coredns_ready_replicas=ready,
                 coredns_desired_replicas=desired,
                 healthy=False,
+                check_succeeded=False,
                 reasoning=f"could not read the '{_KUBE_DNS_SERVICE}' Service: {exc.reason} (status={exc.status})",
             )
 
@@ -70,6 +81,7 @@ def check_dns_health(clients: ClusterClients) -> DnsHealthResult:
                 coredns_desired_replicas=desired,
                 kube_dns_service_exists=service_exists,
                 healthy=False,
+                check_succeeded=False,
                 reasoning=f"could not read EndpointSlices for '{_KUBE_DNS_SERVICE}': {exc.reason} (status={exc.status})",
             )
 
