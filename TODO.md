@@ -4660,3 +4660,59 @@ new §5 covering this closure in full, old §5/§6 renumbered to §6/§7).
 `NetworkFinding` as excluded). `docs/IMPLEMENTATION_STATUS.md` (the
 Observability section's matching paragraph updated the same way, now
 naming both real gaps found across Milestones 44/45).
+
+## Milestone 46: `recommendation-apply` surfaces its own REJECTED reason -- DONE
+
+Found live while verifying Milestone 34's apply path end-to-end: running
+`kubesentinel recommendation-apply <id> --rationale ...` with no
+`KUBESENTINEL_POLICY_MODE` set (the default is `OBSERVE`) printed only
+`status: REJECTED`, no reason at all -- even though
+`RemediationAction.execution_error` already carried the exact answer
+("denied by policy: policy mode is OBSERVE -- remediation is disabled
+entirely, not even proposed"). Every other action-reporting command
+(`plan`/`approve`/`action`/`execute`) already prints `execution_error`
+when present; `recommendation-apply`'s own output was simply missing
+the same two lines. A first-time operator following only this
+command's `--help` text had no way to know `OBSERVE` would reject it,
+or what fixes it.
+
+**Fixed**:
+
+- `cli/main.py::apply_recommendation_cmd` -- prints
+  `action.execution_error` when set, matching the existing pattern
+  used by every other action-reporting command.
+- Two docstrings corrected, not just extended -- both previously
+  claimed this "always ends up PENDING_APPROVAL," which `PolicyEngine
+  ._check_mode_not_observe` (runs before `_ALWAYS_REQUIRES_APPROVAL` is
+  ever reached) already made false under the default `OBSERVE` mode:
+  `apply_recommendation_cmd`'s own `--help` text, and
+  `OptimizationService.apply_recommendation`'s docstring. Both now name
+  the `OBSERVE` precondition explicitly and the `KUBESENTINEL_POLICY_MODE`
+  fix.
+- `docs/RESOURCE_OPTIMIZATION_DESIGN.md` §14.2 -- new paragraph naming
+  `policy_mode` as a precondition the section's own six-item numbered
+  list didn't cover (it belongs to `PolicyEngine`, not
+  `apply_recommendation` itself), with the live finding and fix.
+
+**No behavior change to any decision**: `PolicyEngine.evaluate` and
+`OptimizationService.apply_recommendation` are both untouched --
+`REJECTED` was always the correct outcome under `OBSERVE`; only the
+CLI's own reporting of *why* was incomplete. No new test: no
+CLI-layer tests exist anywhere in this codebase (confirmed --
+`CliRunner` has zero matches under `tests/`), consistent with this
+project's strategy of unit-testing the service layer and reserving
+CLI-level checks for live verification; the service method this CLI
+command calls is unchanged and already fully covered by
+`TestApplyRecommendation` in `test_optimization_service.py`. Full
+regression: ruff clean, mypy clean, **1035 unit tests passed**
+(unchanged -- no new test, no code path changed).
+
+**Live-verified against the real cluster**: reproduced the exact
+original gap -- a fresh synthetic `APPROVED` recommendation against a
+real throwaway Deployment, `recommendation-apply` with no
+`KUBESENTINEL_POLICY_MODE` set. Before the fix this printed
+`status: REJECTED` and nothing else; after, it also prints
+`error: denied by policy: policy mode is OBSERVE -- remediation is
+disabled entirely, not even proposed` -- the operator now sees the
+exact cause and, from the corrected `--help` text, the fix, without
+reading `PolicyEngine` source.

@@ -584,9 +584,13 @@ def apply_recommendation_cmd(
     json_output: bool = typer.Option(False, "--json"),
 ) -> None:
     """Creates a standalone, policy-gated RemediationAction applying an
-    already-APPROVED recommendation's own proposed requests/limits.
-    Always ends up PENDING_APPROVAL -- use `action-approve` then
-    `action-execute` on the printed action_id next. See
+    already-APPROVED recommendation's own proposed requests/limits. Ends up
+    PENDING_APPROVAL under APPROVAL_REQUIRED/CONTROLLED_AUTO -- use
+    `action-approve` then `action-execute` on the printed action_id next.
+    Requires policy_mode to not be OBSERVE (the default): under OBSERVE this
+    is REJECTED outright, remediation is disabled entirely regardless of
+    this recommendation's own state. Set KUBESENTINEL_POLICY_MODE=
+    APPROVAL_REQUIRED (or CONTROLLED_AUTO) first. See
     docs/RESOURCE_OPTIMIZATION_DESIGN.md Section 14 for every precondition
     this can refuse on."""
     settings = get_settings()
@@ -603,6 +607,8 @@ def apply_recommendation_cmd(
         return
     console.print(f"action_id: {action.action_id}")
     console.print(f"status: [bold]{action.status.value}[/bold]")
+    if action.execution_error:
+        console.print(f"error: {action.execution_error}")
 
 
 def _build_standalone_remediation_service(settings: Settings) -> RemediationService:

@@ -620,6 +620,24 @@ unattended execution on those grounds alone, even before the explicit
 `_ALWAYS_REQUIRES_APPROVAL` entry is reached. Stated explicitly anyway,
 not left as an emergent property of unrelated checks.
 
+**One precondition this list's six numbered checks don't cover, because
+it's `PolicyEngine`'s, not `apply_recommendation`'s own: `policy_mode`
+itself.** `PolicyEngine._check_mode_not_observe` runs first, before
+`_ALWAYS_REQUIRES_APPROVAL` is ever reached -- under the default
+`OBSERVE` mode, `propose_standalone` returns a `REJECTED` action, not
+`PENDING_APPROVAL`, regardless of how clean this recommendation is.
+Found live, verifying this exact path against the real
+`kind-kubesentinel` cluster with no `KUBESENTINEL_POLICY_MODE` set: the
+CLI printed only `status: REJECTED` with no reason shown at all, since
+`recommendation-apply`'s own output never printed `action.execution_error`
+(every other action-reporting command already does -- `plan`/`approve`/
+`action`/`execute`). Fixed by printing it there too, and by stating this
+precondition explicitly in both this command's own `--help` text and
+`OptimizationService.apply_recommendation`'s docstring, rather than
+leaving a first-time operator to discover it by reading `PolicyEngine`
+source. Set `KUBESENTINEL_POLICY_MODE=APPROVAL_REQUIRED` (or
+`CONTROLLED_AUTO`) before using this command at all.
+
 ### 14.3 The executor: a merge-patch, never a replace, never `.to_dict()`
 
 `RemediationExecutor._adjust_resources(target, parameters)` mirrors

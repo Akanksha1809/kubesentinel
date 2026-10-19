@@ -335,10 +335,16 @@ class OptimizationService:
         recommendation's own proposed requests/limits -- see
         docs/RESOURCE_OPTIMIZATION_DESIGN.md Section 14.2 for the full list
         of preconditions checked here, each raising its own specific,
-        named reason. Always ends up PENDING_APPROVAL in practice
-        (ADJUST_RESOURCES is in PolicyEngine._ALWAYS_REQUIRES_APPROVAL) --
-        a human still calls the usual approve/execute on the returned
-        action's own ID, exactly like any other action."""
+        named reason. Ends up PENDING_APPROVAL in practice under
+        APPROVAL_REQUIRED/CONTROLLED_AUTO (ADJUST_RESOURCES is in
+        PolicyEngine._ALWAYS_REQUIRES_APPROVAL) -- a human still calls the
+        usual approve/execute on the returned action's own ID, exactly
+        like any other action. Under the default policy_mode of OBSERVE,
+        PolicyEngine denies this outright (REJECTED) before that
+        always-requires-approval rule is even reached -- the returned
+        action's own `execution_error` names this precondition explicitly,
+        matching PolicyEngine._check_mode_not_observe's own reason
+        string."""
         if self._remediation is None:
             raise RemediationNotConfiguredError(
                 "no RemediationService configured -- this OptimizationService can analyze/review but not apply"
