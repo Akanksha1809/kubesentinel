@@ -4405,3 +4405,64 @@ caveat, and the live-verification writeup).
 `docs/IMPLEMENTATION_STATUS.md` (the "real, checked-not-assumed
 approximation" paragraph updated to describe the closure; a new
 "Live-verified again" paragraph added).
+
+## Milestone 43: Optional multi-node kind cluster for the scheduling advisor -- DONE
+
+Closes `docs/SCHEDULING_ANALYSIS.md`/`docs/IMPLEMENTATION_STATUS.md`'s
+own named limitation: the lab's single-node kind cluster means a live
+demo could only ever show "the one node passes or fails," never "fits
+Node B, not Node A" -- even though the analyzer's own N-node loop had
+always handled multiple Nodes correctly, there was nowhere to show it.
+Explicitly named in both docs as "a legitimate future addition if a
+multi-node demo becomes valuable" and "worth a second, optional
+multi-node kind-config variant later" -- closed here as exactly that:
+additive, optional infrastructure, never a replacement for the primary
+cluster.
+
+**Added**:
+
+- `lab/kind-config-multi-node.yaml` -- a second kind cluster
+  (`kubesentinel-multi`, separate name from the primary `kubesentinel`),
+  1 control-plane + 2 workers. Two workers, not one: a candidate Pod
+  needs at least two real scheduling options to show "picked B over A
+  for a real reason," not just "there was exactly one place it could
+  go." Kept at three nodes total for the same "minimal cost on a
+  laptop" reasoning `kind-config.yaml`'s own comment already states.
+- `lab/create-multi-node-cluster.sh` / `lab/delete-multi-node-cluster.sh`
+  -- mirror `create-cluster.sh`/`delete-cluster.sh`'s own shape exactly,
+  parameterized for the new cluster name/config. Creation switches
+  `kubectl`'s current context to the new cluster and says so explicitly,
+  including the exact command to switch back.
+- `README.md` -- a new paragraph after the scheduling advisor's own
+  quickstart block, naming this as optional and showing the
+  create/delete/switch-back commands.
+
+**Live-verified a genuine cross-node trade-off against three real,
+different Nodes, not a synthetic/mocked one**: created the real
+multi-node cluster, confirmed all three Nodes reached `Ready`, labeled
+exactly one of its two real workers (`disktype=ssd`), and ran a real
+`POST /scheduling/simulate` call for a hypothetical Pod with
+`nodeSelector: {disktype: ssd}` against it. Confirmed
+`any_node_schedulable: true`: the labeled worker correctly
+`schedulable=true`; the *other* real worker correctly
+`schedulable=false`, blocked specifically by `NODE_SELECTOR` (not
+`RESOURCE_FIT` or anything else); the control-plane Node separately and
+correctly blocked by its own real
+`node-role.kubernetes.io/control-plane:NoSchedule` taint -- confirmed
+via `kubectl get nodes -o jsonpath` before the simulation, not assumed.
+Deleted the cluster immediately after verifying (`kind get clusters`
+confirmed only the primary `kubesentinel` cluster remained) and
+switched `kubectl`'s context back to it; every other test, script, and
+live demonstration in this project is unaffected, since none of them
+were touched.
+
+**No application code changed** -- this milestone is lab
+infrastructure and documentation only. Full regression suite
+unaffected: ruff clean, mypy clean, 1011 unit tests passed (unchanged
+from Milestone 42).
+
+**Documentation**: `docs/SCHEDULING_ANALYSIS.md` (Section 11 rewritten
+to describe the closure and the live-verification run). `README.md`
+(new optional-extras paragraph). `docs/IMPLEMENTATION_STATUS.md`
+(Capability C's "Environment constraint" paragraph rewritten the same
+way, pointing at Section 11 for the full writeup).

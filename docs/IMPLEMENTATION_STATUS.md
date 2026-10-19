@@ -193,13 +193,25 @@ now does the same dual-UID lookup `OptimizationService` already does, and a
 live check against a real `pending-resources-demo` Pod with a genuinely
 open incident confirmed the link now appears.
 
-**Environment constraint, confirmed still true**: the lab kind cluster
-remains single-node. The analyzer itself loops over N nodes correctly
-(confirmed by `test_multiple_nodes_schedulable_if_any_one_fits`, a unit
-test with two synthetic nodes), but the live demo can only ever show one
-node's own pass/fail, never a genuine multi-node trade-off. Not addressed
-in this milestone -- still a legitimate future addition if a multi-node
-demo becomes valuable.
+**Environment constraint on the *primary* cluster, confirmed still
+true**: the lab's primary kind cluster remains single-node
+(`lab/kind-config.yaml` unchanged). The analyzer itself loops over N
+nodes correctly (confirmed by `test_multiple_nodes_schedulable_if_any_one_fits`,
+a unit test with two synthetic nodes) -- what was missing was
+anywhere to *show* that live. Closed as later, separate, optional
+infrastructure: `lab/kind-config-multi-node.yaml` + `lab/create-
+multi-node-cluster.sh`/`-delete-multi-node-cluster.sh`, a second,
+separate `kubesentinel-multi` cluster (1 control-plane + 2 workers)
+that never touches the primary one. Live-verified: a real `POST
+/scheduling/simulate` call against the real multi-node cluster, with
+exactly one of its two workers labeled `disktype=ssd`, correctly
+reported that labeled worker schedulable and the *other* real worker
+blocked specifically by `NODE_SELECTOR` -- a genuine cross-node
+trade-off against three real, different Nodes, the exact thing this
+constraint used to say couldn't be shown. See
+`docs/SCHEDULING_ANALYSIS.md` §11. Cluster deleted immediately after
+verifying; the primary single-node cluster and every other test/demo
+in this project are unaffected.
 
 **Live-verified against the real cluster**: the existing
 `pending-resources-demo` scenario correctly blocks on `RESOURCE_FIT` alone;

@@ -374,6 +374,19 @@ hypothetical spec that doesn't exist yet -- also no extra setup needed:
 .venv/bin/kubesentinel scheduling-finding <finding-id>
 ```
 
+The primary kind cluster is single-node, so a live demo there can only
+ever show one Node's own pass/fail, never "fits Node B, not Node A." To
+see a genuine cross-node trade-off, create a second, separate, optional
+cluster (1 control-plane + 2 workers, never touches the primary one):
+
+```bash
+./lab/create-multi-node-cluster.sh    # switches kubectl's current context to it
+# ...run a scheduling simulation against it, e.g. label one worker and
+# simulate a Pod with a matching nodeSelector...
+./lab/delete-multi-node-cluster.sh    # tears it down
+kubectl config use-context kind-kubesentinel   # back to the primary cluster
+```
+
 The network troubleshooting engine explains a real Pod's inbound
 Service-based connectivity story -- also no extra setup needed:
 

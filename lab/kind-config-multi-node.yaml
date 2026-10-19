@@ -1,0 +1,29 @@
+# Optional multi-node kind cluster -- a second, separate config from
+# kind-config.yaml's own single-node cluster, named here as valuable
+# future work (docs/SCHEDULING_ANALYSIS.md's own "Known limitation":
+# "the live demo can only ever show 'the one node passes or fails,'
+# never 'fits node B but not node A'... worth a second, optional
+# multi-node kind-config variant later if a true multi-node demo
+# becomes valuable").
+#
+# A SEPARATE cluster (own name, below), not a replacement for the
+# primary single-node one: every existing script, test, and live
+# demonstration in this project assumes the single-node
+# `kind-kubesentinel` context. This one exists only to let the
+# scheduling advisor show a genuine "fits here, not there" trade-off
+# live -- its own analysis code (a loop over N nodes) has never needed
+# this to be correct, only to be demonstrated.
+#
+# Two workers, not one: a candidate Pod needs at least two real
+# scheduling options to show "picked B over A for a real reason," not
+# just "there was exactly one place it could go." Kept at three nodes
+# total (not more) for the same "minimal cost on a laptop" reasoning
+# kind-config.yaml's own comment already states -- each additional node
+# is another real container, another real memory/CPU cost on the host.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: kubesentinel-multi
+nodes:
+  - role: control-plane
+  - role: worker
+  - role: worker

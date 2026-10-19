@@ -282,14 +282,34 @@ success/partial/failed shape.
 
 ## 11. Known limitation, stated once here rather than per-finding
 
-The lab's kind cluster is single-node
-(`IMPLEMENTATION_STATUS.md`/`PLATFORM_ROADMAP.md` already note this). The
-analysis code itself handles N nodes correctly (it's a loop over
-`node_inventory`, not special-cased for one), but this project's own live
-demo can only ever show "the one node passes or fails," never "fits node B
-but not node A." Worth a second, optional multi-node `kind-config` variant
-later if a true multi-node demo becomes valuable; not needed for the
-analysis logic to be correct or tested.
+The lab's *primary* kind cluster is single-node
+(`IMPLEMENTATION_STATUS.md`/`PLATFORM_ROADMAP.md` already note this, and
+it stays true -- `lab/kind-config.yaml` is unchanged). The analysis code
+itself has always handled N nodes correctly (it's a loop over
+`node_inventory`, not special-cased for one); what was missing was
+anywhere to *show* that live. Closed as later, separate, optional
+infrastructure: `lab/kind-config-multi-node.yaml` (1 control-plane + 2
+workers) plus `lab/create-multi-node-cluster.sh`/
+`lab/delete-multi-node-cluster.sh`, a second, separate cluster
+(`kubesentinel-multi`) that never touches the primary one -- every
+existing script, test, and live demonstration elsewhere in this project
+still assumes the single-node `kind-kubesentinel` context, unaffected.
+
+**Live-verified real cross-node trade-off**: created the multi-node
+cluster, labeled exactly one of its two real workers
+(`disktype=ssd`), and ran a real `POST /scheduling/simulate` call for a
+hypothetical Pod with `nodeSelector: {disktype: ssd}` against it.
+Confirmed `any_node_schedulable: true`, with the labeled worker
+correctly `schedulable=true` and the *other* real worker correctly
+`schedulable=false`, blocked specifically by `NODE_SELECTOR` (not
+`RESOURCE_FIT` or anything else) -- the control-plane Node was
+separately and correctly blocked by its own real
+`node-role.kubernetes.io/control-plane:NoSchedule` taint. The exact
+"fits node B, not node A, for a specific, named reason" result this
+section used to say the lab couldn't show, now shown against three
+genuinely different real Nodes, not a synthetic/mocked one.
+Cluster deleted immediately afterward; `kubectl config use-context
+kind-kubesentinel` restored the primary context.
 
 ## 12. LimitRange admission constraint
 
