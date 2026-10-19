@@ -87,11 +87,24 @@ remediator: this Role covers exactly what `optimization/inventory.py` and
 so there is no watch call anywhere in this module to grant for.
 `replicasets` is declared here too even though `remediation-role.yaml`
 already grants the same ServiceAccount read access to it, so this Role
-alone stays sufficient if remediation were ever removed. Deliberately no
-`metrics.k8s.io` **Nodes** ClusterRole: `MetricsApiProvider.get_current_node_usage()`
-has existed since Milestone 13 but has no caller anywhere in this codebase
-yet -- granting RBAC ahead of the code that uses it is exactly what this
-project's RBAC principle (above) exists to avoid.
+alone stays sufficient if remediation were ever removed.
+
+**A separate `metrics.k8s.io` Nodes ClusterRole was deliberately withheld
+when this Role was first written, then added in a later, separate
+milestone once a real caller existed** -- `MetricsApiProvider
+.get_current_node_usage()` had existed since Milestone 13 with no caller
+anywhere in this codebase, and granting RBAC ahead of the code that uses
+it is exactly what this project's RBAC principle (above) exists to avoid.
+`OptimizationService.analyze()` gained that caller (the cluster-level
+overcommitment analysis's real-usage ratio, RESOURCE_OPTIMIZATION_DESIGN.md
+§15.5), so `rbac/optimization-clusterrole.yaml`/
+`-clusterrolebinding.yaml` now grant exactly that, `metrics.k8s.io/nodes`
+`get`/`list` only -- the fourth documented cluster-scope exception in this
+project, after the Node ClusterRole (Capability A), the network engine's
+`kube-system`-bound RoleBinding (Capability D), and the security auditor's
+ClusterRole (Capability F). `rbac/optimization-role.yaml` above is
+unchanged by this -- `metrics.k8s.io/nodes` is cluster-scoped and
+genuinely cannot be granted by a namespaced Role, no matter how narrow.
 
 ```yaml
 # rbac/scheduling-role.yaml (current, in full) -- a fourth, separate Role,

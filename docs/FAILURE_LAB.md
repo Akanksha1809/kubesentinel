@@ -427,8 +427,12 @@ kubectl apply -f lab/manifests/scenario-transient-recovery/pod.yaml
   recommendation both appear, proposing values near the configured floors
   (10m CPU / 16Mi memory by default). A single pass, or fewer than 3
   samples, correctly produces no proposed number at all.
-- **No automatic action**: there is no apply/execute path for this engine;
-  see RESOURCE_OPTIMIZATION_DESIGN.md §6.
+- **No automatic action at this milestone**: there was no apply/execute path
+  for this engine yet at the time this scenario was written (see
+  RESOURCE_OPTIMIZATION_DESIGN.md §6 for why, as a scope decision). A later,
+  separate milestone closed that -- see the `checkout-demo` scenario below
+  for a live walkthrough of the real `recommendation-apply` flow
+  (RESOURCE_OPTIMIZATION_DESIGN.md §14).
 - **Verified live** (TODO.md's Milestone 18 entry): ran a real long-lived
   API server through 4 `analyze()` calls spaced ~110s apart; by the 4th
   call (4 samples spanning 326s), both recommendations appeared with real

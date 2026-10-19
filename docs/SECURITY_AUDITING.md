@@ -344,11 +344,19 @@ pass itself succeed," distinct from how many findings it produced.
 Everything named "explicitly deferred" in §3 applies cluster-wide, not
 per-finding. The effective-permissions gap this section used to name is
 closed -- see §13. CVE/image vulnerability scanning is closed too, as an
-opt-in extra -- see §14. What remains genuinely unresolved: an active
-connectivity probe for the network engine (its own, separate,
-deliberately-deferred mutation surface -- see NETWORK_DIAGNOSTICS.md §2),
-and the resource optimizer applying its own recommendations
-(RESOURCE_OPTIMIZATION_DESIGN.md's own policy-boundary section).
+opt-in extra -- see §14.
+
+**Both items this section used to name as "genuinely unresolved" are now
+closed too, found stale while investigating an unrelated gap and
+corrected here rather than left to mislead the next reader**: the active
+connectivity probe for the network engine (`network/probe.py`, closed --
+see `docs/NETWORK_DIAGNOSTICS.md` §12, its own dedicated design/safety
+review), and the resource optimizer applying its own recommendations
+(`OptimizationService.apply_recommendation`, closed -- see
+`docs/RESOURCE_OPTIMIZATION_DESIGN.md` §14, live-verified end to end
+including policy approval, execution, and the policy gate correctly
+refusing a second execute on an already-executed action). Nothing from
+this section's original list remains open.
 
 ## 13. Effective RBAC permission resolution
 

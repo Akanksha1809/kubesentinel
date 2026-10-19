@@ -179,12 +179,20 @@ explicitly enabled diagnostic mechanism" active DNS/connectivity probe.
 Reasoned as this project's first mutation capability outside the fully
 policy-gated `RemediationExecutor`, deserving its own dedicated
 design/safety review rather than folding a new mutation surface into an
-already-large static-analysis milestone. `EvidenceKind.SERVICE_SPEC` and
-`ReasonCode.DNS_RESOLUTION_FAILURE` remain reserved-but-unproduced for the
-same reason. **Ingress/Gateway**: confirmed live (`kubectl get
-ingressclass` / `kubectl get crd`) that zero such resources or CRDs exist
-anywhere in this project's cluster or manifest history -- an honest "not
-applicable," not a built-but-silent gap.
+already-large static-analysis milestone. **Since built, as that later,
+separate, dedicated-review milestone -- see `docs/NETWORK_DIAGNOSTICS.md`
+§12** (`network/probe.py`, off by default, explicitly opted into per
+call). `EvidenceKind.SERVICE_SPEC` remains reserved-but-unproduced.
+`ReasonCode.DNS_RESOLUTION_FAILURE` does too, but no longer for the reason
+given when this section was first written -- see
+`docs/IMPLEMENTATION_STATUS.md`'s own "DNS and connectivity problems" row
+for the now-precise reason (the probe's own shape -- slow, explicit,
+rate-limited, mutating -- is structurally incompatible with
+`DiagnosticEngine`'s pure, synchronous, always-on rules, not merely
+something that hadn't been built yet). **Ingress/Gateway**: confirmed live
+(`kubectl get ingressclass` / `kubectl get crd`) that zero such resources
+or CRDs exist anywhere in this project's cluster or manifest history -- an
+honest "not applicable," not a built-but-silent gap.
 
 **Environment constraint already on record, and load-bearing here**:
 kindnet (this cluster's default CNI) does not enforce NetworkPolicy. Every

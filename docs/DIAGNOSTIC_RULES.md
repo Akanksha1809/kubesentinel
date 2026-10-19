@@ -193,6 +193,16 @@ would be HIGH and would rank first (registration order in `engine.DEFAULT_RULES`
 
 DNS/connectivity failures. The original spec qualifies this one ("when the available
 evidence supports a diagnosis"), unlike the other 13 categories. Passive evidence
-alone -- no active probe, which is out of scope for this project -- gives very weak
-DNS signal; shipping a rule anyway would mean assigning confidence the evidence
-doesn't support.
+alone gives very weak DNS signal; shipping a rule anyway would mean assigning
+confidence the evidence doesn't support. **An active probe exists in this project
+now** (`network/probe.py`, Capability D -- see `docs/NETWORK_DIAGNOSTICS.md` §12), so
+"no active probe is out of scope for this project" is no longer the reason this
+engine has no DNS rule. The real reason, found while re-examining this after the
+probe shipped: that probe is off by default, explicitly opted into per call,
+rate-limited, and takes up to ~20s to run -- structurally incompatible with
+`DiagnosticEngine`'s rules, which are all pure, synchronous functions over
+already-fetched evidence, invoked automatically on every watch event. Giving this
+engine a DNS rule that calls the probe would mean a fundamentally different,
+slower, mutating category of rule alongside the other 13, not a small addition to
+this one. See `docs/IMPLEMENTATION_STATUS.md`'s "DNS and connectivity problems" row
+for the full reasoning.

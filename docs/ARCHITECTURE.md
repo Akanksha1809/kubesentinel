@@ -240,12 +240,24 @@ pass gets to silently overwrite.
 
 ## What's deliberately not built
 
-- **Multi-namespace watch correctness beyond resync cadence** -- see
-  DESIGN_DECISIONS.md.
+Four items formerly listed here were found stale during an unrelated pass
+and corrected rather than left to mislead the next reader: multi-namespace
+watch correctness (closed -- every configured namespace now gets its own
+independent watch stream, see DESIGN_DECISIONS.md), an apply/execute path
+for resource recommendations (closed --
+`OptimizationService.apply_recommendation`, RESOURCE_OPTIMIZATION_DESIGN.md
+§14), cluster-level overcommitment analysis (closed -- part of
+`/optimization/summary`), and a Node-metrics ClusterRole (closed --
+`rbac/optimization-role.yaml`, now with a real caller). What remains
+genuinely not built:
+
 - **DNS/connectivity diagnosis** -- the spec itself qualifies this category
   ("when the evidence supports it"); passive evidence alone gives too weak a
-  signal without an active probe, which is out of scope. See
-  DIAGNOSTIC_RULES.md.
+  signal. An active probe now exists in this project (`network/probe.py`,
+  Capability D), but it's off by default, explicitly opted into per call,
+  rate-limited, and takes up to ~20s -- structurally incompatible with
+  `DiagnosticEngine`'s rules, which are all pure, synchronous functions
+  invoked automatically on every watch event. See DIAGNOSTIC_RULES.md.
 - **Unattended auto-remediation beyond a plain restart** -- the policy engine's
   `CONTROLLED_AUTO` mode can only ever auto-execute `RESTART_DEPLOYMENT`, and
   only when the diagnosing rule itself believes a restart will help (which, as
@@ -257,18 +269,3 @@ pass gets to silently overwrite.
   remediation. A cloud backend (behind the same `AiClient` Protocol) was
   deliberately not added -- the local Ollama backend is genuinely free, which
   a cloud API, even with a free tier, is not.
-- **An apply/execute path for resource recommendations** -- see
-  RESOURCE_OPTIMIZATION_DESIGN.md §6; every recommendation today is a
-  reviewable record only.
-- **Cluster-level overcommitment analysis** (total requested vs. total
-  Node-allocatable capacity across every workload) -- considered during
-  Milestone 17, but the design doc's own milestone plan never actually
-  committed to it; a per-container `ResourceRecommendation` also isn't the
-  right shape for a cluster-wide number, so this would need a new field on
-  the `/optimization/summary` response, not something bolted onto the
-  existing model.
-- **A Node-metrics ClusterRole** -- `MetricsApiProvider.get_current_node_usage()`
-  has existed since Milestone 13 but has no caller anywhere in this
-  codebase; granting RBAC for a capability nothing uses yet would be ahead
-  of the code that uses it (see `rbac/optimization-role.yaml`'s own
-  docstring).

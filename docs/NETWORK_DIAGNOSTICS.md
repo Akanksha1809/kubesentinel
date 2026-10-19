@@ -24,7 +24,13 @@ Capability D section for what already existed to build on.
   unused" shape `ReasonCode.DNS_RESOLUTION_FAILURE` already was before this
   milestone -- found by the same grep-for-unused-enum-values check
   `IMPLEMENTATION_STATUS.md`'s audit used elsewhere, not a coincidence.
-  This milestone finally gives both a producer.
+  **Written here, at this milestone's planning stage, as an intent to
+  finally give both a producer -- revised during the build itself (§2):
+  this engine gives `SERVICE_SPEC`-shaped evidence a real producer, but
+  deliberately stops short of finally setting `ReasonCode.DNS_RESOLUTION_FAILURE`
+  itself, building `DnsHealthResult` as its own separate model/pipeline
+  instead. See `docs/IMPLEMENTATION_STATUS.md`'s "DNS and connectivity
+  problems" row for why that reason code is still correctly unproduced.**
 - `observer/watchers.py::_ListWatchLoop`'s raw-JSON-fetch technique
   (`list_fn(_preload_content=False, ...)` + `json.loads(...)`) -- reused by
   a plain one-shot helper (not the full watch loop; `network/` takes a

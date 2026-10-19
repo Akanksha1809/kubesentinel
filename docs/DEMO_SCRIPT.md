@@ -459,12 +459,12 @@ everywhere else in this project; see RBAC_AND_THREAT_MODEL.md. The
 chaos & resilience evaluation harness and the operator both stay
 entirely human/CLI-driven too -- neither one ever decides what's broken
 or which action fixes it (see steps 8g/8h above). The resource
-optimization engine never applies a
-recommendation itself -- every number it produces still needs a human (or a
-future, explicitly-built policy-engine path) to act on it; see
-RESOURCE_OPTIMIZATION_DESIGN.md's known limitations for what's deliberately
-not built there (cluster-level overcommitment analysis, an apply/execute
-path). The scheduling advisor never evaluates pod affinity/anti-affinity or
+optimization engine never applies a recommendation *on its own* -- every
+number it produces still needs an explicit human `recommendation-apply` +
+`action-approve` + `action-execute` sequence (RESOURCE_OPTIMIZATION_DESIGN.md
+§14), the same `PolicyEngine`-gated lifecycle every other remediation
+action already goes through; there is no unattended auto-apply path, and
+none is planned. The scheduling advisor never evaluates pod affinity/anti-affinity or
 topology spread constraints -- it says so explicitly in every finding that
 has one, rather than guessing; see SCHEDULING_ANALYSIS.md Section 2.
 `TODO.md` lists exactly what's next and what's known-incomplete; pull

@@ -4787,3 +4787,67 @@ silently worked around" section rewritten to record the closure, the
 concurrency-safety reasoning, and why 0-or-1-namespace behavior is
 unchanged). `observer/watchers.py`'s own module and `_run_one_namespace`
 docstrings updated.
+
+## Milestone 48: Stale "still open" doc claims corrected, no code change -- DONE
+
+Found while picking Milestone 47's own gap: several docs still described
+things as deferred/unresolved/not-yet-built that earlier milestones this
+session (34, 36, 38, 47) had already closed. Each was written at the time
+it was true and never revisited once the thing it described shipped --
+the same class of drift Milestone 44 found once (`models/security.py`'s
+module docstring, `IMPLEMENTATION_STATUS.md`'s metrics-coverage claim) and
+Milestone 1's own audit discipline exists to catch. No code changed in
+this pass -- every fix below is a doc correcting itself against code and
+other docs that were already right.
+
+**Corrected, by doc**:
+
+- `docs/SECURITY_AUDITING.md` §12 -- claimed the network engine's active
+  probe and the optimizer's apply path were "genuinely unresolved." Both
+  closed (Milestones ~20s-era and 34 respectively); nothing from that
+  list remains open.
+- `docs/IMPLEMENTATION_STATUS.md` (DNS/connectivity row), `docs
+  /PLATFORM_ROADMAP.md` (Milestone 4 section), `docs/DIAGNOSTIC_RULES.md`,
+  and `docs/NETWORK_DIAGNOSTICS.md` §1 -- all described
+  `ReasonCode.DNS_RESOLUTION_FAILURE` as unproduced *because the active
+  probe didn't exist yet*. The probe now exists (`network/probe.py`), so
+  that specific reasoning is gone -- but re-examined, the reason code is
+  still correctly unproduced, for a different, more precise reason found
+  while fixing this: `DiagnosticEngine.diagnose()` runs every rule as a
+  pure, synchronous, always-on function over already-fetched evidence;
+  the probe is off by default, explicitly opted into per call,
+  rate-limited, and takes up to ~20s -- structurally incompatible with
+  that shape, not a gap merely waiting on the probe to be built.
+- `docs/ARCHITECTURE.md`'s "What's deliberately not built" list -- four
+  of its items were already closed (multi-namespace watch correctness,
+  the apply/execute path for recommendations, cluster-level
+  overcommitment analysis, the Node-metrics ClusterRole); removed, with a
+  one-line pointer to each real closure, rather than left to mislead the
+  next reader of this list.
+- `docs/DEMO_SCRIPT.md`'s closing scope-boundary paragraph -- claimed "the
+  resource optimization engine never applies a recommendation itself"
+  and pointed at overcommitment analysis / an apply path as
+  deliberately-not-built examples; both false since Milestones 34/36.
+  Corrected to describe the real, human-gated `recommendation-apply` ->
+  `action-approve` -> `action-execute` sequence instead.
+- `docs/FAILURE_LAB.md`'s `oversized-resources` scenario -- said flatly
+  "there is no apply/execute path for this engine," written before
+  Milestone 34; the same doc's own later `checkout-demo` scenario already
+  correctly demonstrates the real flow. Reworded to name this as true
+  "at this milestone," pointing forward to the real one.
+- `docs/RBAC_AND_THREAT_MODEL.md` -- claimed `rbac/optimization-role.yaml`
+  "deliberately" grants no `metrics.k8s.io` Nodes ClusterRole because
+  nothing calls `get_current_node_usage()`. False since Milestone 38 added
+  both a caller and `rbac/optimization-clusterrole.yaml`; the doc's own
+  later section (added at that milestone) already describes the
+  ClusterRole correctly -- only this earlier paragraph, from before the
+  closure, was never updated to match.
+
+**Why this is worth a milestone entry of its own, not folded into a code
+change**: every one of these was a specific, checkable factual claim
+(not a judgment call) that had gone stale, found only by cross-referencing
+docs against the actual code and against each other -- the same kind of
+gap this project's own "named explicitly, not silently assumed covered"
+discipline exists to prevent from compounding silently. Full regression
+re-run as a sanity check even though no code changed: ruff clean, mypy
+clean, **1045 unit tests passed** (unchanged).
