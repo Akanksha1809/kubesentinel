@@ -64,6 +64,22 @@ class TestFindingShape:
         finding = analyze_pod_scheduling(_pod_spec(), [node], namespace="ns")
         assert finding.node_results[0].schedulable is False
 
+    def test_large_init_container_request_is_reflected_in_resource_fit(self):
+        # The real gap this closed: a candidate Pod's own init container
+        # can need more than its regular containers combined, and
+        # RESOURCE_FIT must block on that real effective request, not
+        # silently check only the regular containers' own sum.
+        node = _node(allocatable=ResourceQuantity(cpu_millicores=300, memory_bytes=4 * 1024**3))
+        spec = _pod_spec(
+            cpu="50m",
+            init_containers=[
+                V1Container(name="init", resources=V1ResourceRequirements(requests={"cpu": "500m"}))
+            ],
+        )
+        finding = analyze_pod_scheduling(spec, [node], namespace="ns")
+        assert finding.any_node_schedulable is False
+        assert finding.node_results[0].schedulable is False
+
     def test_evaluated_constraints_exclude_quota_by_default(self):
         node = _node()
         finding = analyze_pod_scheduling(_pod_spec(), [node], namespace="ns")

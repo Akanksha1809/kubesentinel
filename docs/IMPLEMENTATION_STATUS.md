@@ -165,11 +165,21 @@ constraint against every Node for a real or hypothetical Pod spec),
 | Read-only placement simulation | Implemented | `POST /scheduling/simulate`, a raw Pod spec dict deserialized into a typed `V1PodSpec` via the Kubernetes client's own deserializer, analyzed with zero mutation |
 | No replacement scheduler | Honored | no scoring/ranking logic anywhere -- pass/fail per constraint only, explicitly not a reimplementation of `kube-scheduler`'s own plugins |
 
-**A real, checked-not-assumed approximation, named here**: resource-fit math
-sums only regular containers' requests, not init containers (the real
-scheduler takes the *max* of init vs. regular container requests per
-resource, not a sum) -- documented in `node_inventory.py::_pod_requested`'s
-own docstring, not silently wrong.
+**Closed as later, separate follow-up work -- was a named approximation
+at the original audit**: resource-fit math used to sum only regular
+containers' requests, ignoring init containers entirely. Now
+`node_inventory.py::effective_pod_resource_quantity()` implements the
+real scheduler's own algorithm -- `max(sum of regular-container
+requests, largest single init-container request)`, since init
+containers run one at a time and never concurrently with each other or
+the regular containers -- shared by all three call sites that ask this
+same question (`_pod_requested`/`_pod_limits` for every other
+already-bound Pod on a Node, `analyzer.py::_pod_spec_request` for the
+candidate Pod), so the candidate's own math and its neighbors' math can
+never diverge again. `restartPolicy: Always` init containers ("native
+sidecars," Kubernetes 1.28+) are still treated as ordinary
+non-restarting ones -- a further, explicitly named v1 simplification.
+See `docs/SCHEDULING_ANALYSIS.md` §13.
 
 **A real gap caught live during this milestone's own verification, by this
 audit's own standard**: `SchedulingFinding.related_incident_ids` was
@@ -211,6 +221,17 @@ the real `min`) correctly returned `any_node_schedulable: false`, naming
 the exact violation; a second call with a container inside the real
 bounds correctly returned `true` -- both directions confirmed against
 real cluster state. Cleaned up afterward.
+
+**Live-verified again for the init-container resource-fit closure
+above, isolating the exact delta**: applied a real Pod with a 10m-cpu
+regular container and a 700m-cpu init container to the real
+`kubesentinel-lab` namespace. Measured the real Node's own "already
+requested" total via `RESOURCE_FIT`'s own reasoning twice -- once with
+the Pod absent (950m) and once present (1650m) -- isolating this one
+Pod's contribution as exactly 700m: the init container's real request,
+neither the regular container's 10m alone (what every call site read
+before this fix) nor a naive 710m sum. Re-measured a second time to
+confirm reproducibility, then cleaned up.
 
 ## Capability D: Kubernetes Network Troubleshooting Engine
 

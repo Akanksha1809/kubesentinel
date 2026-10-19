@@ -4,7 +4,11 @@ from unittest.mock import MagicMock
 from kubernetes.client import V1Container, V1PodSpec, V1PodStatus, V1ResourceRequirements, V1Taint
 
 from tests.unit.factories import make_node, make_pod, node_condition
-from kubesentinel.scheduling.node_inventory import build_node_inventory, build_pod_label_inventory
+from kubesentinel.scheduling.node_inventory import (
+    build_node_inventory,
+    build_pod_label_inventory,
+    effective_pod_resource_quantity,
+)
 
 
 def _items(objs):
@@ -215,3 +219,109 @@ class TestBuildPodLabelInventory:
         summaries = build_pod_label_inventory(clients)
 
         assert summaries[0].labels == {}
+
+
+def _container(name="app", requests=None, limits=None):
+    return V1Container(name=name, resources=V1ResourceRequirements(requests=requests, limits=limits))
+
+
+class TestEffectivePodResourceQuantity:
+    def test_no_init_containers_sums_regular_containers(self):
+        result = effective_pod_resource_quantity(
+            [_container(requests={"cpu": "100m"}), _container(requests={"cpu": "200m"})],
+            None,
+            "requests",
+            context="test",
+        )
+        assert result.cpu_millicores == 300
+
+    def test_init_container_smaller_than_regular_sum_is_ignored(self):
+        # Real scheduler semantics: init containers run one at a time,
+        # never concurrently with each other or the regular containers,
+        # so a small init container never raises the effective request
+        # above what the regular containers alone already need.
+        result = effective_pod_resource_quantity(
+            [_container(requests={"cpu": "300m"})],
+            [_container(name="init", requests={"cpu": "100m"})],
+            "requests",
+            context="test",
+        )
+        assert result.cpu_millicores == 300
+
+    def test_init_container_larger_than_regular_sum_wins(self):
+        # The real gap this function closes: a single large init
+        # container's own request can exceed the regular containers'
+        # sum, and the *effective* Pod request must reflect that larger
+        # number, not silently understate it.
+        result = effective_pod_resource_quantity(
+            [_container(requests={"cpu": "100m"})],
+            [_container(name="init", requests={"cpu": "500m"})],
+            "requests",
+            context="test",
+        )
+        assert result.cpu_millicores == 500
+
+    def test_multiple_init_containers_take_the_largest_single_one_not_a_sum(self):
+        # Init containers run sequentially, never concurrently with each
+        # other -- two 300m init containers never need 600m at once,
+        # only the larger of the two, ever.
+        result = effective_pod_resource_quantity(
+            [],
+            [_container(name="init-a", requests={"cpu": "300m"}), _container(name="init-b", requests={"cpu": "200m"})],
+            "requests",
+            context="test",
+        )
+        assert result.cpu_millicores == 300
+
+    def test_limits_field_uses_the_same_algorithm_as_requests(self):
+        result = effective_pod_resource_quantity(
+            [_container(limits={"memory": "128Mi"})],
+            [_container(name="init", limits={"memory": "512Mi"})],
+            "limits",
+            context="test",
+        )
+        assert result.memory_bytes == 512 * 1024 * 1024
+
+    def test_no_containers_at_all_is_none_not_zero(self):
+        result = effective_pod_resource_quantity([], [], "requests", context="test")
+        assert result.cpu_millicores is None
+        assert result.memory_bytes is None
+
+    def test_only_init_containers_no_regular_ones(self):
+        result = effective_pod_resource_quantity(
+            [], [_container(name="init", requests={"cpu": "250m"})], "requests", context="test"
+        )
+        assert result.cpu_millicores == 250
+
+    def test_cpu_and_memory_evaluated_independently(self):
+        # A large init-container CPU request must not leak into the
+        # memory comparison, and vice versa.
+        result = effective_pod_resource_quantity(
+            [_container(requests={"cpu": "100m", "memory": "256Mi"})],
+            [_container(name="init", requests={"cpu": "500m"})],
+            "requests",
+            context="test",
+        )
+        assert result.cpu_millicores == 500
+        assert result.memory_bytes == 256 * 1024 * 1024
+
+
+class TestBuildNodeInventoryWithInitContainers:
+    def test_large_init_container_raises_the_pods_contribution_to_requested(self):
+        node = make_node(name="node-1", allocatable={"cpu": "2"})
+        pod = make_pod(name="a", phase="Running")
+        pod.spec = V1PodSpec(
+            node_name="node-1",
+            containers=[V1Container(name="app", resources=V1ResourceRequirements(requests={"cpu": "50m"}))],
+            init_containers=[
+                V1Container(name="init", resources=V1ResourceRequirements(requests={"cpu": "500m"}))
+            ],
+        )
+        pod.status = V1PodStatus(phase="Running")
+        clients = _clients(nodes=[node], pods=[pod])
+
+        snapshots = build_node_inventory(clients)
+
+        # Before this fix, init containers were ignored entirely and this
+        # would have read 50 (the regular container's own request only).
+        assert snapshots[0].requested.cpu_millicores == 500

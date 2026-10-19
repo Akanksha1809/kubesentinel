@@ -41,11 +41,19 @@ left implicit:
 reason, computed from the actual Node/Pod objects):
 
 - **Resource fit**: Node `status.allocatable` (cpu/memory) vs. the sum of
-  `requests` from every *other* Pod currently bound to that Node (the
-  scheduler's own accounting unit) plus the candidate Pod's own request.
-  This reproduces the scheduler's `PodFitsResources` predicate exactly for
-  cpu/memory; it does not model ephemeral-storage or extended resources
-  (e.g. GPUs) in v1 -- named as a real gap, not silently ignored.
+  the *effective* request of every *other* Pod currently bound to that
+  Node (the scheduler's own accounting unit) plus the candidate Pod's
+  own effective request. "Effective" per Pod is
+  `node_inventory.py::effective_pod_resource_quantity()`'s own real-
+  scheduler algorithm: `max(sum of regular-container requests, largest
+  single init-container request)` -- init containers run one at a time,
+  never concurrently with each other or the regular containers, so only
+  the largest one can ever matter, never a sum across them. Closes this
+  section's own previously-named approximation ("sums only regular
+  containers' requests, not init containers"); see §13 for the full
+  design and live-verification. Still does not model ephemeral-storage
+  or extended resources (e.g. GPUs) in v1 -- named as a real gap, not
+  silently ignored.
 - **Taints and tolerations**: every `Node.spec.taints` entry checked
   against the Pod's `spec.tolerations` for a real match (key, operator
   `Equal`/`Exists`, value, effect `NoSchedule`/`PreferNoSchedule`/
@@ -341,3 +349,65 @@ min 200"). A second call with a container inside the real bounds
 `any_node_schedulable: true` with "within every LimitRange in this
 namespace" -- both directions confirmed against real cluster state,
 not asserted from one side only. Cleaned up afterward.
+
+## 13. Init-container-aware resource fit
+
+Closes Section 2's own previously-named approximation: "resource-fit
+math sums only regular containers' requests, not init containers (the
+real scheduler takes the *max* of init vs. regular container requests
+per resource, not a sum)."
+
+### 13.1 The algorithm, and why it's a max, not a sum
+
+Init containers run strictly sequentially, one at a time, and never
+concurrently with each other or with the Pod's regular containers --
+they finish before any regular container starts. A Pod's real,
+effective request for one resource is therefore the *greater* of (a)
+the sum of every regular container's own request (these *do* run
+concurrently with each other, so they really do add up), or (b) the
+single largest init container's own request (never a sum across init
+containers -- two 300m init containers never need 600m at once, only
+the larger of the two, ever). `node_inventory.py::effective_pod_resource_quantity()`
+implements exactly this, identically for `requests` and `limits`.
+
+### 13.2 One function, three call sites, never three answers
+
+The same real question -- "what is this Pod's effective resource
+request/limit" -- is asked for three different Pods in three different
+places: the candidate Pod being analyzed
+(`analyzer.py::_pod_spec_request`), every *other* already-bound Pod on
+a Node when accumulating `NodeSnapshot.requested`
+(`node_inventory.py::_pod_requested`), and the same already-bound
+Pods' `limits` for the overcommitment analysis
+(`node_inventory.py::_pod_limits`, Milestone 36). All three now call
+the one shared function rather than three separate, and previously
+divergent, implementations -- before this closure, the candidate Pod's
+own math (`analyzer.py`) and its neighbors' math (`node_inventory.py`)
+were two separate copies of the *same* simplification, which could
+only ever have drifted further apart, never converged, if fixed
+separately later.
+
+### 13.3 What's still not modeled, named explicitly
+
+`restartPolicy: Always` init containers ("native sidecars,"
+Kubernetes 1.28+) actually run concurrently with the Pod's regular
+containers for its whole lifetime -- a fully correct algorithm would
+add a sidecar's own request into the regular-container sum rather than
+only letting it compete in the init-container max. This function
+treats every init container as an ordinary, non-restarting one
+regardless of `restartPolicy` -- a further, documented v1
+simplification layered on top of the one this milestone closes, not
+silently assumed covered.
+
+### 13.4 Live-verified against the real cluster, isolating the exact delta
+
+Applied a real Pod to the actual `kind-kubesentinel` cluster with a
+10m-cpu regular container and a 700m-cpu init container. Measured the
+real Node's "already requested" total via a `POST /scheduling/simulate`
+call's own `RESOURCE_FIT` reasoning twice -- once with the Pod absent
+(baseline: 950m) and once with it present (1650m) -- isolating this one
+Pod's own contribution as exactly 700m: the init container's real
+request, neither the regular container's 10m alone (what every call
+site would have read before this fix) nor a naive 710m sum. Re-applied
+and re-measured a second time to confirm reproducibility (1650m
+again), then cleaned up.

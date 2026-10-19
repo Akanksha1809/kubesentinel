@@ -36,7 +36,7 @@ from kubesentinel.scheduling.constraints import (
     check_taints_tolerations,
     check_topology_spread_constraints,
 )
-from kubesentinel.scheduling.node_inventory import parse_quantity_dict
+from kubesentinel.scheduling.node_inventory import effective_pod_resource_quantity
 
 
 def deserialize_pod_spec(raw_spec: dict) -> k8s_client.V1PodSpec:
@@ -48,24 +48,16 @@ def deserialize_pod_spec(raw_spec: dict) -> k8s_client.V1PodSpec:
 
 
 def _pod_spec_request(pod_spec: k8s_client.V1PodSpec) -> ResourceQuantity:
-    cpu_total = 0
-    memory_total = 0
-    any_cpu = False
-    any_memory = False
-    for container in pod_spec.containers or []:
-        resources = container.resources
-        if resources is None or resources.requests is None:
-            continue
-        parsed = parse_quantity_dict(resources.requests, context=f"hypothetical/{container.name}")
-        if parsed.cpu_millicores is not None:
-            cpu_total += parsed.cpu_millicores
-            any_cpu = True
-        if parsed.memory_bytes is not None:
-            memory_total += parsed.memory_bytes
-            any_memory = True
-    return ResourceQuantity(
-        cpu_millicores=cpu_total if any_cpu else None,
-        memory_bytes=memory_total if any_memory else None,
+    """The candidate Pod's own effective request -- `max(sum of regular
+    container requests, largest single init container request)` per
+    resource, the same real-scheduler algorithm
+    `node_inventory.py::effective_pod_resource_quantity` already applies
+    to every *other* already-bound Pod on a Node. Sharing one function
+    for both means the candidate's own request and its neighbors'
+    requests are never computed by two different, possibly-diverging
+    formulas for the same question."""
+    return effective_pod_resource_quantity(
+        pod_spec.containers, pod_spec.init_containers, "requests", context="hypothetical"
     )
 
 

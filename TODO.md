@@ -4332,3 +4332,76 @@ structurally-unclosable item; a new "Live-verified again" paragraph
 added). `docs/RBAC_AND_THREAT_MODEL.md` (the existing
 `scheduling-role.yaml` block grown in place; the "41 automated checks"
 count updated to 44).
+
+## Milestone 42: Init-container-aware resource fit -- DONE
+
+Closes `docs/SCHEDULING_ANALYSIS.md`/`docs/IMPLEMENTATION_STATUS.md`'s
+own previously-named approximation: "resource-fit math sums only
+regular containers' requests, not init containers (the real scheduler
+takes the *max* of init vs. regular container requests per resource,
+not a sum)." Found and closed while reviewing Capability C's own
+remaining named items for this session's next pick -- not a gap
+discovered live, but a real, already-documented one this project had
+deliberately deferred rather than silently gotten wrong.
+
+**The algorithm**: init containers run strictly sequentially, never
+concurrently with each other or with the Pod's regular containers, so
+a Pod's real effective request for one resource is the *greater* of
+(a) the sum of every regular container's own request, or (b) the
+single largest init container's own request -- never a sum across
+init containers, since only one is ever running at a time.
+
+**Added**: `scheduling/node_inventory.py::effective_pod_resource_quantity(
+containers, init_containers, field, context)` -- one shared
+implementation for both `requests` and `limits` (`field` selects
+which), replacing three previously-separate, previously-divergent
+copies of the *same* simplification:
+
+- `node_inventory.py::_pod_requested` (every *other* already-bound
+  Pod's contribution to `NodeSnapshot.requested`) -- now a one-line
+  call into the shared function.
+- `node_inventory.py::_pod_limits` (same Pods' `limits`, for
+  Milestone 36's overcommitment analysis) -- same refactor; its own
+  `unlimited_cpu_container_count`/`unlimited_memory_container_count`
+  now also counts init containers lacking a limit, not only regular
+  ones, closing the same gap for that half of the check too.
+- `analyzer.py::_pod_spec_request` (the *candidate* Pod's own
+  effective request, real or hypothetical) -- previously a third,
+  separate inline copy; now calls the same shared function, so the
+  candidate's own math and its neighbors' math can never diverge again.
+
+Explicitly does **not** special-case `restartPolicy: Always` init
+containers ("native sidecars," Kubernetes 1.28+), which actually run
+concurrently with the Pod's regular containers for its whole lifetime
+-- treated as an ordinary, non-restarting init container instead, a
+further, named v1 simplification layered on top of the one this
+milestone closes.
+
+**Tests**: 10 new unit tests (`test_scheduling_node_inventory.py`: 9,
+the shared function's own sum-vs-max/multiple-init/limits-field/no-
+containers cases, plus one `build_node_inventory`-level integration
+test confirming a large init container raises a Pod's real
+contribution; `test_scheduling_analyzer.py`: 1, confirming
+`check_resource_fit` blocks a hypothetical spec on its own large init
+container's request). Full regression suite: ruff clean, mypy clean,
+**1011 unit tests passed** (1001 + 10).
+
+**Live-verified against the real cluster, isolating the exact delta,
+not just unit-tested**: applied a real Pod (10m-cpu regular container,
+700m-cpu init container) to the actual `kind-kubesentinel` cluster.
+Measured the real Node's own "already requested" total via a `POST
+/scheduling/simulate` call's `RESOURCE_FIT` reasoning twice -- once
+with the Pod absent (950m baseline) and once present (1650m) --
+isolating this one Pod's own contribution as exactly 700m: the init
+container's real request, neither the regular container's 10m alone
+(what every call site would have read before this fix) nor a naive
+710m sum. Re-applied and re-measured a second time to confirm
+reproducibility (1650m again), then cleaned up.
+
+**Documentation**: `docs/SCHEDULING_ANALYSIS.md` (the Section 2
+resource-fit bullet corrected; new §13 with the full algorithm, the
+three-call-sites-now-one-function consolidation, the native-sidecar
+caveat, and the live-verification writeup).
+`docs/IMPLEMENTATION_STATUS.md` (the "real, checked-not-assumed
+approximation" paragraph updated to describe the closure; a new
+"Live-verified again" paragraph added).
