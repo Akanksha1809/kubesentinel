@@ -262,12 +262,17 @@ unfixable Roles/bindings), NetworkPolicy coverage (namespaces with zero
 policies, policies with an unrestricted-allow-all ingress rule, reusing
 Milestone 4's own classification rather than re-reading NetworkPolicy
 objects a second time), and PodDisruptionBudget coverage for multi-replica
-workloads. **Deliberately deferred**: CVE/image vulnerability scanning (no
-maintained vulnerability database this project has access to), Pod
-Security Admission namespace-label auditing (redundant with the
-already-built, more granular container-level checks), ServiceAccount
-token automount auditing, and any compliance-framework scoring -- each
-named explicitly as a gap, not silently absent.
+workloads. **Deliberately deferred at this milestone, both since closed
+as later, separate follow-ups**: CVE/image vulnerability scanning (no
+maintained vulnerability database this project had access to at the
+time -- closed as an opt-in extra via a local Trivy binary, see
+SECURITY_AUDITING.md §14) and Pod Security Admission namespace-label
+auditing (originally thought redundant with the already-built,
+more granular container-level checks -- closed once that framing was
+found to undersell the gap: those checks are all detective, PSA is
+preventive, see SECURITY_AUDITING.md §15). **Still deferred**:
+ServiceAccount token automount auditing and any compliance-framework
+scoring -- each named explicitly as a gap, not silently absent.
 
 **A real finding caught live during this milestone's own verification,
 by this project's own Milestone 20-23 audit standard**: a real kind

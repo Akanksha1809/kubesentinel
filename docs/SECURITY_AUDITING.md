@@ -149,14 +149,18 @@ compliance-framework score, in either case:
   -- duplicating it here would be exactly the "re-reading a second time"
   the roadmap's own NetworkPolicy instruction already warns against,
   generalized to every other already-covered domain too.
-- **Pod Security Admission namespace-label auditing** (the modern
-  replacement for the deprecated PodSecurityPolicy). A real, valuable
-  check, but deliberately out of this milestone's first pass -- the
-  container-level checks above already cover the same underlying
-  concerns (privilege, host namespaces, root) more granularly and
-  per-workload; a namespace-label check would be a coarser, redundant
-  view of the same evidence. Named as a candidate for a later pass, not
-  forgotten.
+- **Pod Security Admission namespace-label auditing** -- **closed as a
+  later, separate follow-up; see §15.** Originally deferred here on the
+  reasoning that the container-level checks above already cover the same
+  underlying concerns (privilege, host namespaces, root) more granularly
+  and per-workload, making a namespace-label check a coarser, redundant
+  view of the same evidence -- §15 found that framing undersold the gap:
+  the container-level checks are all *detective* (confirm a problem that
+  already exists), while Pod Security Admission is *preventive* (rejects
+  an unsafe spec at admission time, before it exists at all), so a
+  namespace could fail every detective check while having zero
+  preventive coverage, which nothing else in this engine would ever
+  surface.
 - **ServiceAccount token automount auditing**
   (`automountServiceAccountToken`). Named as a real, specific gap this
   milestone does not cover -- a reasonable next addition to

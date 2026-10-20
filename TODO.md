@@ -5248,3 +5248,50 @@ never have been appended at all.
 to the existing `active_metric_category`/`incidents_active` ones,
 explaining the fix and why explanation text/evidence IDs were
 deliberately not also compared.
+
+## Milestone 54: More stale "still open" doc claims corrected, no code change -- DONE
+
+A second pass of the same class of drift Milestone 48 closed once
+already: more docs still described things as deferred/not-yet-built
+that earlier milestones (34/36 for the optimizer's apply path, 13/14/15
+for the security auditor's CVE scanning/effective-RBAC/PSA closures,
+and the network engine's own active probe) had already closed. Found
+while fixing the diagnosis-history dedup gap and re-reading adjacent
+sections. No code changed in this pass.
+
+**Corrected, by doc**:
+
+- `docs/DESIGN_DECISIONS.md` -- "Why the resource optimization engine
+  has no apply/execute endpoint" flatly claimed no `ActionType`,
+  executor, or write verb existed; renamed and rewritten to record the
+  original decision as history while stating the apply path now exists
+  (Milestone 34).
+- `docs/SECURITY_AUDITING.md` §3 -- the Pod Security Admission bullet
+  still said "deliberately out of this milestone's first pass... named
+  as a candidate for a later pass"; corrected to point at §15's actual
+  closure and the detective-vs-preventive reasoning found there.
+- `docs/PLATFORM_ROADMAP.md`'s Milestone 6 section -- "Deliberately
+  deferred" still named CVE/image vulnerability scanning and Pod
+  Security Admission namespace-label auditing; both closed (§14/§15).
+  ServiceAccount token automount auditing and compliance-framework
+  scoring correctly remain in a separate "Still deferred" list --
+  confirmed still genuinely open before leaving them.
+- `docs/DEMO_SCRIPT.md`'s "Be upfront about what this isn't, yet"
+  section -- claimed the network engine "deliberately never runs an
+  active connectivity probe" (it does, opt-in, since the probe's own
+  milestone) and that the security auditor "doesn't do CVE/image
+  vulnerability scanning... [or] resolve a subject's effective
+  permissions across every Role" (both closed, §13/§14). The capacity
+  planning advisor's own external-dependency/latency limitation in the
+  same paragraph was checked and left alone -- genuinely still true, no
+  tracing/APM data exists in this project at all.
+
+**Why this is worth its own milestone entry, not folded into the
+diagnosis-history fix it was found alongside**: every one of these was
+a specific, checkable factual claim (not a judgment call), found only
+by cross-referencing docs against the actual code and against each
+other -- the same "named explicitly, not silently assumed covered"
+discipline this project's own audit process exists to uphold, applied
+to its own documentation this time. Full regression re-run as a sanity
+check even though no code changed: ruff clean, mypy clean, **1072 unit
+tests passed** (unchanged).

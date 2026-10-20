@@ -436,20 +436,20 @@ every remediation above was a deliberate human action (or, in
 unattended reaction to a diagnosis -- and that remains true with the
 operator running too: it only ever re-evaluates and auto-approves an
 already-proposed action, never invents which action to propose. The network
-engine reads live CoreDNS
-health and NetworkPolicy objects, but deliberately never runs an active
-connectivity probe -- that would be this project's first mutation surface
-outside the fully policy-gated `RemediationExecutor`, and was scoped out of
-this milestone for its own dedicated safety review rather than folded in;
-see NETWORK_DIAGNOSTICS.md Section 2. The capacity planning advisor has no
-visibility into external dependencies/latency at all (no tracing/APM data
-exists in this project) -- every finding says so explicitly rather than
-guessing at the cause of a bottleneck it can't actually see; see
-CAPACITY_PLANNING.md Section 2. The security auditor doesn't do CVE/image
-vulnerability scanning (no maintained vulnerability database this
-project has access to) and doesn't resolve a subject's *effective*
-permissions across every Role it's bound to combined -- it checks direct
-bindings and rules only; see SECURITY_AUDITING.md Section 3/12. AI
+engine reads live CoreDNS health and NetworkPolicy objects on every
+analysis pass; a real active connectivity probe also exists
+(`kubesentinel network-probe`), but off by default and only ever run
+explicitly, one target at a time -- this project's first mutation
+surface outside the fully policy-gated `RemediationExecutor`, closed
+only after its own dedicated safety review; see NETWORK_DIAGNOSTICS.md
+Section 12. The capacity planning advisor has no visibility into
+external dependencies/latency at all (no tracing/APM data exists in
+this project) -- every finding says so explicitly rather than guessing
+at the cause of a bottleneck it can't actually see; see
+CAPACITY_PLANNING.md Section 2. The security auditor's CVE/image
+vulnerability scanning is a real, separate, opt-in extra (off by
+default, scans via a local Trivy binary), not something this engine
+does on every pass; see SECURITY_AUDITING.md Section 14. AI
 summarization (`.venv/bin/kubesentinel explain <incident-id>`, step 5
 could optionally show it) is real but deliberately narrow: advisory
 only, adds no evidence, changes no diagnosis, and has no path back into

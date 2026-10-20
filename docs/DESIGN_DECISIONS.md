@@ -315,21 +315,25 @@ path into an AI prompt, because the prompt is built from the diagnostic
 engine's own structured conclusions, not from the raw fields those
 conclusions were derived from.
 
-## Why the resource optimization engine has no apply/execute endpoint
+## Why the resource optimization engine's apply path waited for its own milestone, rather than shipping early as a misleadingly-named stub
 
-Unlike `RECOMMEND_*` action types (above), which exist within an already-built
-execution lifecycle and simply opt out of it, the optimization engine has no
-execution lifecycle to opt out of at all -- there is no `ActionType`, no
-executor method, and no RBAC write verb anywhere in `optimization/` that
-could patch a workload's resources. The spec's own instruction is to keep
-analysis and execution clearly separated and to require explicit approval
-before any future apply path; exposing an endpoint that implied one already
-existed would be the "misleadingly-named endpoint for unimplemented
-behavior" the spec explicitly warns against, which is a stronger reason to
-leave it out than merely "we haven't gotten to it yet." A future apply path
-is specified (RESOURCE_OPTIMIZATION_DESIGN.md §6) to reuse the *existing*
-`PolicyEngine`/`RemediationExecutor` lifecycle, not a second approval system
-built from scratch for this engine alone.
+**Closed -- an apply/execute path now exists (`ActionType.ADJUST_RESOURCES`,
+`OptimizationService.apply_recommendation`, RESOURCE_OPTIMIZATION_DESIGN.md
+§14); this section's own reasoning is kept because the *decision* it
+records is still the right one, not because the engine is still missing
+one.** Earlier in this project's history, the optimization engine had no
+execution lifecycle at all -- unlike `RECOMMEND_*` action types (above),
+which exist within an already-built lifecycle and simply opt out of it,
+there was genuinely no `ActionType`, no executor method, and no RBAC
+write verb anywhere in `optimization/` yet. The spec's own instruction is
+to keep analysis and execution clearly separated and to require explicit
+approval before any apply path; exposing an endpoint before that lifecycle
+existed would have been the "misleadingly-named endpoint for unimplemented
+behavior" the spec explicitly warns against -- a stronger reason to wait
+than merely "haven't gotten to it yet." The apply path, once built, reused
+the *existing* `PolicyEngine`/`RemediationExecutor` lifecycle exactly as
+planned here, not a second approval system built from scratch for this
+engine alone.
 
 ## Why CPU uses a percentile of typical demand and memory uses the peak,
 never the average for either
