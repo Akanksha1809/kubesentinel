@@ -5295,3 +5295,52 @@ discipline this project's own audit process exists to uphold, applied
 to its own documentation this time. Full regression re-run as a sanity
 check even though no code changed: ruff clean, mypy clean, **1072 unit
 tests passed** (unchanged).
+
+## Milestone 55: `scripts/demo.sh` starts the server before the scenarios, not after -- DONE
+
+Found running the full demo end to end: `scripts/demo.sh` applied every
+failure scenario *then* started the API server (`exec uvicorn ...` as
+the script's own last line). For a scenario that crashes and recovers
+in well under a second (`transient-recovery` -- two quick `exit 1`s on
+an `emptyDir`-backed counter, then `sleep infinity`), the Pod had
+already settled into Running/Ready by the time the server's own
+`PodWatcher` took its first look -- so no incident ever opened at all,
+silently skipping the exact "opens an incident, then resolves it with a
+recorded `recovery_duration_seconds`" narrative that scenario's own
+manifest comment and `docs/FAILURE_LAB.md` both document as the
+expected behavior. Every other scenario (crash loops that keep
+crashing, Pending Pods, etc.) happened to be unaffected only because
+their own failure state is still true by the time the server starts --
+this was a real, if narrow, ordering bug, not specific to one scenario
+by design.
+
+**The fix**: start the API server first (backgrounded, with a
+`trap ... EXIT INT TERM` forwarding Ctrl+C/exit to it the way `exec`
+used to get for free, and a bounded poll on `/metrics` before
+proceeding, rather than a blind sleep), *then* apply the requested
+scenario(s), then `wait` on the server in the foreground so output and
+Ctrl+C behavior are unchanged from the user's own perspective. No
+Python changed -- `scripts/demo.sh` only.
+
+Also fixes, as a side effect rather than a separate change: this
+reordering matches what `docs/DEMO_SCRIPT.md`'s own walkthrough already
+documented as the intended sequence ("1. show there's nothing wrong
+yet -- 2. start KubeSentinel watching -- 3. break things on purpose")
+-- the doc was already correct; only the script's own internal
+behavior had drifted from it.
+
+**Live-verified against the real cluster**: reproduced the exact
+original gap -- ran the fixed script's own sequencing (server up and
+polled-ready, then `transient-recovery` applied) against a fresh
+instance of the scenario Pod. Confirmed via the real `GET /incidents`
+endpoint: an incident genuinely opened this time
+(`CRASH_LOOP_BACKOFF`, status `DIAGNOSED`) where previously none ever
+did. Forced a second healthy watch observation (a harmless label
+change, since a Pod that settles into Running with nothing further
+changing produces no new watch event on its own until the periodic
+300s resync) to close the loop without an artificial wait, and
+confirmed the incident reached `status: RESOLVED` with a real,
+non-fabricated `recovery_duration_seconds: 53.85` -- the full
+documented narrative, working end to end, exactly as
+`docs/FAILURE_LAB.md` already claimed it would. Removed the test label
+and cleaned up the throwaway verification server/db afterward.
