@@ -73,21 +73,29 @@ def effective_pod_resource_quantity(
 ) -> ResourceQuantity:
     """Kubernetes' own effective-Pod-resource algorithm for `field`
     (`"requests"` or `"limits"`, read identically for both -- the same
-    formula governs both): the greater, per resource, of (a) the sum of
-    every regular container's own value, or (b) the single largest init
-    container's own value. Init containers run one at a time, never
-    concurrently with each other or with the regular containers, so only
-    the largest one competes, never a sum across them. See
-    https://kubernetes.io/docs/concepts/workloads/pods/init-containers/#resources.
+    formula governs both). See
+    https://kubernetes.io/docs/concepts/workloads/pods/init-containers/#resources
+    and, for the sidecar extension below,
+    https://kubernetes.io/docs/concepts/workloads/pods/sidecar-containers/#resource-sharing-within-containers.
 
-    Does NOT special-case `restartPolicy: Always` init containers
-    ("native sidecars," Kubernetes 1.28+) -- a sidecar actually runs
-    concurrently with the Pod's regular containers for its whole
-    lifetime, so a fully correct algorithm would add its own value into
-    the regular-container sum rather than only competing in the
-    init-container max. Treated here as an ordinary (non-restarting)
-    init container instead -- a further, documented v1 simplification
-    layered on top of the one this function already closes."""
+    Init containers run one at a time, in order, never concurrently with
+    each other -- so a plain (non-restarting) init container only ever
+    competes against the single largest one, never a sum across them.
+    `restartPolicy: Always` init containers ("native sidecars,"
+    Kubernetes 1.28+) are the one exception: once started, a sidecar
+    keeps running in the background for the rest of the Pod's life,
+    concurrently with every later init container *and* every regular
+    container -- closed here, not just competing in the init-container
+    max the way a plain init container does, by walking the init
+    container list in declared order and tracking a running sidecar
+    total: at the moment any given init container is the one actively
+    initializing, what's really in use is every earlier sidecar still
+    running (the running total) plus that container's own request
+    (whichever kind it is) -- and once every init container has run,
+    the final steady state is every regular container plus every
+    sidecar, all running together. The effective value is the greater
+    of every one of those moments, exactly matching the Kubernetes docs'
+    own worked example."""
     cpu_sum = 0
     memory_sum = 0
     any_cpu_sum = False
@@ -101,19 +109,36 @@ def effective_pod_resource_quantity(
             memory_sum += parsed.memory_bytes
             any_memory_sum = True
 
+    cpu_sidecar_sum = 0
+    memory_sidecar_sum = 0
+    any_cpu_sidecar_sum = False
+    any_memory_sidecar_sum = False
     cpu_init_max: int | None = None
     memory_init_max: int | None = None
     for container in init_containers or []:
         parsed = _container_resource_quantity(container, field, context=f"{context}/{container.name} (init)")
         if parsed.cpu_millicores is not None:
-            cpu_init_max = parsed.cpu_millicores if cpu_init_max is None else max(cpu_init_max, parsed.cpu_millicores)
+            candidate = cpu_sidecar_sum + parsed.cpu_millicores
+            cpu_init_max = candidate if cpu_init_max is None else max(cpu_init_max, candidate)
         if parsed.memory_bytes is not None:
-            memory_init_max = (
-                parsed.memory_bytes if memory_init_max is None else max(memory_init_max, parsed.memory_bytes)
-            )
+            candidate = memory_sidecar_sum + parsed.memory_bytes
+            memory_init_max = candidate if memory_init_max is None else max(memory_init_max, candidate)
 
-    cpu_candidates = [v for v in (cpu_sum if any_cpu_sum else None, cpu_init_max) if v is not None]
-    memory_candidates = [v for v in (memory_sum if any_memory_sum else None, memory_init_max) if v is not None]
+        if container.restart_policy == "Always":
+            if parsed.cpu_millicores is not None:
+                cpu_sidecar_sum += parsed.cpu_millicores
+                any_cpu_sidecar_sum = True
+            if parsed.memory_bytes is not None:
+                memory_sidecar_sum += parsed.memory_bytes
+                any_memory_sidecar_sum = True
+
+    any_cpu_steady = any_cpu_sum or any_cpu_sidecar_sum
+    any_memory_steady = any_memory_sum or any_memory_sidecar_sum
+    cpu_steady = cpu_sum + cpu_sidecar_sum
+    memory_steady = memory_sum + memory_sidecar_sum
+
+    cpu_candidates = [v for v in (cpu_steady if any_cpu_steady else None, cpu_init_max) if v is not None]
+    memory_candidates = [v for v in (memory_steady if any_memory_steady else None, memory_init_max) if v is not None]
     return ResourceQuantity(
         cpu_millicores=max(cpu_candidates) if cpu_candidates else None,
         memory_bytes=max(memory_candidates) if memory_candidates else None,

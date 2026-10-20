@@ -221,8 +221,12 @@ class TestBuildPodLabelInventory:
         assert summaries[0].labels == {}
 
 
-def _container(name="app", requests=None, limits=None):
-    return V1Container(name=name, resources=V1ResourceRequirements(requests=requests, limits=limits))
+def _container(name="app", requests=None, limits=None, restart_policy=None):
+    return V1Container(
+        name=name,
+        resources=V1ResourceRequirements(requests=requests, limits=limits),
+        restart_policy=restart_policy,
+    )
 
 
 class TestEffectivePodResourceQuantity:
@@ -304,6 +308,104 @@ class TestEffectivePodResourceQuantity:
         )
         assert result.cpu_millicores == 500
         assert result.memory_bytes == 256 * 1024 * 1024
+
+
+class TestEffectivePodResourceQuantityWithNativeSidecars:
+    """`restartPolicy: Always` init containers ("native sidecars,"
+    Kubernetes 1.28+) keep running once started, concurrently with every
+    later init container and every regular container -- closing the gap
+    docs/SCHEDULING_ANALYSIS.md Section 13.3 named explicitly."""
+
+    def test_sidecar_adds_into_the_regular_sum_once_running(self):
+        # The exact gap this closes: a sidecar smaller than the regular
+        # sum must still add to it in the final steady state, not just
+        # compete against it the way a plain init container would.
+        result = effective_pod_resource_quantity(
+            [_container(requests={"cpu": "100m"})],
+            [_container(name="sidecar", requests={"cpu": "300m"}, restart_policy="Always")],
+            "requests",
+            context="test",
+        )
+        assert result.cpu_millicores == 400
+
+    def test_matches_the_kubernetes_docs_own_worked_example(self):
+        # init-1 (sidecar, 2 CPU) starts and keeps running; init-2 (plain,
+        # 1 CPU) starts next, alongside init-1; container-1 (2 CPU) is the
+        # eventual steady state, alongside init-1. Effective = max(2, 2+1,
+        # 2+2) = 4 -- pinned against the authoritative example at
+        # https://kubernetes.io/docs/concepts/workloads/pods/sidecar-containers/#resource-sharing-within-containers.
+        result = effective_pod_resource_quantity(
+            [_container(name="container-1", requests={"cpu": "2"})],
+            [
+                _container(name="init-1", requests={"cpu": "2"}, restart_policy="Always"),
+                _container(name="init-2", requests={"cpu": "1"}),
+            ],
+            "requests",
+            context="test",
+        )
+        assert result.cpu_millicores == 4000
+
+    def test_a_later_plain_init_container_does_not_sum_with_an_earlier_one(self):
+        # Two plain init containers still never sum with each other --
+        # only a *sidecar* accumulates. A sidecar before a plain init
+        # container adds to that container's own candidate; two plain
+        # ones never add to each other's.
+        result = effective_pod_resource_quantity(
+            [],
+            [
+                _container(name="sidecar", requests={"cpu": "100m"}, restart_policy="Always"),
+                _container(name="plain-a", requests={"cpu": "300m"}),
+                _container(name="plain-b", requests={"cpu": "50m"}),
+            ],
+            "requests",
+            context="test",
+        )
+        # plain-a's candidate: 100 (sidecar) + 300 = 400. plain-b's: 100 + 50 = 150.
+        # Never 100 + 300 + 50 = 450 -- plain-a and plain-b never add to each other.
+        assert result.cpu_millicores == 400
+
+    def test_declaration_order_determines_which_init_containers_see_the_sidecar(self):
+        # A sidecar only counts toward an init container's own candidate
+        # if it was declared *before* that container -- it hasn't started
+        # yet if declared after.
+        sidecar_first = effective_pod_resource_quantity(
+            [_container(requests={"cpu": "10m"})],
+            [
+                _container(name="sidecar", requests={"cpu": "100m"}, restart_policy="Always"),
+                _container(name="plain", requests={"cpu": "50m"}),
+            ],
+            "requests",
+            context="test",
+        )
+        plain_first = effective_pod_resource_quantity(
+            [_container(requests={"cpu": "10m"})],
+            [
+                _container(name="plain", requests={"cpu": "50m"}),
+                _container(name="sidecar", requests={"cpu": "100m"}, restart_policy="Always"),
+            ],
+            "requests",
+            context="test",
+        )
+        # sidecar first: plain's own candidate is 100 (sidecar) + 50 = 150,
+        # the overall max.
+        assert sidecar_first.cpu_millicores == 150
+        # plain first: plain's own candidate is only 50 (the sidecar hasn't
+        # started yet) -- the steady state (10 regular + 100 sidecar = 110)
+        # wins instead. Same two containers, same final sidecar
+        # contribution, different init-phase peak purely from order.
+        assert plain_first.cpu_millicores == 110
+
+    def test_multiple_sidecars_all_accumulate_in_the_steady_state(self):
+        result = effective_pod_resource_quantity(
+            [_container(requests={"cpu": "10m"})],
+            [
+                _container(name="sidecar-a", requests={"cpu": "100m"}, restart_policy="Always"),
+                _container(name="sidecar-b", requests={"cpu": "50m"}, restart_policy="Always"),
+            ],
+            "requests",
+            context="test",
+        )
+        assert result.cpu_millicores == 160  # 10 + 100 + 50
 
 
 class TestBuildNodeInventoryWithInitContainers:

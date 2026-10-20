@@ -5122,3 +5122,77 @@ demo DaemonSet afterward.
 explain, with the reasons found while scoping this, why StatefulSet and
 Job are genuinely harder, not just unscheduled; new §8 covering the
 closure in full.
+
+## Milestone 52: Native sidecars modeled in the scheduling advisor's resource-fit math -- DONE
+
+Closes `docs/SCHEDULING_ANALYSIS.md`'s own named v1 simplification
+(§13.3, layered on top of Milestone 42's own max-not-sum closure):
+`restartPolicy: Always` init containers ("native sidecars," Kubernetes
+1.28+, stable since 1.29) actually run concurrently with the Pod's
+regular containers for its whole lifetime, but
+`effective_pod_resource_quantity()` treated every init container as an
+ordinary, non-restarting one regardless of `restartPolicy`, letting a
+sidecar only compete in the init-container max rather than adding its
+own request on top of whatever runs alongside it.
+
+**The real formula, taken from the Kubernetes docs' own worked
+example, not reinvented**: walk the init containers in their declared
+order, maintaining a running total of every sidecar's own request seen
+so far. At the exact moment any given init container is the one
+actively initializing, what's genuinely in use is every earlier
+sidecar still running plus that container's own request, whichever
+kind it is -- that's each init-phase candidate. Once every init
+container has run, the final steady state is every regular container
+plus every sidecar, all running together. The effective value is the
+greatest of all of those moments. Reduces to exactly the original
+max-not-sum formula whenever no sidecar exists at all, so every one of
+the three call sites sharing this function (§13.2) is unaffected for a
+Pod that was already free of sidecars.
+
+**Added**: `scheduling/node_inventory.py::effective_pod_resource_quantity()`
+rewritten to track a running `*_sidecar_sum` while walking init
+containers in order (not just the flat max it computed before),
+feeding both the per-init-container candidate and the final steady
+state. No call site changed -- the same one function, three call
+sites, shared by `analyzer.py`'s candidate-Pod math and
+`node_inventory.py`'s own already-bound-Pod accounting, stays the
+single source of truth.
+
+**Tests**: 5 new unit tests in a new
+`TestEffectivePodResourceQuantityWithNativeSidecars` class --
+a sidecar adds into the regular sum once running; the Kubernetes docs'
+own worked numeric example (2+1+2 CPU resolving to 4), pinned against
+the authoritative source directly, not just this project's own
+derivation of it; a later plain init container never sums with an
+earlier one (only a sidecar accumulates); declaration order determines
+which init containers see a given sidecar's contribution (the same two
+containers in reverse order produce a different init-phase peak, 150
+vs. 100, while the final steady state stays the same); multiple
+sidecars all accumulate together. Every one of the 26 pre-existing
+tests for this function passed completely unchanged, confirming the
+new formula is an exact backward-compatible generalization, not a
+behavior change for the no-sidecar case. Full regression: ruff clean,
+mypy clean, **1070 unit tests passed** (1065 + 5).
+
+**Live-verified against the real cluster, isolating the sidecar-specific
+delta exactly as Milestone 42's own verification did for the original
+closure**: applied a real Pod to the actual `kind-kubesentinel` cluster
+(server version 1.36.1) with a 10m-cpu regular container, a 300m-cpu
+sidecar init container, and a 400m-cpu plain init container. Confirmed
+via the real kubelet's own reported container statuses that the
+sidecar and the plain init container genuinely ran concurrently (the
+sidecar's `state.running` never terminated; the plain init container's
+`state.terminated` started at the exact same timestamp). Measured the
+real Node's "already requested" total via a real `POST
+/scheduling/simulate` call twice: baseline 950m, with the Pod present
+1650m -- a delta of exactly 700m (300 + 400, the new formula's own
+answer), not 400m (the pre-fix algorithm's `max(300, 400)`, ignoring
+`restartPolicy` entirely) and not a naive 710m sum across every
+container in the Pod. Re-measured a second time to confirm
+reproducibility (1650m again), then cleaned up.
+
+**Documentation**: `docs/SCHEDULING_ANALYSIS.md` §13.3 rewritten from
+"what's still not modeled" to the closure itself, with the formula
+explained in full; new §13.5 with the live-verification narrative.
+`docs/IMPLEMENTATION_STATUS.md`'s matching paragraph updated to no
+longer describe this as an open simplification.

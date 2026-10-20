@@ -407,17 +407,44 @@ were two separate copies of the *same* simplification, which could
 only ever have drifted further apart, never converged, if fixed
 separately later.
 
-### 13.3 What's still not modeled, named explicitly
+### 13.3 Native sidecars, closed as a later, separate follow-up
 
-`restartPolicy: Always` init containers ("native sidecars,"
-Kubernetes 1.28+) actually run concurrently with the Pod's regular
-containers for its whole lifetime -- a fully correct algorithm would
-add a sidecar's own request into the regular-container sum rather than
-only letting it compete in the init-container max. This function
-treats every init container as an ordinary, non-restarting one
-regardless of `restartPolicy` -- a further, documented v1
-simplification layered on top of the one this milestone closes, not
-silently assumed covered.
+**Closed -- was named explicitly as a further v1 simplification layered
+on top of §13.1's own closure.** `restartPolicy: Always` init containers
+("native sidecars," Kubernetes 1.28+, stable since 1.29) actually run
+concurrently with the Pod's regular containers for its whole lifetime --
+the §13.1 max-not-sum algorithm alone treated every init container as
+an ordinary, non-restarting one, letting a sidecar only compete in the
+init-container max rather than adding its own request on top of
+whatever runs alongside it.
+
+**The real formula, per
+[the Kubernetes docs' own worked example](https://kubernetes.io/docs/concepts/workloads/pods/sidecar-containers/#resource-sharing-within-containers),
+not reinvented from scratch**: walk the init containers in their
+declared order, maintaining a running total of every sidecar's own
+request seen so far (a sidecar keeps running once started, so it's
+still contributing by the time any later container starts). At the
+exact moment any given init container is the one actively initializing,
+what's genuinely in use is every earlier sidecar still running plus
+that container's own request, whichever kind it is -- that's each
+init-phase candidate. Once every init container has run, the final
+steady state is every regular container plus every sidecar, all running
+together. The effective value is the greatest of all of those moments.
+`effective_pod_resource_quantity()` now implements exactly this,
+verified against the Kubernetes docs' own numeric example (2+1+2 CPU
+sidecar/plain-init/regular-container case, correctly resolving to 4, not
+a naive 3 or 2) before ever touching the real cluster. Declaration order
+matters for the init-phase candidates specifically (a sidecar only
+counts toward a later init container's candidate, never an earlier
+one's) but not for the final steady state, which only cares whether a
+sidecar is restartable at all, not where it sits in the list -- both
+properties are pinned by dedicated tests, not just the common case.
+
+Reduces to exactly §13.1's original formula whenever no
+`restartPolicy: Always` init container exists at all (the sidecar
+running-total stays zero throughout), so every one of the three call
+sites named in §13.2 is unaffected for a Pod that was already free of
+sidecars, and continues to need no further special-casing.
 
 ### 13.4 Live-verified against the real cluster, isolating the exact delta
 
@@ -431,3 +458,24 @@ request, neither the regular container's 10m alone (what every call
 site would have read before this fix) nor a naive 710m sum. Re-applied
 and re-measured a second time to confirm reproducibility (1650m
 again), then cleaned up.
+
+### 13.5 Native sidecars, live-verified the same way, isolating the sidecar-specific delta
+
+Applied a real Pod to the actual `kind-kubesentinel` cluster (server
+version 1.36.1, well past the 1.29 stabilization) with a 10m-cpu
+regular container, a 300m-cpu `restartPolicy: Always` init container
+("sidecar"), and a 400m-cpu plain init container. Confirmed via the
+real `kubelet`'s own reported container statuses, not assumed: the
+sidecar's `state.running` never terminated, while the plain init
+container's `state.terminated` (`reason: Completed`) started at the
+exact same timestamp the sidecar did -- the real cluster genuinely ran
+them concurrently, not just this engine's own model of it.
+
+Measured the real Node's "already requested" total via the same
+`POST /scheduling/simulate` technique as §13.4, before and after:
+baseline 950m, with the Pod present 1650m -- a delta of exactly 700m
+(300m sidecar + 400m plain init, both now counted in the final steady
+state), not 400m (the pre-fix algorithm's own answer: `max(300, 400)`,
+ignoring `restartPolicy` entirely) and not a naive 710m sum across
+every container. Re-measured a second time to confirm reproducibility
+(1650m again), then cleaned up.

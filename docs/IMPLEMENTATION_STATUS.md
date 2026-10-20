@@ -177,9 +177,12 @@ same question (`_pod_requested`/`_pod_limits` for every other
 already-bound Pod on a Node, `analyzer.py::_pod_spec_request` for the
 candidate Pod), so the candidate's own math and its neighbors' math can
 never diverge again. `restartPolicy: Always` init containers ("native
-sidecars," Kubernetes 1.28+) are still treated as ordinary
-non-restarting ones -- a further, explicitly named v1 simplification.
-See `docs/SCHEDULING_ANALYSIS.md` §13.
+sidecars," Kubernetes 1.28+) -- once a further, explicitly named v1
+simplification, still treated as ordinary non-restarting ones -- are
+now modeled correctly too, closed as a later, separate follow-up: a
+sidecar's own request now adds into whatever runs alongside it for as
+long as it keeps running, not just competing in the init-container max.
+See `docs/SCHEDULING_ANALYSIS.md` §13.3.
 
 **A real gap caught live during this milestone's own verification, by this
 audit's own standard**: `SchedulingFinding.related_incident_ids` was
