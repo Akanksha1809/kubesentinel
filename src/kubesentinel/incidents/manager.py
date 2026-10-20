@@ -191,8 +191,23 @@ class IncidentManager:
         result = self._engine.diagnose(incident.evidence)
         new_top = result.top_hypothesis
 
+        # Same reason_code alone isn't "unchanged" -- a rule can raise its
+        # own confidence for the identical reason_code as more evidence
+        # accumulates (e.g. CrashLoopBackOffRule's MEDIUM -> HIGH once
+        # restart_count crosses its own threshold). Found live: dedupe-by-
+        # reason_code-only silently discarded that refinement, keeping the
+        # log's only entry for this reason_code at its own first, weaker
+        # confidence forever. Deliberately not also comparing explanation
+        # text or evidence IDs -- those differ on nearly every observation
+        # (a restart count ticking up, a fresh evidence UUID) regardless of
+        # whether anything about the actual diagnosis is more certain, and
+        # diffing them would defeat the log's own "readable, not every
+        # observation" purpose.
         materially_changed = not (
-            previous_top and new_top and previous_top.reason_code == new_top.reason_code
+            previous_top
+            and new_top
+            and previous_top.reason_code == new_top.reason_code
+            and previous_top.confidence == new_top.confidence
         )
         if materially_changed:
             incident.diagnosis_history.append(result)

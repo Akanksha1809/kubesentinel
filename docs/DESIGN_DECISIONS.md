@@ -224,6 +224,46 @@ open incident correctly showed the first category's gauge drop back to 0
 and the second category's gauge read exactly 1, via the real `/metrics`
 endpoint.
 
+## Why `_update_existing`'s diagnosis-history dedup compares confidence,
+not just reason_code
+
+**Closed -- was a known limitation, named explicitly in TODO.md's
+Milestone-1 list, item 6: "Diagnosis history dedup is coarse: a
+materially-unchanged top hypothesis (same reason code) is not re-appended
+to `diagnosis_history`, which keeps the log readable but discards
+confidence/explanation refinements between observations of the same
+reason code."** Real, not theoretical: `CrashLoopBackOffRule` itself
+raises confidence from `MEDIUM` to `HIGH` once `restart_count` crosses
+its own threshold, for the identical `reason_code` throughout -- dedupe-
+by-`reason_code`-alone discarded that refinement, keeping the log's only
+entry for an incident's reason code at whatever confidence it first
+diagnosed at, forever, even once the evidence genuinely justified more
+certainty.
+
+The fix adds exactly one more equality check -- `previous_top.confidence
+== new_top.confidence`, alongside the existing `reason_code` comparison
+-- not a text or evidence-ID diff. Deliberately not comparing
+`explanation` text or `supporting_evidence`/`missing_evidence` directly:
+those differ on nearly every observation regardless of whether anything
+about the actual diagnosis is more certain (a restart count ticking up by
+one, a freshly-generated evidence UUID), and diffing them would make
+`materially_changed` true on almost every call, defeating the log's own
+"readable, not every observation" purpose -- the same purpose the
+original, now-too-coarse check already existed to serve. Confidence has
+exactly four possible values and changes only when a rule's own stated
+threshold is crossed, so it stays a precise, low-noise signal for "this
+is a meaningfully different claim," not a proxy for "something, anything,
+is different about this observation."
+
+Live-verified against the real cluster: a real crash-looping Pod's
+incident opened with its first diagnosis at `MEDIUM` confidence
+(`restart_count` still below `CrashLoopBackOffRule`'s own threshold); a
+later observation, once `restart_count` crossed it, correctly produced a
+*second* `diagnosis_history` entry at `HIGH` confidence for the exact same
+`CRASH_LOOP_BACKOFF` reason code, via the real `GET /incidents/{id}`
+endpoint -- before this fix, that second entry would never have been
+appended at all.
+
 ## Why `RemediationService.propose()` gets a dedicated lock instead of a
 broader locking scheme
 

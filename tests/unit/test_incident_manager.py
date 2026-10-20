@@ -16,6 +16,7 @@ from kubesentinel.models.optimization import (
     UsageSummary,
     WorkloadKind,
 )
+from kubesentinel.models.diagnosis import Confidence
 from kubesentinel.models.incident import IncidentStatus, ResourceRef
 from kubesentinel.observer.inspector import deployment_evidence, pod_evidence, resource_ref_from_deployment
 from kubesentinel.persistence.optimization_repo import SQLiteOptimizationRepository
@@ -187,6 +188,37 @@ def test_resolved_incident_does_not_block_a_new_incident_for_same_uid(manager):
     second = manager.observe(ref, pod_evidence(make_pod(container_statuses=[bad_cs])))
     assert second.incident_id != first.incident_id
     assert second.status == IncidentStatus.DIAGNOSED
+
+
+def test_confidence_rising_for_the_same_reason_code_gets_its_own_diagnosis_history_entry(manager):
+    # Regression test for a real bug found live (TODO.md's Milestone-1
+    # known-limitations list, item 6): dedupe-by-reason_code-alone
+    # silently discarded a confidence refinement for the identical
+    # reason_code -- CrashLoopBackOffRule's own MEDIUM -> HIGH once
+    # restart_count crosses its threshold is exactly this case.
+    ref = _ref()
+    low_confidence = waiting_container_status(reason="CrashLoopBackOff", restart_count=1)
+    opened = manager.observe(ref, pod_evidence(make_pod(container_statuses=[low_confidence])))
+    assert opened.latest_diagnosis.top_hypothesis.confidence == Confidence.MEDIUM
+    assert len(opened.diagnosis_history) == 1
+
+    high_confidence = waiting_container_status(reason="CrashLoopBackOff", restart_count=5)
+    refined = manager.observe(ref, pod_evidence(make_pod(container_statuses=[high_confidence])))
+
+    assert refined.category == "CRASH_LOOP_BACKOFF"  # reason_code unchanged
+    assert refined.latest_diagnosis.top_hypothesis.confidence == Confidence.HIGH
+    assert len(refined.diagnosis_history) == 2  # the refinement got its own entry, not discarded
+
+
+def test_repeated_identical_confidence_for_the_same_reason_code_is_not_re_logged(manager):
+    # The other half of the same property: the log must still stay
+    # readable for the common case of nothing actually changing.
+    ref = _ref()
+    cs = waiting_container_status(reason="CrashLoopBackOff", restart_count=5)
+    manager.observe(ref, pod_evidence(make_pod(container_statuses=[cs])))
+    repeated = manager.observe(ref, pod_evidence(make_pod(container_statuses=[cs])))
+
+    assert len(repeated.diagnosis_history) == 1
 
 
 def test_reconcile_metrics_sets_active_gauge_from_persisted_open_incidents(manager):

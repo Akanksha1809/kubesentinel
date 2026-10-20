@@ -5196,3 +5196,55 @@ reproducibility (1650m again), then cleaned up.
 explained in full; new §13.5 with the live-verification narrative.
 `docs/IMPLEMENTATION_STATUS.md`'s matching paragraph updated to no
 longer describe this as an open simplification.
+
+## Milestone 53: Diagnosis-history dedup also compares confidence, not just reason_code -- DONE
+
+Closes Milestone 1's own known-limitation item 6: "Diagnosis history
+dedup is coarse: a materially-unchanged top hypothesis (same reason
+code) is not re-appended to `diagnosis_history`, which keeps the log
+readable but discards confidence/explanation refinements between
+observations of the same reason code." Real, confirmed via
+`CrashLoopBackOffRule` itself: its own confidence rises from `MEDIUM` to
+`HIGH` once `restart_count` crosses its threshold, for the identical
+`reason_code` throughout -- dedupe-by-`reason_code`-alone discarded that
+refinement, keeping the log's only entry for a reason code at whatever
+confidence it first diagnosed at, forever.
+
+**The fix**: `incidents/manager.py::IncidentManager._update_existing`'s
+`materially_changed` check now also compares `previous_top.confidence ==
+new_top.confidence`, alongside the existing `reason_code` comparison.
+Deliberately not comparing `explanation` text or
+`supporting_evidence`/`missing_evidence` directly -- those differ on
+nearly every observation regardless of whether the diagnosis itself is
+more certain (a restart count ticking up by one, a freshly-generated
+evidence UUID), and diffing them would make `materially_changed` true on
+almost every call, defeating the log's own "readable, not every
+observation" purpose. Confidence has exactly four possible values and
+changes only when a rule's own stated threshold is crossed, staying a
+precise, low-noise signal.
+
+**Tests**: 2 new unit tests in `test_incident_manager.py` --
+`test_confidence_rising_for_the_same_reason_code_gets_its_own_diagnosis_history_entry`
+(a `CrashLoopBackOff` incident's confidence rising from `MEDIUM` to
+`HIGH` across two observations now produces 2 `diagnosis_history`
+entries, not 1), and
+`test_repeated_identical_confidence_for_the_same_reason_code_is_not_re_logged`
+(the other half of the same property -- the log stays readable for the
+common case of nothing actually changing). No dedicated test for this
+exact dedup logic existed before this closure. Every pre-existing test
+passed unchanged. Full regression: ruff clean, mypy clean, **1072 unit
+tests passed** (1070 + 2).
+
+**Live-verified against the real cluster**: a real crash-looping Pod's
+incident opened with its first diagnosis at `MEDIUM` confidence
+(`restart_count` still below the rule's own threshold); a later
+observation, once `restart_count` crossed it, correctly produced a
+*second* `diagnosis_history` entry at `HIGH` confidence for the exact
+same `CRASH_LOOP_BACKOFF` reason code, confirmed via the real `GET
+/incidents/{id}` endpoint. Before this fix, that second entry would
+never have been appended at all.
+
+**Documentation**: `docs/DESIGN_DECISIONS.md` -- new section, sibling
+to the existing `active_metric_category`/`incidents_active` ones,
+explaining the fix and why explanation text/evidence IDs were
+deliberately not also compared.
