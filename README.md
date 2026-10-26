@@ -1,231 +1,80 @@
 # KubeSentinel
 
-A locally runnable Kubernetes troubleshooting and controlled self-healing platform.
-Built to demonstrate real Kubernetes engineering depth: control-loop semantics,
-observed-vs-inferred diagnosis, safe remediation policy, and recovery verification --
-not a generated README wrapped around an LLM call.
+A Kubernetes operations platform you run entirely on your own machine against a
+real local [kind](https://kind.sigs.k8s.io/) cluster -- no paid cloud services,
+no required AI model, no managed control plane. It's built to demonstrate real
+Kubernetes engineering depth: control-loop semantics (watch/relist/resync, not
+polling), the difference between an *observed* fact and an *inferred*
+hypothesis, a safety-gated remediation policy, and recovery that's *verified*
+against the live cluster rather than assumed from an action's own "success"
+response -- not a generated README wrapped around an LLM call.
 
-Runs entirely on a local [kind](https://kind.sigs.k8s.io/) cluster. No paid cloud
-services, no required AI model. See [DEMO_SCRIPT.md](docs/DEMO_SCRIPT.md) for a
-guided walkthrough and [TODO.md](TODO.md) for exactly what is and isn't built yet.
+See [DEMO_SCRIPT.md](docs/DEMO_SCRIPT.md) for a full guided walkthrough and
+[TODO.md](TODO.md) for the detailed build history and exactly what is and
+isn't built, with live-verification evidence for every claim.
 
 ## Demo
 
 ![KubeSentinel demo: diagnosis, policy-controlled remediation, and resource optimization recommendations, all against a real kind cluster](docs/images/demo.gif)
 
-A real, unedited terminal session against a real kind cluster: what Kubernetes
-itself reports vs. what KubeSentinel diagnoses, a full policy-controlled
-`plan -> approve -> execute -> verify` remediation (correctly reporting
-`VERIFICATION_FAILED` rather than lying about an action that didn't fix
-anything), and the resource optimization engine producing a real
-`CPU_OVERSIZED`/`MEMORY_OVERSIZED` recommendation from real metrics-server
-samples. Recorded with [asciinema](https://asciinema.org) + [agg](https://github.com/asciinema/agg) --
-every line is genuine command output, not staged.
+A real, unedited terminal session against a real kind cluster: what
+Kubernetes itself reports vs. what KubeSentinel diagnoses, a full
+policy-controlled `plan -> approve -> execute -> verify` remediation
+(correctly reporting `VERIFICATION_FAILED` rather than lying about an action
+that didn't fix anything), and the resource optimization engine producing a
+real `CPU_OVERSIZED`/`MEMORY_OVERSIZED` recommendation from real
+metrics-server samples. Recorded with [asciinema](https://asciinema.org) +
+[agg](https://github.com/asciinema/agg) -- every line is genuine command
+output, not staged. Running `./scripts/demo.sh` yourself (see Quickstart,
+below) reproduces the same kind of session live, including the
+`transient-recovery-demo` Pod opening and then resolving a real incident with
+a measured `recovery_duration_seconds`, with nobody polling for it by hand.
 
-## Status: Milestones 1-11 (troubleshooting) + 12-19 (resource optimization) + scheduling advisor + network troubleshooting engine + capacity planning advisor + security auditor complete -- the full platform spec (Capabilities A-F) -- plus a chaos & resilience evaluation harness and a Kubernetes operator exposing remediation policy declaratively
+## What this is, and how it works
 
-The full **observe -> diagnose -> persist -> expose** pipeline is implemented,
-tested, and verified end-to-end against a real kind cluster for 13 of the 14
-diagnostic categories in the original spec (DNS/connectivity deliberately
-deferred -- see [TODO.md](TODO.md)): CrashLoopBackOff, OOMKilled,
-ImagePullBackOff/ErrImagePull, missing ConfigMap/Secret references, pending-pod
-scheduling constraints, readiness and liveness probe failures, Deployment
-rollout failures, unsatisfied replica counts, PVC binding failures, in-Pod
-volume mount failures, Node unschedulability, and Service/EndpointSlice
-selector mismatches -- plus a transient-failure recovery scenario proving the
-full observe-diagnose-recover loop.
+The platform spec it was built against names six independent capabilities
+(A-F below), plus a chaos/resilience evaluation harness and a Kubernetes
+operator. All eight are built, tested, and live-verified against a real
+cluster -- every claim in this document is backed by a specific file, a
+specific test, or a specific command run against the actual
+`kind-kubesentinel` cluster, which is this project's own standard for itself
+(see [IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md), written so
+every "implemented" claim can be checked against the repository rather than
+taken on faith).
 
-Policy-controlled remediation is also implemented and live-verified: a policy
-engine (OBSERVE/APPROVAL_REQUIRED/CONTROLLED_AUTO modes), a remediation
-executor (restart/rollback/scale a Deployment, plus recommend-only actions), a
-recovery verifier that polls the real cluster rather than trusting an action's
-own reported success, and a full `plan -> approve -> execute -> reject`
-lifecycle exposed over both a token-gated FastAPI surface and an equivalent
-CLI. See [REMEDIATION_SAFETY.md](docs/REMEDIATION_SAFETY.md) for what's
-enforced and how it was verified, and [TODO.md](TODO.md) for the full
-milestone plan and current limitations (nothing yet triggers remediation from
-the live diagnosis pipeline without a human or an explicit policy-engine
-decision in the loop).
+Three design commitments run through every engine, with no exceptions:
 
-A second **resource optimization engine** sits alongside the troubleshooting
-pipeline above, sharing its cluster client, SQLite file, and `/metrics`
-endpoint without duplicating any of it: a workload inventory with correct
-owner-reference resolution (Pod -> ReplicaSet -> Deployment,
-StatefulSet/DaemonSet/Job, or standalone Pod), current usage from the
-Kubernetes Metrics API (with an optional Prometheus upgrade for real
-historical percentiles), and deterministic CPU/memory right-sizing --
-percentile-based for CPU, peak-based for memory, never from a single sample,
-never silently skipping an unhealthy workload (it's flagged instead). An open
-troubleshooting incident on the same workload blocks a proposed number and
-links back to it. Analysis itself never mutates the cluster -- confirmed live
-with an HTTP-transport-level check that an entire `analyze()` pass issues
-nothing but GET requests -- and every recommendation is still a reviewable
-record (`new -> reviewed/approved/rejected -> expired`) before anything
-happens to it. Applying one is a separate, later, explicitly-requested
-closure: a standalone, policy-gated `RemediationAction` (the exact same
-`ActionType`/`PolicyEngine`/`RemediationExecutor`/`RecoveryVerifier`
-machinery the troubleshooting engine's own restart/rollback/scale actions
-already use, generalized to work without an owning incident rather than
-duplicated as a parallel system) that always requires human approval, patches
-only the specific resource keys a recommendation actually proposed via a
-merge PATCH, and is verified against a real rollout the same way a restart
-already is. See [RESOURCE_OPTIMIZATION_DESIGN.md](docs/RESOURCE_OPTIMIZATION_DESIGN.md)
-for the full design (Section 14 for the apply path specifically) and
-TODO.md's Milestones 12-19 for the original build and live-verification
-history.
+1. **Evidence is a first-class object, not a side effect of diagnosis.**
+   Every fact a rule uses is a typed `Evidence` object naming exactly which
+   field of the real Kubernetes API response it came from. A diagnostic rule
+   never reads a raw `V1Pod`/`V1Deployment` object directly -- it only ever
+   sees `list[Evidence]`. This is what makes "distinguish observed facts from
+   inferred hypotheses" an *enforceable* property instead of a design
+   aspiration: a rule that wants to claim something has to point at a
+   specific evidence id, and anything it couldn't verify goes into
+   `missing_evidence` instead of being silently assumed. Confidence is never
+   "proven" -- only `HIGH`/`MEDIUM`/`LOW`, always with a citation.
+2. **Everything that touches the cluster is read-only by default, and
+   explicitly gated when it isn't.** Five of the six engines (B through F)
+   never mutate the cluster at all -- read-only *by construction*, confirmed
+   with a live test that patches the HTTP transport layer itself and asserts
+   an entire analysis pass issues nothing but `GET` requests. The one engine
+   that does act on the cluster (A, troubleshooting) only ever does so
+   through a `plan -> approve -> execute` lifecycle gated by a policy engine
+   (modes: `OBSERVE` / `APPROVAL_REQUIRED` / `CONTROLLED_AUTO`), and nothing
+   in the live diagnosis pipeline *automatically* triggers it -- every
+   remediation is a deliberate human action, or, in `CONTROLLED_AUTO` mode,
+   an explicit policy decision, never an unattended reaction to a diagnosis.
+3. **An action's own reported success is never trusted.** A recovery
+   verifier polls the live cluster *after* every remediation action and
+   checks for the actual symptom's absence, rather than trusting the
+   executor's "it returned 200." The demo above shows this live: a restart
+   genuinely executes, but is correctly reported as `VERIFICATION_FAILED`
+   because the underlying readiness-probe failure was never something a
+   restart could fix -- the system refuses to lie about an outcome it can
+   check.
 
-A third, read-only engine -- the **scheduling & placement advisor** --
-follows the same shared-infrastructure pattern again: given a real Pending
-Pod or a hypothetical spec, it independently reconstructs *why* a Node does
-or doesn't fit, one constraint at a time (real Node allocatable-vs-requested
-arithmetic, real taint/toleration matching, real node-selector/required-
-node-affinity evaluation, real namespace-ResourceQuota checking for a
-hypothetical spec, real required pod affinity/anti-affinity and topology
-spread constraint evaluation against every other already-scheduled Pod's
-labels), rather than only classifying the scheduler's own message text the
-way the troubleshooting engine's `PendingSchedulingRule` already does.
-It's explicit about what it *doesn't* evaluate too -- the preferred half
-of node/pod affinity, and any required pod-affinity/anti-affinity term
-using `namespaceSelector`, are detected and named, never guessed at. See
-[SCHEDULING_ANALYSIS.md](docs/SCHEDULING_ANALYSIS.md) for the design.
-
-A fourth engine -- the **network troubleshooting engine** -- explains a
-real Pod's inbound Service-based connectivity story: which Services
-actually select it (computed independently, not inferred from
-EndpointSlice counts), whether its EndpointSlice output agrees, whether
-each Service's `targetPort` actually resolves against the Pod's declared
-container ports (numeric and named `targetPort`s have genuinely different
-Kubernetes semantics, both implemented precisely), whether cluster DNS
-(CoreDNS/`kube-dns`) looks healthy, and which NetworkPolicies apply --
-always as static policy analysis, never a claim about actually-observed
-blocked traffic (this lab cluster's CNI doesn't enforce NetworkPolicy at
-all). Every finding's reasoning states the same caveat: Kubernetes API
-inspection can describe configuration, never prove a packet actually
-arrives -- which is exactly what the engine's one opt-in, off-by-default
-extra closes: an **active connectivity probe** creates a short-lived,
-auto-cleaned-up Job that performs a real DNS lookup and a real TCP
-connect against a target Service, this project's first mutation
-capability outside the fully policy-gated `RemediationExecutor`, closed
-only after its own dedicated safety review (its own namespace allowlist,
-cooldown, concurrency limit, a fixed shell command that caller input
-never reaches except through typed environment variables, and a Pod
-template that passes this project's own container-security checks by
-construction). See [NETWORK_DIAGNOSTICS.md](docs/NETWORK_DIAGNOSTICS.md)
-for the design.
-
-A fifth capability -- the **capacity planning & autoscaling advisor** --
-is additive work *inside* the resource optimization engine rather than a
-new top-level package, per the spec's own explicit instruction not to
-build a second metrics collector: it reuses the same workload inventory,
-usage-history collection, and safety checks, and ships through the exact
-same `/optimization/recommendations`/`kubesentinel recommendations`
-surfaces under a new `CAPACITY` category. It reads a workload's real
-`HorizontalPodAutoscaler` status (current/desired replicas, every
-metric's current value vs. target, the real `ScalingLimited` condition),
-flags when an HPA's Utilization target is meaningless because the
-container has no corresponding resource request, and runs a coarse,
-explicitly-approximate cluster-headroom check (reusing the scheduling
-advisor's own Node allocatable math) for the specific case of an HPA
-capped at its maximum while still over target. Memory-leak-shaped and
-single-threaded-bottleneck signals are reported as pattern matches over
-the existing usage samples, always labeled as such -- an external
-dependency as a real bottleneck is named as a hard limitation this
-project has no tracing/latency evidence for at all, never silently
-assumed to be the cause. No apply/write path exists here either. See
-[CAPACITY_PLANNING.md](docs/CAPACITY_PLANNING.md) for the design.
-
-A sixth, read-only engine -- the **security & configuration auditor** --
-is a native rule catalog (no kube-linter/Kubescape dependency -- a
-deliberate build-vs-integrate decision, not an oversight) covering
-container security context (privileged, allowPrivilegeEscalation,
-runAsNonRoot, readOnlyRootFilesystem, host namespace sharing, hostPath
-volumes, mutable image tags, Secrets as env vars), RBAC
-over-permissiveness (cluster-admin bindings, wildcard verb+resource
-rules, and a subject's *effective* permissions resolved across every
-Role/ClusterRole binding naming it combined -- all excluding Kubernetes'
-own built-in, unfixable Roles/bindings -- confirmed live that a real
-cluster has *two* such built-in identities, not the one better-known
-one), NetworkPolicy coverage (namespaces with zero policies, policies
-with an unrestricted-allow-all ingress rule, reusing the network
-engine's own classification rather than re-reading NetworkPolicy objects
-a second time), PodDisruptionBudget coverage for multi-replica
-workloads, and CVE/image vulnerability scanning (opt-in, off by
-default: a local Trivy binary scans each unique container image, the
-one check in this engine that shells out to an external scanner rather
-than reading a Kubernetes object directly, since that genuinely needs a
-maintained vulnerability database this project has no intention of
-building). No apply/write path exists here either. See
-[SECURITY_AUDITING.md](docs/SECURITY_AUDITING.md) for the design.
-
-A **chaos & resilience evaluation harness** drives all six engines above
-against the real cluster and measures them: it deletes-then-reapplies a
-lab scenario for a genuine, verified-absent timing baseline, then records
-real time-to-detection/time-to-diagnosis (the push-based troubleshooting
-engine via its own short-lived observer; the five pull-based engines by
-re-triggering `analyze()`/`audit()` each poll), recovery time where a
-scenario defines one, and a whole-battery false-positive rate against
-every currently-open incident/finding that can't be attributed to a
-registered scenario. `kubesentinel evaluate` -- CLI-only, deliberately
-never an HTTP endpoint, since a run mutates the shared lab namespace and
-can take minutes. See [CHAOS_RESILIENCE_LAB.md](docs/CHAOS_RESILIENCE_LAB.md)
-for the design.
-
-A **Kubernetes operator** exposes remediation policy declaratively: one
-CRD, `KubeSentinelRemediationPolicy` (`crds/kubesentinelremediationpolicy.yaml`),
-reconciled by a thin controller (`kubesentinel operator-run`) that never
-decides which remediation action to propose for an incident -- that stays
-entirely human/CLI/API-driven, exactly as before -- and only re-evaluates
-an already-proposed, still-pending action against the policy mode
-(`OBSERVE`/`APPROVAL_REQUIRED`/`CONTROLLED_AUTO`) a CR currently declares
-for its own namespace, auto-approving and executing through the exact
-same `PolicyEngine`/`RemediationService` calls a human would otherwise
-make by hand. No CRD for a namespace means no reconciliation there at
-all. See [OPERATOR_DESIGN.md](docs/OPERATOR_DESIGN.md) for the design.
-
-Every stage above is exported as Prometheus metrics with bounded-cardinality
-labels (category/action_type/reason/component, never incident IDs or pod
-names) at `GET /metrics`. [observability/](observability/) has a scrape config
-and an importable Grafana dashboard, both verified against the real server's
-`/metrics` output -- which is also how a real gauge-accuracy bug
-(`incidents_active` undercounting incidents that predated the current process)
-was caught; see TODO.md's Known limitation #18.
-
-All 9 lab failure scenarios (every diagnostic category this project implements,
-one dedicated manifest each) plus 2 resource-optimization scenarios
-(oversized requests, missing requests entirely) plus 1 scheduling-advisor
-scenario (an impossible nodeSelector) plus 2 network-engine scenarios (a
-Service selector matching no Pod, and a Service matching a real, Ready
-Pod whose `targetPort` name doesn't resolve) plus 1 capacity-advisor
-scenario (a real HPA pinned at its maximum, still over target) plus 1
-security-auditor scenario (a privileged container, an over-permissive
-ClusterRoleBinding, and an unrestricted-ingress NetworkPolicy) are built
-and live-verified -- see [FAILURE_LAB.md](docs/FAILURE_LAB.md). The test suite now includes
-integration and e2e tests that exercise the real cluster directly (RBAC
-boundary enforcement, watch resync, UID-based dedup across a delete/recreate,
-restart recovery, concurrent remediation requests, the full propose/approve/
-execute/verify lifecycle against a real Deployment, the optimization
-engine's own read-only guarantee and real-usage-data right-sizing, the
-scheduling advisor's own independent constraint math reaching the same
-conclusion the real scheduler already did, the network engine's own
-independent selector/port matching reaching the right conclusion against
-real Services/EndpointSlices/CoreDNS, the capacity advisor's own
-HPA-status/scale-headroom reasoning reaching the right conclusion against
-a real HorizontalPodAutoscaler and real Node capacity, and the security
-auditor's own rule catalog reaching the right conclusion against real
-RBAC/NetworkPolicy/container state while correctly never flagging the
-cluster's own built-in RBAC bootstrap identities) --
-`./scripts/test.sh --all` runs all 783 tests (715 unit + 68 integration/e2e);
-see [TESTING.md](docs/TESTING.md).
-
-Optional AI summarization (`kubesentinel explain <incident-id>`, or
-`GET /incidents/{id}/ai-summary`) can turn an incident's existing diagnosis
-into a plain-English explanation -- strictly advisory, never a new hypothesis
-or a remediation decision. The only backend is a local [Ollama](https://ollama.com)
-server: no API key, no cloud account, no per-request cost, genuinely free
-rather than "free tier." Disabled by default; every feature above works fully
-without it. See [RBAC_AND_THREAT_MODEL.md](docs/RBAC_AND_THREAT_MODEL.md) for
-why it has no path back into any decision, and TODO.md's Milestone 11 entry
-for live verification evidence.
+## The platform
 
 ```
 Observer (watch Pods, Events, Deployments,  -->  Evidence extraction  -->  Diagnostic
@@ -240,9 +89,31 @@ PVCs, Nodes, EndpointSlices)                                                engi
                                             SQLite persistence  <-->  FastAPI + CLI + /metrics
 ```
 
-A second, read-only pipeline runs alongside it, sharing only the SQLite file
-and (optionally) the incident manager's own repository for the `ACTIVE_INCIDENT`
-check -- never a second cluster watch loop or a parallel incident concept:
+**Capability A -- Intelligent Troubleshooting & Self-Healing.** Watches
+Pods, Events, Deployments, PVCs, Nodes, and EndpointSlices live and runs 13
+deterministic diagnostic rules over the evidence they produce, covering
+CrashLoopBackOff, OOMKilled (HIGH confidence when the kubelet reports the
+reason directly, MEDIUM and explicitly labeled *inferred* when it only shows
+up as exit code 137), image-pull failures, pending-pod scheduling, Deployment
+rollout failures, readiness/liveness probe failures, Service selector
+mismatches, PVC binding failures, in-Pod volume mount failures, Node
+pressure, and missing ConfigMap/Secret references. (DNS/connectivity
+diagnosis is deliberately not a 14th rule here -- see Capability D.) Incidents
+are deduped by resource UID, not name+namespace, because Kubernetes names get
+reused constantly and UID is the only identifier the API server guarantees is
+unique across an object's entire lifetime; a real recovery is measured end to
+end from the same UID going unhealthy-to-healthy, never guessed. Remediation
+-- restart, rollback, or scale a Deployment -- is a full
+`plan -> approve -> execute -> verify` lifecycle gated by a policy engine
+(mode, namespace/resource allowlists, cooldowns, per-incident and
+per-window budgets) and checked afterward by a recovery verifier that polls
+the live cluster rather than trusting the executor's own report. Exposed
+identically over a token-gated FastAPI surface and an equivalent CLI -- both
+call the same service-layer methods, so there's only ever one implementation
+of the decision logic to audit. See
+[ARCHITECTURE.md](docs/ARCHITECTURE.md),
+[DIAGNOSTIC_RULES.md](docs/DIAGNOSTIC_RULES.md), and
+[REMEDIATION_SAFETY.md](docs/REMEDIATION_SAFETY.md).
 
 ```
 Workload inventory (owner-reference   -->  Metrics API / Prometheus  -->  Deterministic
@@ -254,12 +125,46 @@ Deployment, StatefulSet/DaemonSet/Job)                                     right
                                                       Safety checks (flags unhealthy/system/
                                                       conservative workloads + ACTIVE_INCIDENT,
                                                       never silently drops a row)
-                                                            |
-                                                            v
-                                            SQLite persistence  <-->  FastAPI + CLI + /metrics
 ```
 
-A third pipeline, same shared infrastructure again, no new watch loop:
+**Capability B -- Resource Optimization Engine.** A second, entirely
+**read-only** pipeline sharing only the SQLite file and (optionally) the
+incident repository with Capability A -- never a cluster watch loop or a
+parallel incident concept. Resolves correct owner references
+(Pod -> ReplicaSet -> Deployment, or direct for StatefulSet/DaemonSet/Job, or
+standalone Pod) and right-sizes CPU and memory using deliberately different
+statistics: CPU from a percentile of *typical* demand (default p95) plus a
+safety margin, memory from observed *peak* (default p99), never the average
+-- a transient average is dangerous for a memory limit in a way it isn't for
+a CPU request. Never proposes a number from fewer than a configurable minimum
+sample count and time window; a recorded OOM kill or confirmed CPU throttling
+vetoes any proposed *decrease* but never triggers an automatic *increase*.
+Also computes cluster-level overcommitment (requested-vs-allocatable,
+limits-vs-allocatable, and real current-usage pressure, each a separate,
+never-conflated ratio) and cross-links both directions with Capability A: a
+recommendation carries `ACTIVE_INCIDENT` when an open troubleshooting
+incident exists for the same workload, and an `OOM_KILLED` hypothesis links
+back to any open memory recommendation for it. An apply path exists and
+reuses Capability A's exact policy/execution/verification lifecycle rather
+than duplicating it -- it still always requires explicit human approval and
+patches only the specific resource keys a recommendation actually proposed.
+See [RESOURCE_OPTIMIZATION_DESIGN.md](docs/RESOURCE_OPTIMIZATION_DESIGN.md).
+
+A third capability, **Capacity Planning & Autoscaling Advisor (E)**, extends
+this same pipeline -- additive work inside the resource optimization engine
+rather than a new top-level package, since the platform spec explicitly asks
+not to build a second metrics collector. It reads a workload's real
+`HorizontalPodAutoscaler` status (current/desired replicas, every metric's
+current value vs. target, the real `ScalingLimited` condition), flags when
+an HPA's utilization target is meaningless because the container has no
+corresponding resource request, and runs a coarse, explicitly-approximate
+cluster-headroom check for the specific case of an HPA capped at its maximum
+while still over target. Memory-leak-shaped and single-threaded-bottleneck
+signals are reported as pattern matches over existing usage samples, always
+labeled as such; an external dependency as the real bottleneck is named as a
+hard limitation this project has no tracing/latency evidence for at all,
+never silently assumed. No apply/write path exists here either. See
+[CAPACITY_PLANNING.md](docs/CAPACITY_PLANNING.md).
 
 ```
 Node inventory (allocatable,          -->  Per-constraint evaluators    -->  Finding: per-node,
@@ -268,13 +173,22 @@ hypothetical Pod spec                     node selector, required          pass/
                                            affinity, namespace quota)       arithmetic in the
                                                                             reasoning -- plus what
                                                                             wasn't evaluated
-                                                            |
-                                                            v
-                                            SQLite persistence  <-->  FastAPI + CLI + /metrics
 ```
 
-A fourth pipeline, same shared infrastructure again, one new read-only client
-(`NetworkingV1Api`):
+**Capability C -- Kubernetes Scheduling & Placement Advisor.** Given a real
+Pending Pod or a hypothetical spec, independently reconstructs *why* a Node
+does or doesn't fit, one constraint at a time: real Node allocatable-vs-
+requested arithmetic (including the real scheduler algorithm for init
+containers and Kubernetes-native sidecars), real taint/toleration matching,
+real required node-affinity and node-selector evaluation, real required pod
+affinity/anti-affinity and topology-spread evaluation against every other
+already-scheduled Pod's labels, and real namespace-ResourceQuota/LimitRange
+checking for a hypothetical spec. It's explicit about what it *doesn't*
+evaluate too -- the preferred half of node/pod affinity, and any required
+pod-affinity term using `namespaceSelector` -- detected and named, never
+guessed at. A read-only `POST /scheduling/simulate` endpoint analyzes a raw
+Pod spec with zero mutation; no Pod is ever actually created. See
+[SCHEDULING_ANALYSIS.md](docs/SCHEDULING_ANALYSIS.md).
 
 ```
 Service/Pod/EndpointSlice       -->  Independent selector/port       -->  Finding: classification
@@ -282,39 +196,113 @@ inventory + NetworkPolicy            matching, EndpointSlice             (health
 inventory + CoreDNS/kube-dns         consistency check, DNS             unready-endpoints/
 health (read-only, kube-system       health, applicable                 dns-unhealthy/policy-
 RBAC-scoped to those two names)      NetworkPolicy summaries            may-restrict/inconclusive)
-                                                            |
-                                                            v
-                                            SQLite persistence  <-->  FastAPI + CLI + /metrics
 ```
 
-A fifth capability extends the *second* pipeline above (resource
-optimization) rather than adding a new one -- one new read-only client
-(`AutoscalingV2Api`), zero new persistence or routes:
+**Capability D -- Kubernetes Network Troubleshooting Engine.** Explains a
+real Pod's inbound Service-based connectivity story: which Services actually
+select it (computed independently from live Pod labels, not inferred from
+EndpointSlice counts), whether its EndpointSlice output agrees, whether each
+Service's `targetPort` actually resolves against the Pod's declared
+container ports (numeric and named `targetPort`s have genuinely different
+semantics, both implemented precisely), whether cluster DNS looks healthy
+(a real, live read of CoreDNS/`kube-dns`, through a narrowly scoped RBAC
+exception), and which NetworkPolicies apply -- always as static policy
+analysis, never a claim about actually-observed blocked traffic (this
+project's lab cluster uses kind's default CNI, which doesn't enforce
+NetworkPolicy at all, so the strongest classification is `POLICY_MAY_RESTRICT`,
+never "X is actually blocked"). Every finding's reasoning states the same
+caveat: API inspection can describe configuration, never prove a packet
+actually arrives -- which is exactly what the engine's one opt-in,
+off-by-default extra closes: an **active connectivity probe** creates a
+short-lived, auto-cleaned-up Job that performs a real DNS lookup and a real
+TCP connect against a target Service. This is the project's first mutation
+capability outside the fully policy-gated remediation executor, closed only
+after its own dedicated safety review (its own namespace allowlist, cooldown,
+concurrency limit, a fixed shell command caller input never reaches except
+through typed environment variables, and a Pod template that passes this
+project's own container-security checks by construction). See
+[NETWORK_DIAGNOSTICS.md](docs/NETWORK_DIAGNOSTICS.md).
 
 ```
-Workload inventory (reused)   -->  HPA status (reused scheduling    -->  CAPACITY finding:
-+ real HPA status                  Node math for scale headroom)        HPA_AT_MAX/_AT_MIN,
-                                    + trend/pattern checks over            missing-request,
-                                    the existing sample window             leak/bottleneck patterns
-                                                            |
-                                                            v
-                        Same ResourceRecommendation row  <-->  Same FastAPI/CLI/`/metrics` surfaces
-```
-
-A sixth pipeline, same shared infrastructure again, two new read-only
-clients (`RbacAuthorizationV1Api`, `PolicyV1Api`) -- the full A-F
-capability list from the platform spec is now complete:
-
-```
-Pod/RBAC/NetworkPolicy/PDB   -->  14 native rules (container        -->  SecurityFinding(s):
+Pod/RBAC/NetworkPolicy/PDB   -->  Native rule catalog (container     -->  SecurityFinding(s):
 inventory (one-shot,              security context, RBAC                severity, evidence,
 Pods grouped by owning            over-permissiveness, NetworkPolicy     explanation, remediation
 workload, reused owner             coverage, PDB coverage) --
-resolution)                        no external scanner dependency
-                                                            |
-                                                            v
-                                            SQLite persistence  <-->  FastAPI + CLI + /metrics
+resolution)                       no external scanner dependency
 ```
+
+**Capability F -- Kubernetes Security & Configuration Auditor.** A native
+rule catalog (no kube-linter/Kubescape dependency -- a deliberate
+build-vs-integrate decision, consistent with every other engine being a
+native, in-repo rule engine) covering container security context
+(privileged, allowPrivilegeEscalation, runAsNonRoot, readOnlyRootFilesystem,
+host namespace sharing, hostPath volumes, mutable image tags, Secrets as env
+vars), RBAC over-permissiveness (cluster-admin bindings, wildcard
+verb+resource rules, and a subject's *effective* permissions resolved across
+every Role/ClusterRole binding naming it combined -- all excluding
+Kubernetes' own built-in, unfixable bootstrap identities, confirmed live that
+a real cluster has *two* such identities, not just the one better-known
+one), NetworkPolicy coverage (reusing the network engine's own
+classification rather than re-reading NetworkPolicy objects a second time),
+PodDisruptionBudget coverage for multi-replica workloads, Pod Security
+Admission namespace labeling, and opt-in CVE/image vulnerability scanning (a
+local Trivy binary scans each unique container image -- the one check in
+this engine that shells out to an external scanner rather than reading a
+Kubernetes object directly, since that genuinely needs a maintained
+vulnerability database this project has no intention of building). No
+apply/write path exists here either. See
+[SECURITY_AUDITING.md](docs/SECURITY_AUDITING.md).
+
+A **chaos & resilience evaluation harness** drives all six engines above
+against the real cluster and measures them: it deletes-then-reapplies a lab
+scenario for a genuine, verified-absent timing baseline, then records real
+time-to-detection/time-to-diagnosis (the push-based troubleshooting engine
+via its own short-lived observer; the five pull-based engines by
+re-triggering analysis each poll), recovery time where a scenario defines
+one, and a whole-battery false-positive rate against every currently-open
+incident/finding that can't be attributed to a registered scenario.
+`kubesentinel evaluate` is CLI-only, deliberately never an HTTP endpoint,
+since a run mutates the shared lab namespace and can take minutes. See
+[CHAOS_RESILIENCE_LAB.md](docs/CHAOS_RESILIENCE_LAB.md).
+
+A **Kubernetes operator** exposes remediation policy declaratively: one CRD,
+`KubeSentinelRemediationPolicy` (`crds/kubesentinelremediationpolicy.yaml`),
+reconciled by a thin controller (`kubesentinel operator-run`) that never
+decides which remediation action to propose for an incident -- that stays
+entirely human/CLI/API-driven, exactly as in Capability A -- and only
+re-evaluates an already-proposed, still-pending action against the policy
+mode (`OBSERVE`/`APPROVAL_REQUIRED`/`CONTROLLED_AUTO`) a CR currently declares
+for its own namespace, auto-approving and executing through the exact same
+policy/execution calls a human would otherwise make by hand. No CRD for a
+namespace means no reconciliation there at all. See
+[OPERATOR_DESIGN.md](docs/OPERATOR_DESIGN.md).
+
+Every stage above is exported as Prometheus metrics with bounded-cardinality
+labels (category/action_type/reason/component, never incident IDs or Pod
+names) at `GET /metrics`. [observability/](observability/) has a scrape
+config and an importable Grafana dashboard, both verified against the real
+server's own `/metrics` output. Optional AI summarization
+(`kubesentinel explain <incident-id>`, or `GET /incidents/{id}/ai-summary`)
+can turn an incident's existing diagnosis into a plain-English explanation --
+strictly advisory, never a new hypothesis or a remediation decision. The only
+backend is a local [Ollama](https://ollama.com) server: no API key, no cloud
+account, no per-request cost, genuinely free rather than "free tier."
+Disabled by default; every feature above works fully without it. See
+[RBAC_AND_THREAT_MODEL.md](docs/RBAC_AND_THREAT_MODEL.md) for why it has no
+path back into any decision.
+
+16 lab failure scenarios exist, one dedicated manifest each, across every
+capability (see [FAILURE_LAB.md](docs/FAILURE_LAB.md)). The test suite
+includes integration and e2e tests that exercise the real cluster directly
+(RBAC boundary enforcement against a real non-admin ServiceAccount token,
+watch resync against a live API server, UID-based dedup across a real
+delete/recreate, restart recovery, 10 real concurrent threads racing a
+remediation proposal on the same incident, the full
+propose/approve/execute/verify lifecycle against a real Deployment, and each
+read-only engine's own independent math reaching the same conclusion the real
+cluster/scheduler/DNS/HPA already reached) -- `./scripts/test.sh --all` runs
+the full suite (1,072 unit tests plus 76 integration/e2e tests, `ruff check`
+and `mypy` both clean); see [TESTING.md](docs/TESTING.md).
 
 ## Quickstart
 
@@ -325,7 +313,7 @@ Prerequisites: Docker (or Colima), [kind](https://kind.sigs.k8s.io/), kubectl, P
 ./scripts/setup.sh           # create .venv, install kubesentinel + dev deps, write .env
 ./lab/create-cluster.sh      # create the local kind cluster + kubesentinel-lab namespace
 ./scripts/test.sh            # ruff + mypy + unit tests (no cluster required)
-./scripts/demo.sh            # apply failure scenarios and run the API server live
+./scripts/demo.sh            # start the API server, then apply failure scenarios
 ```
 
 In a second terminal, while `./scripts/demo.sh` is running:
@@ -473,20 +461,22 @@ already cached locally. This bit us directly while building the lab scenarios; s
 ```
 src/kubesentinel/
   models/        Pydantic models: Evidence, Hypothesis, DiagnosisResult, Incident, Action,
-                 and the optimization engine's WorkloadSnapshot/ResourceRecommendation
+                 and every other engine's own models (WorkloadSnapshot/ResourceRecommendation,
+                 SchedulingFinding, NetworkFinding, SecurityFinding, ...)
   observer/      Kubernetes client setup, watch loops with reconnect/resync, evidence extraction
   diagnostics/   Deterministic rule-based diagnostic engine + individual rules
   incidents/     Incident lifecycle: dedup by resource UID, health classification, severity
   optimization/  Read-only resource right-sizing: inventory, metrics providers, analyzer, safety,
-                 and capacity.py (HPA status/scale-headroom reasoning, Milestone 5)
+                 cluster overcommitment, and capacity.py (HPA status/scale-headroom reasoning)
   scheduling/    Read-only placement analysis: node inventory, per-constraint evaluators, analyzer
-  network/       Read-only connectivity analysis: service/policy inventory, DNS health, analyzer
-  security/      Read-only security/config auditing: inventory, 14 native rules, engine, service
+  network/       Read-only connectivity analysis: service/policy inventory, DNS health, analyzer,
+                 and the opt-in active connectivity probe
+  security/      Read-only security/config auditing: inventory, native rule catalog, engine
   evaluation/    Chaos & resilience evaluation harness: scenario registry + the harness itself
                  (drives all six engines above against the real cluster and measures them)
   operator/      Kubernetes operator: reconciles KubeSentinelRemediationPolicy CRs, never
                  decides which action to propose -- only auto-approves/executes one already
-                 proposed, through the exact same PolicyEngine/RemediationService calls
+                 proposed, through the exact same policy/execution calls a human would make
   persistence/   Repository interfaces + SQLite implementations (incidents, optimization,
                  scheduling, network, security, evaluation)
   api/           FastAPI app (health/ready/incidents/evidence/actions/metrics/optimization/
@@ -503,33 +493,31 @@ lab/             kind cluster config, namespace, failure scenario manifests, scr
                  optional metrics-server installer
 crds/            The one CustomResourceDefinition the operator reconciles
                  (KubeSentinelRemediationPolicy)
-rbac/            Least-privilege Role/RoleBinding/ServiceAccount for what's implemented today
+rbac/            Least-privilege Role/RoleBinding/ServiceAccount for everything implemented
                  (observer, remediator, optimizer, scheduling-advisor, network-advisor,
-                 capacity-advisor, security-advisor, and operator Roles -- network-advisor's
-                 own one narrow, documented kube-system exception for CoreDNS/kube-dns
-                 health, security-advisor's own cluster-scoped ClusterRole for ClusterRole/
-                 ClusterRoleBinding reads, and the operator's own Role reusing the existing
-                 remediator Role's mutation grant unchanged -- each independently auditable)
+                 capacity-advisor, security-advisor, and operator Roles -- each a separate,
+                 independently auditable file, with narrow documented cluster-scope exceptions
+                 only where a capability genuinely needs one)
 observability/   Prometheus scrape config + importable Grafana dashboard
-tests/unit/      Deterministic unit tests, no cluster required
-docs/            Architecture, diagnostic rules, RBAC/threat model, failure lab, resource
-                 optimization design, etc.
+tests/           unit/ (deterministic, no cluster required), integration/ and e2e/ (against
+                 a real kind cluster, skip-safe on missing preconditions)
+docs/            Architecture, diagnostic rules, RBAC/threat model, failure lab, every engine's
+                 own design doc, testing strategy, demo script, and the full build history
 ```
 
 ## Documentation
 
-- [MASTER_ARCHITECTURE.md](docs/MASTER_ARCHITECTURE.md) -- the platform-wide shape every analysis engine follows, built or planned
-- [PLATFORM_ROADMAP.md](docs/PLATFORM_ROADMAP.md) -- milestone plan: all six platform-spec capabilities (A-F), the evaluation harness, and the operator now done -- everything except Milestone 9 itself
+- [MASTER_ARCHITECTURE.md](docs/MASTER_ARCHITECTURE.md) -- the platform-wide shape every analysis engine follows
 - [IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md) -- evidence-backed, capability-by-capability status audit
 - [ARCHITECTURE.md](docs/ARCHITECTURE.md) -- component design and data flow for the troubleshooting and resource-optimization engines
-- [RESOURCE_OPTIMIZATION_DESIGN.md](docs/RESOURCE_OPTIMIZATION_DESIGN.md) -- the resource optimization engine's own design, algorithms, and milestone plan
+- [RESOURCE_OPTIMIZATION_DESIGN.md](docs/RESOURCE_OPTIMIZATION_DESIGN.md) -- the resource optimization engine's own design and algorithms
 - [SCHEDULING_ANALYSIS.md](docs/SCHEDULING_ANALYSIS.md) -- the scheduling advisor's own design: what's evaluated for real vs. only detected
 - [NETWORK_DIAGNOSTICS.md](docs/NETWORK_DIAGNOSTICS.md) -- the network troubleshooting engine's own design: evidence chain, scope split, what's deliberately deferred
 - [CAPACITY_PLANNING.md](docs/CAPACITY_PLANNING.md) -- the capacity planning & autoscaling advisor's own design: HPA status, scale headroom, what's a pattern match vs. a diagnosis
-- [SECURITY_AUDITING.md](docs/SECURITY_AUDITING.md) -- the security & configuration auditor's own design: the 15-rule catalog, the build-vs-integrate decision, what's deliberately deferred
+- [SECURITY_AUDITING.md](docs/SECURITY_AUDITING.md) -- the security & configuration auditor's own design: the rule catalog, the build-vs-integrate decision, what's deliberately deferred
 - [CHAOS_RESILIENCE_LAB.md](docs/CHAOS_RESILIENCE_LAB.md) -- the evaluation harness's own design: ground truth, push-vs-pull timing, recovery/false-positive scope
 - [OPERATOR_DESIGN.md](docs/OPERATOR_DESIGN.md) -- the Kubernetes operator's own design: why one CRD, what the controller deliberately never decides, reconciliation step by step
-- [EVIDENCE_COMPLETENESS.md](docs/EVIDENCE_COMPLETENESS.md) -- the shared `EvidenceCompleteness` vocabulary across capabilities: the decision, what it touches, what it deliberately doesn't
+- [EVIDENCE_COMPLETENESS.md](docs/EVIDENCE_COMPLETENESS.md) -- the shared `EvidenceCompleteness` vocabulary across capabilities
 - [DIAGNOSTIC_RULES.md](docs/DIAGNOSTIC_RULES.md) -- every rule, its evidence, and its confidence logic
 - [FAILURE_LAB.md](docs/FAILURE_LAB.md) -- each lab scenario: how it fails, what's expected, how to clean up
 - [RBAC_AND_THREAT_MODEL.md](docs/RBAC_AND_THREAT_MODEL.md) -- least privilege, trust boundaries
@@ -539,7 +527,7 @@ docs/            Architecture, diagnostic rules, RBAC/threat model, failure lab,
 - [TESTING.md](docs/TESTING.md) -- test strategy and what's actually covered
 - [TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) -- environment issues hit while building this, and fixes
 - [DEMO_SCRIPT.md](docs/DEMO_SCRIPT.md) -- a guided walkthrough for showing this off
-- [TODO.md](TODO.md) -- milestone plan, verified completion status, known limitations
+- [TODO.md](TODO.md) -- the full build history, verified completion status, known limitations
 
 ## License
 
